@@ -1,0 +1,100 @@
+{
+  "name": "@classytic/media-kit",
+  "version": "1.0.0",
+  "description": "Production-grade media management for Mongoose with pluggable storage providers",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./providers/s3": {
+      "types": "./dist/providers/s3.provider.d.ts",
+      "import": "./dist/providers/s3.provider.mjs",
+      "require": "./dist/providers/s3.provider.js"
+    },
+    "./providers/gcs": {
+      "types": "./dist/providers/gcs.provider.d.ts",
+      "import": "./dist/providers/gcs.provider.mjs",
+      "require": "./dist/providers/gcs.provider.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts src/providers/s3.provider.ts src/providers/gcs.provider.ts --format cjs,esm --dts --clean",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm run test && npm run typecheck",
+    "publish:dry": "npm publish --dry-run --access public",
+    "publish:npm": "npm publish --access public",
+    "release": "npm run build && npm run test && npm run typecheck && npm publish --access public",
+    "release:patch": "npm version patch && npm run release",
+    "release:minor": "npm version minor && npm run release",
+    "release:major": "npm version major && npm run release"
+  },
+  "keywords": [
+    "media",
+    "mongoose",
+    "s3",
+    "gcs",
+    "image-upload",
+    "file-management",
+    "mongodb",
+    "storage",
+    "multitenancy"
+  ],
+  "author": "Classytic",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/classytic/media-kit"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@classytic/mongokit": "^1.0.0",
+    "@google-cloud/storage": "^7.0.0",
+    "mongoose": "^8.0.0 || ^9.0.0",
+    "sharp": "^0.33.0"
+  },
+  "peerDependenciesMeta": {
+    "@classytic/mongokit": {
+      "optional": true
+    },
+    "sharp": {
+      "optional": true
+    },
+    "@aws-sdk/client-s3": {
+      "optional": true
+    },
+    "@google-cloud/storage": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "mime-types": "^2.1.35"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-s3": "^3.943.0",
+    "@aws-sdk/s3-request-presigner": "^3.943.0",
+    "@classytic/mongokit": "^2.0.0",
+    "@google-cloud/storage": "^7.18.0",
+    "@types/mime-types": "^2.1.4",
+    "@types/node": "^20.0.0",
+    "mongoose": "^9.0.1",
+    "sharp": "^0.34.5",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

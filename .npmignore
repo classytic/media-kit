@@ -1,0 +1,60 @@
+# Source files (only ship dist/)
+src/
+
+# Test files
+*.test.js
+*.test.ts
+*.spec.js
+*.spec.ts
+test/
+tests/
+__tests__/
+**/__tests__/
+vitest.config.ts
+coverage/
+
+# Documentation (GitHub only)
+docs/
+examples/
+*.md
+!README.md
+ENHANCEMENTS.md
+
+# Development files
+.github/
+.vscode/
+.idea/
+.editorconfig
+.eslintrc*
+.prettierrc*
+*.log
+.DS_Store
+.env
+.env.*
+tsconfig.json
+jsconfig.json
+*.swp
+*.swo
+*~
+
+# Source control
+.git
+.gitignore
+.gitattributes
+
+# Build/CI artifacts
+*.tgz
+node_modules/
+coverage/
+.nyc_output/
+dist/
+build/
+.npmrc
+
+# OS files
+Thumbs.db
+
+# Package manager lock files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
