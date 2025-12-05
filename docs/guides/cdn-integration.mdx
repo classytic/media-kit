@@ -1,0 +1,262 @@
+# CDN Integration
+
+Serve your media files through a CDN for better performance.
+
+## How It Works
+
+All storage providers support a `publicUrl` option that replaces the default storage URL with your CDN URL.
+
+## AWS S3 + CloudFront
+
+### 1. Create CloudFront Distribution
+
+```bash
+# In AWS Console:
+# 1. Create CloudFront distribution
+# 2. Set origin to your S3 bucket
+# 3. Copy the distribution URL (e.g., d111111abcdef8.cloudfront.net)
+```
+
+### 2. Configure Provider
+
+```typescript
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+
+const provider = new S3Provider({
+  bucket: 'my-uploads',
+  region: 'us-east-1',
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  },
+  // CDN URL instead of direct S3
+  publicUrl: 'https://d111111abcdef8.cloudfront.net',
+});
+```
+
+### Result
+
+Files are uploaded to S3 but URLs use CloudFront:
+
+```typescript
+const file = await media.upload({...});
+
+// Without CDN: https://my-bucket.s3.amazonaws.com/uploads/photo.jpg
+// With CDN:    https://d111111abcdef8.cloudfront.net/uploads/photo.jpg
+console.log(file.url);
+```
+
+## Google Cloud Storage + CDN
+
+### 1. Enable Cloud CDN
+
+```bash
+# In GCP Console:
+# 1. Create Cloud CDN
+# 2. Set origin to your GCS bucket
+# 3. Get the CDN URL
+```
+
+### 2. Configure Provider
+
+```typescript
+import { GCSProvider } from '@classytic/media-kit/providers/gcs';
+
+const provider = new GCSProvider({
+  bucket: 'my-uploads',
+  keyFilename: './service-account.json',
+  // CDN URL
+  publicUrl: 'https://cdn.example.com',
+});
+```
+
+## Custom Domain
+
+Map your own domain to the CDN:
+
+### 1. DNS Setup
+
+```
+CNAME cdn.yourdomain.com → d111111abcdef8.cloudfront.net
+```
+
+### 2. Configure Provider
+
+```typescript
+const provider = new S3Provider({
+  bucket: 'my-uploads',
+  region: 'us-east-1',
+  // Your custom domain
+  publicUrl: 'https://cdn.yourdomain.com',
+});
+```
+
+### 3. SSL Certificate
+
+Add SSL certificate in CloudFront for custom domain.
+
+## Third-Party CDN (Cloudflare, Fastly, etc.)
+
+### Cloudflare Example
+
+```typescript
+// 1. Point Cloudflare to your S3 bucket
+// 2. Enable caching rules
+// 3. Use Cloudflare URL
+
+const provider = new S3Provider({
+  bucket: 'my-uploads',
+  region: 'us-east-1',
+  publicUrl: 'https://cdn.example.com', // Cloudflare proxied domain
+});
+```
+
+## Local Storage + CDN
+
+Even local storage can use a CDN:
+
+```typescript
+const provider = new LocalStorageProvider({
+  uploadDir: '/var/www/uploads',
+  // CDN URL instead of direct server URL
+  publicUrl: 'https://cdn.example.com',
+});
+
+// Configure your CDN to pull from:
+// https://yourserver.com/uploads/*
+```
+
+## Image Optimization CDN
+
+Use services like Cloudinary, imgix, or ImageKit:
+
+```typescript
+const provider = new S3Provider({
+  bucket: 'my-uploads',
+  region: 'us-east-1',
+  publicUrl: 'https://res.cloudinary.com/your-cloud/image/upload',
+});
+
+// Or create a custom provider
+class CloudinaryProvider implements StorageProvider {
+  // Upload to Cloudinary and return CDN URL
+}
+```
+
+## Cache Control Headers
+
+Set cache headers when uploading:
+
+```typescript
+// S3Provider automatically sets cache headers
+const provider = new S3Provider({
+  bucket: 'my-uploads',
+  region: 'us-east-1',
+  publicUrl: 'https://cdn.example.com',
+  // Files are uploaded with cache-friendly headers
+});
+```
+
+## Environment-Based CDN
+
+Different CDNs for different environments:
+
+```typescript
+const getCDNUrl = () => {
+  if (process.env.NODE_ENV === 'production') {
+    return 'https://cdn.production.com';
+  }
+  if (process.env.NODE_ENV === 'staging') {
+    return 'https://cdn.staging.com';
+  }
+  return 'http://localhost:3000/uploads'; // Development
+};
+
+const provider = new S3Provider({
+  bucket: process.env.S3_BUCKET,
+  region: process.env.S3_REGION,
+  publicUrl: getCDNUrl(),
+});
+```
+
+## Signed URLs with CDN
+
+CloudFront signed URLs for private content:
+
+```typescript
+import { getSignedUrl } from '@aws-sdk/cloudfront-signer';
+
+const provider = new S3Provider({
+  bucket: 'private-uploads',
+  region: 'us-east-1',
+  publicUrl: 'https://d111111abcdef8.cloudfront.net',
+});
+
+// After upload, create signed URL
+const file = await media.upload({...});
+
+const signedUrl = getSignedUrl({
+  url: file.url,
+  keyPairId: process.env.CLOUDFRONT_KEY_PAIR_ID,
+  privateKey: process.env.CLOUDFRONT_PRIVATE_KEY,
+  dateLessThan: new Date(Date.now() + 3600000), // 1 hour
+});
+```
+
+## Complete Example
+
+Production setup with CloudFront:
+
+```typescript
+import { createMedia } from '@classytic/media-kit';
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+
+const media = createMedia({
+  provider: new S3Provider({
+    bucket: process.env.S3_BUCKET,
+    region: 'us-east-1',
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    },
+    // CloudFront CDN
+    publicUrl: 'https://d111111abcdef8.cloudfront.net',
+  }),
+
+  processing: {
+    enabled: true,
+    format: 'webp',
+    quality: 85,
+    sizes: [
+      { name: 'thumb', width: 200 },
+      { name: 'medium', width: 800 },
+      { name: 'large', width: 1600 },
+    ],
+  },
+});
+
+// Upload
+const file = await media.upload({
+  buffer: imageBuffer,
+  filename: 'product.jpg',
+  mimeType: 'image/jpeg',
+});
+
+// All URLs use CloudFront
+console.log(file.url);                          // CloudFront URL
+console.log(file.variants[0].url);              // CloudFront URL
+console.log(file.variants.find(v => v.name === 'thumb')?.url); // CloudFront URL
+```
+
+## Benefits
+
+✅ **Faster delivery** - Content served from edge locations
+✅ **Reduced costs** - Less bandwidth from origin
+✅ **Better performance** - Lower latency worldwide
+✅ **DDoS protection** - CDN handles traffic spikes
+✅ **Easy setup** - Just change `publicUrl`
+
+## Next Steps
+
+- [Storage Providers](./storage-providers.mdx) - Provider configuration
+- [Image Processing](./image-processing.mdx) - Optimize for CDN delivery
