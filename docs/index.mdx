@@ -1,0 +1,47 @@
+# Media Kit Documentation
+
+Production-grade media management for Mongoose applications.
+
+## What is Media Kit?
+
+A lightweight, powerful library for managing file uploads in Node.js with Mongoose. Think WordPress media library, but cleaner and more flexible.
+
+## Key Features
+
+- **Multiple Storage Options** - Local, S3, Google Cloud Storage
+- **Auto Image Processing** - Generate thumbnails, resize, optimize
+- **Multi-tenant Ready** - Organize by organization/tenant
+- **Alt Text Generation** - Automatic accessibility support
+- **Event System** - Hook into upload, delete, and more
+- **Zero Config** - Works out of the box, customize when needed
+
+## Quick Example
+
+```typescript
+import { createMedia } from '@classytic/media-kit';
+
+const media = createMedia({
+  provider: new LocalStorageProvider(),
+});
+
+// Upload a file
+const file = await media.upload({
+  buffer: fileBuffer,
+  filename: 'photo.jpg',
+  mimeType: 'image/jpeg',
+});
+
+console.log(file.url); // https://cdn.example.com/uploads/photo.jpg
+```
+
+## Documentation
+
+- [Getting Started](./getting-started/installation.mdx) - Install and setup
+- [Guides](./guides/uploading-files.mdx) - Common tasks
+- [API Reference](./api/media-kit.mdx) - Full API docs
+- [Examples](./examples/basic-upload.mdx) - Copy-paste examples
+
+## Need Help?
+
+- [GitHub Issues](https://github.com/classytic/media-kit/issues)
+- [Examples Directory](../examples/)

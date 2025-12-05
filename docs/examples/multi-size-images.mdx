@@ -1,0 +1,149 @@
+# Multi-Size Images Example
+
+Generate multiple image sizes automatically.
+
+## Setup
+
+```bash
+npm install @classytic/media-kit mongoose sharp @aws-sdk/client-s3
+```
+
+## Code
+
+```typescript
+import { createMedia } from '@classytic/media-kit';
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+import mongoose from 'mongoose';
+
+await mongoose.connect('mongodb://localhost:27017/myapp');
+
+// Configure with multi-size generation
+const media = createMedia({
+  provider: new S3Provider({
+    bucket: 'my-uploads',
+    region: 'us-east-1',
+  }),
+
+  processing: {
+    enabled: true,
+    quality: 85,
+    format: 'webp',
+    generateAlt: true,
+
+    // Generate multiple sizes
+    sizes: [
+      {
+        name: 'thumbnail',
+        width: 200,
+        height: 200,
+        quality: 75,
+        aspectRatio: { aspectRatio: 1, fit: 'cover' },
+      },
+      {
+        name: 'small',
+        width: 480,
+        quality: 80,
+      },
+      {
+        name: 'medium',
+        width: 800,
+        quality: 85,
+      },
+      {
+        name: 'large',
+        width: 1600,
+        quality: 90,
+      },
+    ],
+  },
+});
+
+const Media = mongoose.model('Media', media.schema);
+media.init(Media);
+
+// Upload image
+const file = await media.upload({
+  buffer: imageBuffer,
+  filename: 'product-photo.jpg',
+  mimeType: 'image/jpeg',
+  title: 'Product Photo',
+});
+
+console.log('Original:', file.url);
+console.log('Variants:', file.variants);
+
+// Access specific sizes
+const thumbnail = file.variants.find(v => v.name === 'thumbnail');
+const medium = file.variants.find(v => v.name === 'medium');
+const large = file.variants.find(v => v.name === 'large');
+
+console.log('Thumbnail:', thumbnail.url);
+console.log('Medium:', medium.url);
+console.log('Large:', large.url);
+```
+
+## React Component
+
+Use variants in responsive images:
+
+```typescript
+interface ProductImageProps {
+  file: IMediaDocument;
+}
+
+export function ProductImage({ file }: ProductImageProps) {
+  const thumbnail = file.variants.find(v => v.name === 'thumbnail');
+  const medium = file.variants.find(v => v.name === 'medium');
+  const large = file.variants.find(v => v.name === 'large');
+
+  return (
+    <picture>
+      <source
+        media="(min-width: 1024px)"
+        srcSet={large?.url}
+      />
+      <source
+        media="(min-width: 768px)"
+        srcSet={medium?.url}
+      />
+      <img
+        src={thumbnail?.url}
+        alt={file.alt || file.title}
+        width={thumbnail?.width}
+        height={thumbnail?.height}
+        loading="lazy"
+      />
+    </picture>
+  );
+}
+```
+
+## API Response
+
+Return variants in API:
+
+```typescript
+app.post('/upload', upload.single('file'), async (req, res) => {
+  const file = await media.upload({
+    buffer: req.file.buffer,
+    filename: req.file.originalname,
+    mimeType: req.file.mimetype,
+  });
+
+  res.json({
+    id: file._id,
+    url: file.url,
+    variants: file.variants.map(v => ({
+      name: v.name,
+      url: v.url,
+      width: v.width,
+      height: v.height,
+    })),
+  });
+});
+```
+
+## Next Steps
+
+- [Custom Provider](./custom-provider.mdx) - Create your own storage
+- [Image Processing Guide](../guides/image-processing.mdx) - More details

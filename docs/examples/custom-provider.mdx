@@ -1,0 +1,172 @@
+# Custom Provider Example
+
+Create your own storage provider.
+
+## Example: Cloudflare R2 Provider
+
+```typescript
+import { StorageProvider, UploadResult, UploadOptions } from '@classytic/media-kit';
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+
+export class R2Provider implements StorageProvider {
+  readonly name = 'r2';
+  private client: S3Client;
+  private bucket: string;
+  private publicUrl: string;
+
+  constructor(config: {
+    accountId: string;
+    accessKeyId: string;
+    secretAccessKey: string;
+    bucket: string;
+    publicUrl: string;
+  }) {
+    this.bucket = config.bucket;
+    this.publicUrl = config.publicUrl;
+
+    this.client = new S3Client({
+      region: 'auto',
+      endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: config.accessKeyId,
+        secretAccessKey: config.secretAccessKey,
+      },
+    });
+  }
+
+  async upload(
+    buffer: Buffer,
+    filename: string,
+    options?: UploadOptions
+  ): Promise<UploadResult> {
+    const key = options?.folder
+      ? `${options.folder}/${filename}`
+      : filename;
+
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: buffer,
+        ContentType: options?.contentType,
+      })
+    );
+
+    return {
+      url: `${this.publicUrl}/${key}`,
+      key,
+      size: buffer.length,
+      mimeType: options?.contentType || 'application/octet-stream',
+    };
+  }
+
+  async delete(key: string): Promise<boolean> {
+    try {
+      await this.client.send(
+        new DeleteObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+        })
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async exists(key: string): Promise<boolean> {
+    // Implementation omitted for brevity
+    return true;
+  }
+}
+```
+
+## Usage
+
+```typescript
+import { createMedia } from '@classytic/media-kit';
+import { R2Provider } from './providers/r2.provider';
+
+const media = createMedia({
+  provider: new R2Provider({
+    accountId: process.env.R2_ACCOUNT_ID,
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+    bucket: 'my-uploads',
+    publicUrl: 'https://pub-xxx.r2.dev',
+  }),
+});
+
+const file = await media.upload({
+  buffer: fileBuffer,
+  filename: 'photo.jpg',
+  mimeType: 'image/jpeg',
+});
+
+console.log(file.url);  // https://pub-xxx.r2.dev/photo.jpg
+```
+
+## Example: DigitalOcean Spaces Provider
+
+```typescript
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+
+const provider = new S3Provider({
+  bucket: 'my-space',
+  region: 'nyc3',
+  endpoint: 'https://nyc3.digitaloceanspaces.com',
+  forcePathStyle: false,
+  credentials: {
+    accessKeyId: process.env.SPACES_KEY,
+    secretAccessKey: process.env.SPACES_SECRET,
+  },
+  publicUrl: 'https://my-space.nyc3.cdn.digitaloceanspaces.com',
+});
+```
+
+## Example: MinIO Provider
+
+```typescript
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+
+const provider = new S3Provider({
+  bucket: 'uploads',
+  region: 'us-east-1',
+  endpoint: 'http://localhost:9000',
+  forcePathStyle: true,
+  credentials: {
+    accessKeyId: 'minioadmin',
+    secretAccessKey: 'minioadmin',
+  },
+  publicUrl: 'http://localhost:9000/uploads',
+});
+```
+
+## Provider Interface
+
+All providers must implement:
+
+```typescript
+interface StorageProvider {
+  // Provider name
+  readonly name: string;
+
+  // Upload file
+  upload(
+    buffer: Buffer,
+    filename: string,
+    options?: UploadOptions
+  ): Promise<UploadResult>;
+
+  // Delete file
+  delete(key: string): Promise<boolean>;
+
+  // Check if file exists
+  exists(key: string): Promise<boolean>;
+}
+```
+
+## Next Steps
+
+- [Providers API](../api/providers.mdx) - Full provider reference
+- [Storage Providers Guide](../guides/storage-providers.mdx) - More examples

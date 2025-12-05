@@ -1,0 +1,178 @@
+# Configuration
+
+Customize Media Kit to fit your needs.
+
+## Basic Configuration
+
+```typescript
+const media = createMedia({
+  provider: myProvider,
+  folders: {
+    baseFolders: ['images', 'documents', 'videos'],
+    defaultFolder: 'images',
+  },
+  fileTypes: {
+    allowed: ['image/*', 'application/pdf'],
+    maxSize: 10 * 1024 * 1024, // 10MB
+  },
+});
+```
+
+## Options Reference
+
+### `provider` (required)
+
+Storage provider instance (S3, GCS, or Local).
+
+```typescript
+provider: new S3Provider({ bucket: 'my-bucket' })
+```
+
+### `folders`
+
+Organize files into folders.
+
+```typescript
+folders: {
+  baseFolders: ['images', 'docs'],  // Allowed folders
+  defaultFolder: 'images',           // Default if not specified
+  enableSubfolders: true,            // Allow nested folders
+}
+```
+
+### `fileTypes`
+
+Control what files can be uploaded.
+
+```typescript
+fileTypes: {
+  allowed: ['image/*', 'video/*'],   // MIME patterns
+  maxSize: 5 * 1024 * 1024,          // 5MB max
+}
+```
+
+### `processing`
+
+Image processing options (requires `sharp`).
+
+```typescript
+processing: {
+  enabled: true,
+  quality: 80,
+  format: 'webp',
+  maxWidth: 2000,
+  generateAlt: true,  // Auto-generate alt text
+  sizes: [            // Generate multiple sizes
+    { name: 'thumbnail', width: 150, height: 150 },
+    { name: 'medium', width: 800 },
+    { name: 'large', width: 1200 },
+  ],
+}
+```
+
+### `multitenancy`
+
+Isolate files by organization/tenant.
+
+```typescript
+multitenancy: {
+  enabled: true,
+  organizationField: 'organizationId',  // Field name
+  enforceIsolation: true,                // Strict isolation
+}
+```
+
+### `suppressWarnings`
+
+Hide warnings about missing optional dependencies.
+
+```typescript
+suppressWarnings: true  // Useful in production
+```
+
+## Complete Example
+
+```typescript
+import { createMedia } from '@classytic/media-kit';
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+
+const media = createMedia({
+  // Storage
+  provider: new S3Provider({
+    bucket: process.env.S3_BUCKET,
+    region: 'us-east-1',
+  }),
+
+  // Organization
+  folders: {
+    baseFolders: ['images', 'documents', 'videos', 'audio'],
+    defaultFolder: 'images',
+    enableSubfolders: true,
+  },
+
+  // Security
+  fileTypes: {
+    allowed: ['image/*', 'application/pdf', 'video/*'],
+    maxSize: 50 * 1024 * 1024, // 50MB
+  },
+
+  // Multi-tenant
+  multitenancy: {
+    enabled: true,
+    organizationField: 'organizationId',
+    enforceIsolation: true,
+  },
+
+  // Image processing
+  processing: {
+    enabled: true,
+    quality: 85,
+    format: 'webp',
+    maxWidth: 2000,
+    generateAlt: true,
+    sizes: [
+      { name: 'thumb', width: 200, height: 200 },
+      { name: 'medium', width: 800 },
+      { name: 'large', width: 1600 },
+    ],
+  },
+
+  // Production mode
+  suppressWarnings: true,
+});
+```
+
+## Environment Variables
+
+Store sensitive config in `.env`:
+
+```bash
+# AWS S3
+AWS_ACCESS_KEY_ID=your_key
+AWS_SECRET_ACCESS_KEY=your_secret
+S3_BUCKET=my-bucket
+S3_REGION=us-east-1
+
+# Google Cloud
+GCS_BUCKET=my-bucket
+GCS_PROJECT_ID=my-project
+```
+
+Load in your app:
+
+```typescript
+import 'dotenv/config';
+
+const media = createMedia({
+  provider: new S3Provider({
+    bucket: process.env.S3_BUCKET,
+    region: process.env.S3_REGION,
+  }),
+});
+```
+
+## Next Steps
+
+- [Uploading Files](../guides/uploading-files.mdx) - Upload methods
+- [Image Processing](../guides/image-processing.mdx) - Resize & optimize
+- [Events](../guides/events.mdx) - Hook into operations

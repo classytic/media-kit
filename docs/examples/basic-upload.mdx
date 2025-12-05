@@ -1,0 +1,103 @@
+# Basic Upload Example
+
+Simple file upload with Express and Multer.
+
+## Setup
+
+```bash
+npm install express multer @classytic/media-kit mongoose
+```
+
+## Code
+
+```typescript
+import express from 'express';
+import multer from 'multer';
+import mongoose from 'mongoose';
+import { createMedia, LocalStorageProvider } from '@classytic/media-kit';
+
+// Connect to MongoDB
+await mongoose.connect('mongodb://localhost:27017/myapp');
+
+// Create media kit
+const media = createMedia({
+  provider: new LocalStorageProvider({
+    uploadDir: './public/uploads',
+    publicUrl: 'http://localhost:3000/uploads',
+  }),
+});
+
+const Media = mongoose.model('Media', media.schema);
+media.init(Media);
+
+// Express app
+const app = express();
+const upload = multer();
+
+// Serve static files
+app.use('/uploads', express.static('./public/uploads'));
+
+// Upload endpoint
+app.post('/upload', upload.single('file'), async (req, res) => {
+  try {
+    const file = await media.upload({
+      buffer: req.file.buffer,
+      filename: req.file.originalname,
+      mimeType: req.file.mimetype,
+      folder: 'images',
+    });
+
+    res.json({
+      success: true,
+      file: {
+        id: file._id,
+        url: file.url,
+        filename: file.filename,
+        size: file.size,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+// List files
+app.get('/files', async (req, res) => {
+  const files = await Media.find()
+    .sort({ createdAt: -1 })
+    .limit(20);
+
+  res.json({ files });
+});
+
+// Delete file
+app.delete('/files/:id', async (req, res) => {
+  const deleted = await media.delete(req.params.id);
+  res.json({ success: deleted });
+});
+
+app.listen(3000, () => {
+  console.log('Server running on http://localhost:3000');
+});
+```
+
+## Test with cURL
+
+```bash
+# Upload file
+curl -F "file=@photo.jpg" http://localhost:3000/upload
+
+# List files
+curl http://localhost:3000/files
+
+# Delete file
+curl -X DELETE http://localhost:3000/files/FILE_ID
+```
+
+## Next Steps
+
+- [Multi-Size Images](./multi-size-images.mdx) - Generate thumbnails
+- [Custom Provider](./custom-provider.mdx) - Create your own storage

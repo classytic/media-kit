@@ -1,0 +1,276 @@
+# Events
+
+Hook into file operations with the event system.
+
+## Available Events
+
+### Upload Events
+
+- `before:upload` - Before file upload starts
+- `after:upload` - After successful upload
+- `error:upload` - When upload fails
+
+### Delete Events
+
+- `before:delete` - Before file deletion
+- `after:delete` - After successful deletion
+- `error:delete` - When deletion fails
+
+### Query Events
+
+- `before:list` - Before listing files
+- `after:list` - After listing files
+
+## Basic Usage
+
+```typescript
+// Listen to events
+media.on('after:upload', (event) => {
+  console.log('File uploaded:', event.result.url);
+});
+
+// Upload triggers event
+const file = await media.upload({
+  buffer: fileBuffer,
+  filename: 'photo.jpg',
+  mimeType: 'image/jpeg',
+});
+```
+
+## Before Upload
+
+Validate or modify uploads before they happen:
+
+```typescript
+media.on('before:upload', (event) => {
+  const { buffer, filename, mimeType } = event.input;
+
+  // Log upload attempt
+  console.log(`Uploading ${filename} (${buffer.length} bytes)`);
+
+  // Validate
+  if (buffer.length > 10 * 1024 * 1024) {
+    throw new Error('File too large');
+  }
+
+  // Track metrics
+  analytics.track('file_upload_started', {
+    filename,
+    size: buffer.length,
+  });
+});
+```
+
+## After Upload
+
+React to successful uploads:
+
+```typescript
+media.on('after:upload', async (event) => {
+  const file = event.result;
+
+  // Send notification
+  await sendNotification({
+    message: `New file uploaded: ${file.filename}`,
+    url: file.url,
+  });
+
+  // Update search index
+  await searchIndex.add({
+    id: file._id,
+    title: file.title,
+    url: file.url,
+  });
+
+  // Log to analytics
+  analytics.track('file_uploaded', {
+    fileId: file._id,
+    size: file.size,
+    mimeType: file.mimeType,
+  });
+});
+```
+
+## Error Handling
+
+Handle upload failures:
+
+```typescript
+media.on('error:upload', (event) => {
+  const { error, input } = event;
+
+  // Log error
+  logger.error('Upload failed', {
+    filename: input.filename,
+    error: error.message,
+  });
+
+  // Send alert
+  if (error.message.includes('storage')) {
+    alerting.notify('Storage system error');
+  }
+
+  // Track failures
+  analytics.track('upload_failed', {
+    filename: input.filename,
+    error: error.message,
+  });
+});
+```
+
+## Delete Events
+
+Track file deletions:
+
+```typescript
+media.on('before:delete', (event) => {
+  console.log('Deleting file:', event.id);
+});
+
+media.on('after:delete', (event) => {
+  console.log('File deleted successfully');
+
+  // Clean up related data
+  await searchIndex.remove(event.id);
+  await cache.invalidate(`file:${event.id}`);
+});
+```
+
+## Multiple Listeners
+
+Add multiple handlers for the same event:
+
+```typescript
+// Listener 1: Log to console
+media.on('after:upload', (event) => {
+  console.log('Upload:', event.result.filename);
+});
+
+// Listener 2: Send to analytics
+media.on('after:upload', (event) => {
+  analytics.track('upload', { fileId: event.result._id });
+});
+
+// Listener 3: Update cache
+media.on('after:upload', (event) => {
+  cache.set(`file:${event.result._id}`, event.result);
+});
+
+// All three run when file is uploaded
+```
+
+## Complete Example
+
+```typescript
+import { createMedia } from '@classytic/media-kit';
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+
+const media = createMedia({
+  provider: new S3Provider({ bucket: 'uploads' }),
+});
+
+// Analytics tracking
+media.on('after:upload', (event) => {
+  analytics.track('file_uploaded', {
+    fileId: event.result._id.toString(),
+    size: event.result.size,
+    mimeType: event.result.mimeType,
+    organizationId: event.result.organizationId,
+  });
+});
+
+// Search indexing
+media.on('after:upload', async (event) => {
+  await searchClient.index('files').addDocuments([{
+    id: event.result._id.toString(),
+    filename: event.result.filename,
+    title: event.result.title,
+    url: event.result.url,
+  }]);
+});
+
+// Webhook notifications
+media.on('after:upload', async (event) => {
+  await fetch('https://webhook.example.com/upload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event: 'file.uploaded',
+      file: {
+        id: event.result._id,
+        url: event.result.url,
+        filename: event.result.filename,
+      },
+    }),
+  });
+});
+
+// Cache warming
+media.on('after:upload', (event) => {
+  // Warm CDN cache by requesting the file
+  fetch(event.result.url, { method: 'HEAD' });
+});
+
+// Error alerting
+media.on('error:upload', (event) => {
+  if (event.error.message.includes('storage')) {
+    alerting.critical('File upload storage error', {
+      error: event.error.message,
+      filename: event.input.filename,
+    });
+  }
+});
+```
+
+## TypeScript Types
+
+Events are fully typed:
+
+```typescript
+import type { UploadEvent, DeleteEvent } from '@classytic/media-kit';
+
+media.on<UploadEvent>('after:upload', (event) => {
+  // event.result is typed as IMediaDocument
+  const fileId = event.result._id;
+  const url = event.result.url;
+});
+
+media.on<DeleteEvent>('after:delete', (event) => {
+  // event.id is typed as string
+  console.log('Deleted:', event.id);
+});
+```
+
+## Event Payload Reference
+
+### Upload Events
+
+```typescript
+{
+  input: {
+    buffer: Buffer;
+    filename: string;
+    mimeType: string;
+    folder?: string;
+    title?: string;
+    alt?: string;
+    // ... other upload options
+  },
+  result?: IMediaDocument; // Only in 'after:upload'
+  error?: Error;           // Only in 'error:upload'
+}
+```
+
+### Delete Events
+
+```typescript
+{
+  id: string;              // File ID
+  error?: Error;           // Only in 'error:delete'
+}
+```
+
+## Next Steps
+
+- [API Reference](../api/media-kit.mdx) - Full event API
+- [Examples](../examples/basic-upload.mdx) - Working examples

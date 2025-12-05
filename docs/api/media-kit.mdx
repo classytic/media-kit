@@ -1,0 +1,250 @@
+# MediaKit API
+
+Core API reference for Media Kit.
+
+## createMedia(config)
+
+Create a new Media Kit instance.
+
+```typescript
+import { createMedia } from '@classytic/media-kit';
+
+const media = createMedia(config);
+```
+
+### Parameters
+
+- `config` - Configuration object
+
+### Returns
+
+MediaKit instance with methods and schema.
+
+## MediaKit Instance
+
+### Properties
+
+#### `schema`
+
+Mongoose schema for media files.
+
+```typescript
+const Media = mongoose.model('Media', media.schema);
+```
+
+### Methods
+
+#### `init(model)`
+
+Initialize Media Kit with Mongoose model.
+
+```typescript
+media.init(Media);
+```
+
+#### `upload(input, context?)`
+
+Upload a single file.
+
+```typescript
+const file = await media.upload({
+  buffer: Buffer,
+  filename: string,
+  mimeType: string,
+  folder?: string,
+  title?: string,
+  alt?: string,
+  caption?: string,
+  organizationId?: string,
+});
+```
+
+**Returns:** Uploaded file document
+
+#### `uploadMany(inputs, context?)`
+
+Upload multiple files.
+
+```typescript
+const files = await media.uploadMany([
+  { buffer, filename, mimeType },
+  { buffer, filename, mimeType },
+]);
+```
+
+**Returns:** Array of uploaded file documents
+
+#### `delete(id, context?)`
+
+Delete a file by ID.
+
+```typescript
+const deleted = await media.delete('file_id');
+```
+
+**Returns:** `true` if deleted
+
+#### `deleteMany(ids, context?)`
+
+Delete multiple files.
+
+```typescript
+const result = await media.deleteMany(['id1', 'id2']);
+// { success: ['id1', 'id2'], failed: [] }
+```
+
+**Returns:** Object with `success` and `failed` arrays
+
+#### `deleteFolder(folder, context?)`
+
+Delete all files in a folder.
+
+```typescript
+const count = await media.deleteFolder('images/temp');
+```
+
+**Returns:** Number of files deleted
+
+#### `on(event, listener)`
+
+Listen to events.
+
+```typescript
+media.on('after:upload', (event) => {
+  console.log('Uploaded:', event.result);
+});
+```
+
+**Events:**
+- `before:upload`, `after:upload`, `error:upload`
+- `before:delete`, `after:delete`, `error:delete`
+- `before:list`, `after:list`
+
+#### `emit(event, payload)`
+
+Emit custom events (advanced).
+
+```typescript
+media.emit('custom:event', { data: 'value' });
+```
+
+## File Document
+
+Fields on uploaded file documents:
+
+```typescript
+{
+  _id: ObjectId,
+  filename: string,
+  mimeType: string,
+  size: number,
+  url: string,
+  key: string,
+  folder: string,
+
+  // Optional
+  title?: string,
+  alt?: string,
+  caption?: string,
+  description?: string,
+
+  // Image metadata
+  width?: number,
+  height?: number,
+  aspectRatio?: number,
+
+  // Variants
+  variants?: Array<{
+    name: string,
+    url: string,
+    key: string,
+    size: number,
+    width?: number,
+    height?: number,
+  }>,
+
+  // Organization
+  organizationId?: string,
+
+  // Timestamps
+  uploadedAt: Date,
+  createdAt: Date,
+  updatedAt: Date,
+}
+```
+
+## Configuration
+
+Full config object reference:
+
+```typescript
+{
+  // Required
+  provider: StorageProvider,
+
+  // Folders
+  folders?: {
+    baseFolders?: string[],
+    defaultFolder?: string,
+    enableSubfolders?: boolean,
+  },
+
+  // File validation
+  fileTypes?: {
+    allowed?: string[],
+    maxSize?: number,
+  },
+
+  // Image processing
+  processing?: {
+    enabled?: boolean,
+    quality?: number,
+    format?: 'webp' | 'jpeg' | 'png' | 'avif',
+    maxWidth?: number,
+    generateAlt?: boolean,
+    sizes?: Array<{
+      name: string,
+      width?: number,
+      height?: number,
+      quality?: number,
+      format?: string,
+      aspectRatio?: {
+        aspectRatio: number,
+        fit: 'cover' | 'contain' | 'fill',
+      },
+    }>,
+  },
+
+  // Multi-tenancy
+  multitenancy?: {
+    enabled?: boolean,
+    organizationField?: string,
+    enforceIsolation?: boolean,
+  },
+
+  // Other
+  suppressWarnings?: boolean,
+}
+```
+
+## TypeScript Types
+
+Import types for TypeScript:
+
+```typescript
+import type {
+  MediaKitConfig,
+  MediaKit,
+  IMediaDocument,
+  UploadInput,
+  StorageProvider,
+  UploadResult,
+  UploadOptions,
+  MediaEventName,
+} from '@classytic/media-kit';
+```
+
+## Next Steps
+
+- [Providers API](./providers.mdx) - Storage provider reference
+- [Types](./types.mdx) - Full TypeScript types

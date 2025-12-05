@@ -53,19 +53,6 @@ serviceAccount.json
 .temp/
 tmp/
 
-# Documentation (kept in git but not in package)
-docs/
-
-# Test files (kept in git but not in package)
-tests/
-*.test.ts
-*.test.js
-*.spec.ts
-*.spec.js
-
-# Example files (kept in git but not in package)
-examples/
-
 # Local development
 .local/
 local/

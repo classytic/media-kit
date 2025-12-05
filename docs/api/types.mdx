@@ -1,0 +1,257 @@
+# TypeScript Types
+
+Full type reference for Media Kit.
+
+## Core Types
+
+### MediaKitConfig
+
+Main configuration object:
+
+```typescript
+interface MediaKitConfig {
+  provider: StorageProvider;
+  folders?: FolderConfig;
+  fileTypes?: FileTypeConfig;
+  processing?: ProcessingConfig;
+  multitenancy?: MultitenancyConfig;
+  suppressWarnings?: boolean;
+}
+```
+
+### FolderConfig
+
+```typescript
+interface FolderConfig {
+  baseFolders?: string[];
+  defaultFolder?: string;
+  enableSubfolders?: boolean;
+}
+```
+
+### FileTypeConfig
+
+```typescript
+interface FileTypeConfig {
+  allowed?: string[];
+  maxSize?: number;
+}
+```
+
+### ProcessingConfig
+
+```typescript
+interface ProcessingConfig {
+  enabled?: boolean;
+  quality?: number;
+  format?: 'webp' | 'jpeg' | 'png' | 'avif' | 'original';
+  maxWidth?: number;
+  generateAlt?: boolean;
+  sizes?: SizeVariant[];
+}
+```
+
+### SizeVariant
+
+```typescript
+interface SizeVariant {
+  name: string;
+  width?: number;
+  height?: number;
+  quality?: number;
+  format?: 'webp' | 'jpeg' | 'png' | 'avif' | 'original';
+  aspectRatio?: {
+    aspectRatio: number;
+    fit: 'cover' | 'contain' | 'fill';
+  };
+}
+```
+
+### MultitenancyConfig
+
+```typescript
+interface MultitenancyConfig {
+  enabled?: boolean;
+  organizationField?: string;
+  enforceIsolation?: boolean;
+}
+```
+
+## Upload Types
+
+### UploadInput
+
+```typescript
+interface UploadInput {
+  buffer: Buffer;
+  filename: string;
+  mimeType: string;
+  folder?: string;
+  title?: string;
+  alt?: string;
+  caption?: string;
+  description?: string;
+  organizationId?: string;
+  metadata?: Record<string, any>;
+}
+```
+
+### UploadResult
+
+```typescript
+interface UploadResult {
+  url: string;
+  key: string;
+  size: number;
+  mimeType: string;
+}
+```
+
+## Document Types
+
+### IMediaDocument
+
+Mongoose document for uploaded files:
+
+```typescript
+interface IMediaDocument extends Document {
+  filename: string;
+  mimeType: string;
+  size: number;
+  url: string;
+  key: string;
+  folder: string;
+
+  title?: string;
+  alt?: string;
+  caption?: string;
+  description?: string;
+
+  width?: number;
+  height?: number;
+  aspectRatio?: number;
+
+  variants?: GeneratedVariant[];
+
+  organizationId?: string;
+  metadata?: Record<string, any>;
+
+  uploadedAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+```
+
+### GeneratedVariant
+
+```typescript
+interface GeneratedVariant {
+  name: string;
+  url: string;
+  key: string;
+  size: number;
+  width?: number;
+  height?: number;
+}
+```
+
+## Provider Types
+
+### StorageProvider
+
+```typescript
+interface StorageProvider {
+  readonly name: string;
+
+  upload(
+    buffer: Buffer,
+    filename: string,
+    options?: UploadOptions
+  ): Promise<UploadResult>;
+
+  delete(key: string): Promise<boolean>;
+
+  exists(key: string): Promise<boolean>;
+}
+```
+
+### UploadOptions
+
+```typescript
+interface UploadOptions {
+  folder?: string;
+  contentType?: string;
+  metadata?: Record<string, any>;
+  organizationId?: string;
+}
+```
+
+## Event Types
+
+### MediaEventName
+
+```typescript
+type MediaEventName =
+  | 'before:upload'
+  | 'after:upload'
+  | 'error:upload'
+  | 'before:delete'
+  | 'after:delete'
+  | 'error:delete'
+  | 'before:list'
+  | 'after:list';
+```
+
+### EventListener
+
+```typescript
+type EventListener<T = unknown> = (payload: T) => void | Promise<void>;
+```
+
+## Context Types
+
+### OperationContext
+
+```typescript
+interface OperationContext {
+  userId?: string;
+  organizationId?: string;
+  [key: string]: any;
+}
+```
+
+## Usage Example
+
+```typescript
+import type {
+  MediaKitConfig,
+  MediaKit,
+  IMediaDocument,
+  UploadInput,
+  StorageProvider,
+  UploadResult,
+} from '@classytic/media-kit';
+
+const config: MediaKitConfig = {
+  provider: myProvider,
+  folders: {
+    baseFolders: ['images', 'documents'],
+    defaultFolder: 'images',
+  },
+};
+
+const media = createMedia(config);
+
+const input: UploadInput = {
+  buffer: fileBuffer,
+  filename: 'photo.jpg',
+  mimeType: 'image/jpeg',
+};
+
+const file: IMediaDocument = await media.upload(input);
+```
+
+## Next Steps
+
+- [MediaKit API](./media-kit.mdx) - Core API reference
+- [Providers API](./providers.mdx) - Storage providers

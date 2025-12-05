@@ -1,0 +1,113 @@
+# Quick Start
+
+Get up and running in 5 minutes.
+
+## Step 1: Connect to MongoDB
+
+```typescript
+import mongoose from 'mongoose';
+
+await mongoose.connect('mongodb://localhost:27017/myapp');
+```
+
+## Step 2: Create Storage Provider
+
+### Local Storage (Easiest)
+
+```typescript
+import { LocalStorageProvider } from '@classytic/media-kit';
+
+const provider = new LocalStorageProvider({
+  uploadDir: './uploads',
+  publicUrl: 'http://localhost:3000/uploads',
+});
+```
+
+### AWS S3
+
+```typescript
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+
+const provider = new S3Provider({
+  bucket: 'my-bucket',
+  region: 'us-east-1',
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY,
+    secretAccessKey: process.env.AWS_SECRET_KEY,
+  },
+});
+```
+
+## Step 3: Initialize Media Kit
+
+```typescript
+import { createMedia } from '@classytic/media-kit';
+
+const media = createMedia({ provider });
+
+// Create Mongoose model
+const Media = mongoose.model('Media', media.schema);
+
+// Initialize
+media.init(Media);
+```
+
+## Step 4: Upload a File
+
+```typescript
+// From Express/Multer
+app.post('/upload', upload.single('file'), async (req, res) => {
+  const uploaded = await media.upload({
+    buffer: req.file.buffer,
+    filename: req.file.originalname,
+    mimeType: req.file.mimetype,
+  });
+
+  res.json({ url: uploaded.url });
+});
+```
+
+## Complete Example
+
+```typescript
+import express from 'express';
+import mongoose from 'mongoose';
+import multer from 'multer';
+import { createMedia, LocalStorageProvider } from '@classytic/media-kit';
+
+// Setup
+await mongoose.connect('mongodb://localhost:27017/myapp');
+
+const media = createMedia({
+  provider: new LocalStorageProvider({
+    uploadDir: './uploads',
+    publicUrl: 'http://localhost:3000/uploads',
+  }),
+});
+
+const Media = mongoose.model('Media', media.schema);
+media.init(Media);
+
+// Express route
+const app = express();
+const upload = multer();
+
+app.post('/upload', upload.single('file'), async (req, res) => {
+  const file = await media.upload({
+    buffer: req.file.buffer,
+    filename: req.file.originalname,
+    mimeType: req.file.mimetype,
+    folder: 'images',
+  });
+
+  res.json({ url: file.url });
+});
+
+app.listen(3000);
+```
+
+## Next Steps
+
+- [Configuration](./configuration.mdx) - Customize behavior
+- [Image Processing](../guides/image-processing.mdx) - Auto-resize images
+- [Storage Providers](../guides/storage-providers.mdx) - Switch providers

@@ -1,0 +1,58 @@
+# Installation
+
+## Basic Install (Local Storage)
+
+For local file storage only:
+
+```bash
+npm install @classytic/media-kit mongoose mime-types
+```
+
+That's it! The library works without any optional dependencies.
+
+## With Image Processing
+
+For automatic resizing and thumbnails:
+
+```bash
+npm install @classytic/media-kit mongoose mime-types sharp
+```
+
+## With Cloud Storage
+
+### AWS S3
+
+```bash
+npm install @classytic/media-kit mongoose mime-types @aws-sdk/client-s3
+```
+
+### Google Cloud Storage
+
+```bash
+npm install @classytic/media-kit mongoose mime-types @google-cloud/storage
+```
+
+### With Everything
+
+```bash
+npm install @classytic/media-kit mongoose mime-types sharp @aws-sdk/client-s3 @google-cloud/storage
+```
+
+## Requirements
+
+- **Node.js**: 18.0.0 or higher
+- **Mongoose**: 8.x or 9.x
+- **MongoDB**: Any version supported by Mongoose
+
+## Verify Installation
+
+```typescript
+import { createMedia } from '@classytic/media-kit';
+
+console.log('Media Kit installed successfully!');
+```
+
+## Next Steps
+
+- [Quick Start](./quick-start.mdx) - Your first upload
+- [Configuration](./configuration.mdx) - Customize settings

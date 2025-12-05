@@ -1,0 +1,243 @@
+# Image Processing
+
+Auto-resize, optimize, and generate multiple image sizes.
+
+## Setup
+
+Install Sharp for image processing:
+
+```bash
+npm install sharp
+```
+
+Enable processing in config:
+
+```typescript
+const media = createMedia({
+  provider: myProvider,
+  processing: {
+    enabled: true,
+    quality: 80,
+    format: 'webp',
+  },
+});
+```
+
+## Basic Processing
+
+Images are automatically processed on upload:
+
+```typescript
+const file = await media.upload({
+  buffer: largeImageBuffer,
+  filename: 'photo.jpg',
+  mimeType: 'image/jpeg',
+});
+
+// Automatically:
+// - Resized to max width
+// - Converted to WebP
+// - Optimized quality
+```
+
+## Generate Multiple Sizes
+
+Create thumbnail, medium, and large versions:
+
+```typescript
+const media = createMedia({
+  provider: myProvider,
+  processing: {
+    enabled: true,
+    sizes: [
+      { name: 'thumbnail', width: 150, height: 150 },
+      { name: 'medium', width: 800 },
+      { name: 'large', width: 1600 },
+    ],
+  },
+});
+
+const file = await media.upload({
+  buffer: imageBuffer,
+  filename: 'product.jpg',
+  mimeType: 'image/jpeg',
+});
+
+// Access variants
+console.log(file.url);              // Original/large
+console.log(file.variants);         // Array of sizes
+console.log(file.variants[0].url);  // Thumbnail URL
+```
+
+## Size Options
+
+### Fixed Width
+
+```typescript
+{ name: 'medium', width: 800 }
+// Maintains aspect ratio, scales to 800px wide
+```
+
+### Fixed Dimensions
+
+```typescript
+{ name: 'square', width: 400, height: 400 }
+// Crops/fits to exact 400x400
+```
+
+### Quality Control
+
+```typescript
+{ name: 'compressed', width: 1200, quality: 60 }
+// Lower quality for faster loading
+```
+
+### Format Override
+
+```typescript
+{ name: 'thumbnail', width: 200, format: 'jpeg' }
+// Force JPEG instead of default WebP
+```
+
+## Aspect Ratios
+
+Maintain specific aspect ratios:
+
+```typescript
+processing: {
+  sizes: [
+    {
+      name: 'instagram',
+      width: 1080,
+      aspectRatio: {
+        aspectRatio: 1,  // 1:1 square
+        fit: 'cover',    // How to fit
+      },
+    },
+    {
+      name: 'banner',
+      width: 1200,
+      aspectRatio: {
+        aspectRatio: 16/9,
+        fit: 'contain',
+      },
+    },
+  ],
+}
+```
+
+## Complete Example
+
+```typescript
+const media = createMedia({
+  provider: new S3Provider({ bucket: 'images' }),
+  processing: {
+    enabled: true,
+    quality: 85,
+    format: 'webp',
+    maxWidth: 2000,
+
+    sizes: [
+      // Thumbnail - square crop
+      {
+        name: 'thumb',
+        width: 200,
+        height: 200,
+        quality: 75,
+        aspectRatio: { aspectRatio: 1, fit: 'cover' },
+      },
+
+      // Small - for mobile
+      {
+        name: 'small',
+        width: 480,
+        quality: 80,
+      },
+
+      // Medium - for tablets
+      {
+        name: 'medium',
+        width: 800,
+        quality: 85,
+      },
+
+      // Large - for desktop
+      {
+        name: 'large',
+        width: 1600,
+        quality: 90,
+      },
+    ],
+  },
+});
+
+// Upload
+const file = await media.upload({
+  buffer: imageBuffer,
+  filename: 'hero-image.jpg',
+  mimeType: 'image/jpeg',
+});
+
+// Use in HTML
+const variants = file.variants;
+const thumb = variants.find(v => v.name === 'thumb');
+const medium = variants.find(v => v.name === 'medium');
+const large = variants.find(v => v.name === 'large');
+
+// <picture>
+//   <source media="(min-width: 1200px)" srcset={large.url} />
+//   <source media="(min-width: 768px)" srcset={medium.url} />
+//   <img src={thumb.url} alt={file.alt} />
+// </picture>
+```
+
+## Responsive Images
+
+Use variants for responsive images:
+
+```typescript
+const file = await media.upload({
+  buffer: imageBuffer,
+  filename: 'product.jpg',
+  mimeType: 'image/jpeg',
+});
+
+const { variants } = file;
+
+// React component
+function ProductImage({ file }) {
+  return (
+    <picture>
+      <source
+        media="(min-width: 1024px)"
+        srcSet={variants.find(v => v.name === 'large')?.url}
+      />
+      <source
+        media="(min-width: 768px)"
+        srcSet={variants.find(v => v.name === 'medium')?.url}
+      />
+      <img
+        src={variants.find(v => v.name === 'thumbnail')?.url}
+        alt={file.alt}
+      />
+    </picture>
+  );
+}
+```
+
+## Without Sharp
+
+If Sharp isn't installed, images upload as-is:
+
+```typescript
+const media = createMedia({
+  provider: myProvider,
+  processing: { enabled: false },  // No processing
+  suppressWarnings: true,          // Hide Sharp warning
+});
+```
+
+## Next Steps
+
+- [Events](./events.mdx) - Hook into processing
+- [Storage Providers](./storage-providers.mdx) - Where images are stored

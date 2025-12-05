@@ -1,0 +1,209 @@
+# Providers API
+
+Storage provider reference.
+
+## StorageProvider Interface
+
+All providers implement this interface:
+
+```typescript
+interface StorageProvider {
+  readonly name: string;
+
+  upload(
+    buffer: Buffer,
+    filename: string,
+    options?: UploadOptions
+  ): Promise<UploadResult>;
+
+  delete(key: string): Promise<boolean>;
+
+  exists(key: string): Promise<boolean>;
+}
+```
+
+## S3Provider
+
+AWS S3 storage provider.
+
+### Import
+
+```typescript
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+```
+
+### Constructor
+
+```typescript
+new S3Provider(config: S3Config)
+```
+
+### Config
+
+```typescript
+{
+  bucket: string,              // S3 bucket name
+  region: string,              // AWS region
+  credentials?: {
+    accessKeyId: string,
+    secretAccessKey: string,
+  },
+  endpoint?: string,           // Custom endpoint (for S3-compatible)
+  forcePathStyle?: boolean,    // Path-style URLs
+  publicUrl?: string,          // Custom CDN URL
+}
+```
+
+### Example
+
+```typescript
+const provider = new S3Provider({
+  bucket: 'my-uploads',
+  region: 'us-east-1',
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  },
+});
+```
+
+## GCSProvider
+
+Google Cloud Storage provider.
+
+### Import
+
+```typescript
+import { GCSProvider } from '@classytic/media-kit/providers/gcs';
+```
+
+### Constructor
+
+```typescript
+new GCSProvider(config: GCSConfig)
+```
+
+### Config
+
+```typescript
+{
+  bucket: string,              // GCS bucket name
+  projectId?: string,          // Google Cloud project ID
+  keyFilename?: string,        // Path to service account key
+  credentials?: {
+    client_email: string,
+    private_key: string,
+  },
+  publicUrl?: string,          // Custom CDN URL
+}
+```
+
+### Example
+
+```typescript
+const provider = new GCSProvider({
+  bucket: 'my-uploads',
+  keyFilename: './service-account.json',
+});
+```
+
+## LocalStorageProvider
+
+Filesystem storage provider.
+
+### Import
+
+```typescript
+import { LocalStorageProvider } from '@classytic/media-kit';
+```
+
+### Constructor
+
+```typescript
+new LocalStorageProvider(config: LocalStorageConfig)
+```
+
+### Config
+
+```typescript
+{
+  uploadDir: string,           // Directory path for uploads
+  publicUrl: string,           // Public URL prefix
+}
+```
+
+### Example
+
+```typescript
+const provider = new LocalStorageProvider({
+  uploadDir: './public/uploads',
+  publicUrl: 'http://localhost:3000/uploads',
+});
+```
+
+## Custom Provider
+
+Create your own provider:
+
+```typescript
+import { StorageProvider, UploadResult, UploadOptions } from '@classytic/media-kit';
+
+class CustomProvider implements StorageProvider {
+  readonly name = 'custom';
+
+  async upload(
+    buffer: Buffer,
+    filename: string,
+    options?: UploadOptions
+  ): Promise<UploadResult> {
+    // Upload logic
+    return {
+      url: 'https://cdn.example.com/file.jpg',
+      key: 'uploads/file.jpg',
+      size: buffer.length,
+      mimeType: options?.mimeType || 'application/octet-stream',
+    };
+  }
+
+  async delete(key: string): Promise<boolean> {
+    // Delete logic
+    return true;
+  }
+
+  async exists(key: string): Promise<boolean> {
+    // Exists check
+    return true;
+  }
+}
+```
+
+## UploadOptions
+
+Options passed to provider upload method:
+
+```typescript
+{
+  folder?: string,
+  contentType?: string,
+  metadata?: Record<string, any>,
+  organizationId?: string,
+}
+```
+
+## UploadResult
+
+Result returned from provider upload:
+
+```typescript
+{
+  url: string,                 // Public URL
+  key: string,                 // Storage key/path
+  size: number,                // File size in bytes
+  mimeType: string,            // MIME type
+}
+```
+
+## Next Steps
+
+- [MediaKit API](./media-kit.mdx) - Core API reference
+- [Types](./types.mdx) - Full TypeScript types

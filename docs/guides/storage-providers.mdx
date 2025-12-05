@@ -1,0 +1,239 @@
+# Storage Providers
+
+Choose where your files are stored.
+
+## Local Storage
+
+Store files on your server's filesystem.
+
+### Basic Setup
+
+```typescript
+import { LocalStorageProvider } from '@classytic/media-kit';
+
+const provider = new LocalStorageProvider({
+  uploadDir: './public/uploads',
+  publicUrl: 'http://localhost:3000/uploads',
+});
+```
+
+### With Static File Serving
+
+```typescript
+import express from 'express';
+
+const app = express();
+
+// Serve uploaded files
+app.use('/uploads', express.static('./public/uploads'));
+
+const provider = new LocalStorageProvider({
+  uploadDir: './public/uploads',
+  publicUrl: 'http://localhost:3000/uploads',
+});
+```
+
+### Production CDN
+
+```typescript
+const provider = new LocalStorageProvider({
+  uploadDir: '/var/www/uploads',
+  publicUrl: 'https://cdn.example.com',
+});
+```
+
+## AWS S3
+
+Store files in Amazon S3.
+
+### Setup
+
+```bash
+npm install @aws-sdk/client-s3
+```
+
+### Basic Configuration
+
+```typescript
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+
+const provider = new S3Provider({
+  bucket: 'my-bucket',
+  region: 'us-east-1',
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  },
+});
+```
+
+### With IAM Roles
+
+```typescript
+const provider = new S3Provider({
+  bucket: 'my-bucket',
+  region: 'us-east-1',
+  // Credentials auto-loaded from IAM role
+});
+```
+
+### With CloudFront
+
+```typescript
+const provider = new S3Provider({
+  bucket: 'my-bucket',
+  region: 'us-east-1',
+  publicUrl: 'https://d111111abcdef8.cloudfront.net',
+});
+```
+
+### Custom S3 Endpoint
+
+For S3-compatible services (MinIO, DigitalOcean Spaces):
+
+```typescript
+const provider = new S3Provider({
+  bucket: 'my-bucket',
+  region: 'nyc3',
+  endpoint: 'https://nyc3.digitaloceanspaces.com',
+  forcePathStyle: true,
+  credentials: {
+    accessKeyId: process.env.SPACES_KEY,
+    secretAccessKey: process.env.SPACES_SECRET,
+  },
+});
+```
+
+## Google Cloud Storage
+
+Store files in Google Cloud Storage.
+
+### Setup
+
+```bash
+npm install @google-cloud/storage
+```
+
+### Basic Configuration
+
+```typescript
+import { GCSProvider } from '@classytic/media-kit/providers/gcs';
+
+const provider = new GCSProvider({
+  bucket: 'my-bucket',
+  projectId: 'my-project',
+  credentials: {
+    client_email: process.env.GCS_CLIENT_EMAIL,
+    private_key: process.env.GCS_PRIVATE_KEY,
+  },
+});
+```
+
+### With Service Account
+
+```typescript
+const provider = new GCSProvider({
+  bucket: 'my-bucket',
+  keyFilename: './service-account.json',
+});
+```
+
+### With CDN
+
+```typescript
+const provider = new GCSProvider({
+  bucket: 'my-bucket',
+  publicUrl: 'https://cdn.example.com',
+});
+```
+
+## Custom Provider
+
+Create your own storage provider:
+
+```typescript
+import { StorageProvider, UploadResult } from '@classytic/media-kit';
+
+class CustomProvider implements StorageProvider {
+  readonly name = 'custom';
+
+  async upload(
+    buffer: Buffer,
+    filename: string,
+    options?: any
+  ): Promise<UploadResult> {
+    // Your upload logic
+    const key = `${options.folder}/${filename}`;
+    const url = `https://my-cdn.com/${key}`;
+
+    // Upload buffer to your storage...
+
+    return {
+      url,
+      key,
+      size: buffer.length,
+      mimeType: options.mimeType,
+    };
+  }
+
+  async delete(key: string): Promise<boolean> {
+    // Your delete logic
+    return true;
+  }
+
+  async exists(key: string): Promise<boolean> {
+    // Your exists check
+    return true;
+  }
+}
+
+const provider = new CustomProvider();
+```
+
+## Switching Providers
+
+Easily switch between providers:
+
+```typescript
+// Development - Local
+const provider = new LocalStorageProvider({
+  uploadDir: './uploads',
+  publicUrl: 'http://localhost:3000/uploads',
+});
+
+// Production - S3
+const provider = new S3Provider({
+  bucket: process.env.S3_BUCKET,
+  region: process.env.S3_REGION,
+});
+
+// Everything else stays the same
+const media = createMedia({ provider });
+```
+
+## Environment-Based Selection
+
+```typescript
+function getProvider() {
+  if (process.env.NODE_ENV === 'production') {
+    return new S3Provider({
+      bucket: process.env.S3_BUCKET,
+      region: process.env.S3_REGION,
+    });
+  }
+
+  return new LocalStorageProvider({
+    uploadDir: './uploads',
+    publicUrl: 'http://localhost:3000/uploads',
+  });
+}
+
+const media = createMedia({
+  provider: getProvider(),
+});
+```
+
+## Next Steps
+
+- [Events](./events.mdx) - Hook into storage operations
+- [API Reference](../api/providers.mdx) - Full provider API

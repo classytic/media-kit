@@ -1,0 +1,195 @@
+# Uploading Files
+
+Learn different ways to upload files.
+
+## Single File Upload
+
+```typescript
+const file = await media.upload({
+  buffer: fileBuffer,
+  filename: 'photo.jpg',
+  mimeType: 'image/jpeg',
+  folder: 'images',
+});
+
+console.log(file.url);   // CDN URL
+console.log(file.key);   // Storage key
+console.log(file.size);  // File size in bytes
+```
+
+## With Metadata
+
+Add custom metadata:
+
+```typescript
+const file = await media.upload({
+  buffer: fileBuffer,
+  filename: 'product.jpg',
+  mimeType: 'image/jpeg',
+
+  // Custom fields
+  title: 'Red Running Shoes',
+  alt: 'Red sneakers on white background',
+  caption: 'New arrival - 2024 collection',
+
+  // Organization
+  folder: 'products',
+  organizationId: 'org_123',
+});
+```
+
+## Multiple Files
+
+Upload several files at once:
+
+```typescript
+const files = await media.uploadMany([
+  { buffer: buffer1, filename: 'photo1.jpg', mimeType: 'image/jpeg' },
+  { buffer: buffer2, filename: 'photo2.jpg', mimeType: 'image/jpeg' },
+  { buffer: buffer3, filename: 'photo3.jpg', mimeType: 'image/jpeg' },
+]);
+
+files.forEach(f => console.log(f.url));
+```
+
+## From Express/Multer
+
+```typescript
+import multer from 'multer';
+
+const upload = multer();
+
+app.post('/upload', upload.single('file'), async (req, res) => {
+  const file = await media.upload({
+    buffer: req.file.buffer,
+    filename: req.file.originalname,
+    mimeType: req.file.mimetype,
+  });
+
+  res.json({ url: file.url });
+});
+```
+
+## From Next.js API Route
+
+```typescript
+// app/api/upload/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+
+export async function POST(req: NextRequest) {
+  const formData = await req.formData();
+  const file = formData.get('file') as File;
+
+  const buffer = Buffer.from(await file.arrayBuffer());
+
+  const uploaded = await media.upload({
+    buffer,
+    filename: file.name,
+    mimeType: file.type,
+  });
+
+  return NextResponse.json({ url: uploaded.url });
+}
+```
+
+## With File Validation
+
+```typescript
+// Validate before upload
+if (file.size > 5 * 1024 * 1024) {
+  throw new Error('File too large (max 5MB)');
+}
+
+if (!file.mimetype.startsWith('image/')) {
+  throw new Error('Only images allowed');
+}
+
+const uploaded = await media.upload({
+  buffer: file.buffer,
+  filename: file.originalname,
+  mimeType: file.mimetype,
+});
+```
+
+## Auto Alt Text
+
+Media Kit auto-generates alt text from filenames:
+
+```typescript
+const file = await media.upload({
+  buffer: fileBuffer,
+  filename: 'red-running-shoes-2024.jpg',
+  mimeType: 'image/jpeg',
+});
+
+console.log(file.alt);  // "Red running shoes 2024"
+```
+
+Override auto-generated alt:
+
+```typescript
+const file = await media.upload({
+  buffer: fileBuffer,
+  filename: 'IMG_1234.jpg',
+  mimeType: 'image/jpeg',
+  alt: 'Product photo in studio lighting',
+});
+```
+
+## Multi-Tenant Upload
+
+Upload files scoped to an organization:
+
+```typescript
+const file = await media.upload({
+  buffer: fileBuffer,
+  filename: 'logo.png',
+  mimeType: 'image/png',
+  organizationId: req.user.organizationId,
+});
+
+// File is isolated to this organization
+```
+
+## With Context
+
+Pass request context (user, permissions):
+
+```typescript
+const file = await media.upload(
+  {
+    buffer: fileBuffer,
+    filename: 'document.pdf',
+    mimeType: 'application/pdf',
+  },
+  {
+    userId: req.user.id,
+    organizationId: req.user.organizationId,
+  }
+);
+```
+
+## Error Handling
+
+```typescript
+try {
+  const file = await media.upload({
+    buffer: fileBuffer,
+    filename: 'photo.jpg',
+    mimeType: 'image/jpeg',
+  });
+} catch (error) {
+  if (error.message.includes('File type not allowed')) {
+    // Handle invalid file type
+  } else if (error.message.includes('exceeds maximum size')) {
+    // Handle file too large
+  } else {
+    // Handle other errors
+  }
+}
+```
+
+## Next Steps
+
+- [Image Processing](./image-processing.mdx) - Auto-resize images
+- [Events](./events.mdx) - Hook into uploads
