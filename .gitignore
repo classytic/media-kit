@@ -1,23 +1,76 @@
 # Dependencies
 node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
 
 # Build output
 dist/
+build/
+*.tsbuildinfo
 
 # Test coverage
 coverage/
+.nyc_output/
 
-# IDE
+# IDE & Editor
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+.DS_Store
 
 # OS
 .DS_Store
 Thumbs.db
+Desktop.ini
 
 # Logs
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+pnpm-debug.log*
 
-# Local env
+# Environment & Secrets
 .env
-.env.local
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+secrets.json
+credentials.json
+serviceAccount.json
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+.temp/
+tmp/
+
+# Documentation (kept in git but not in package)
+docs/
+
+# Test files (kept in git but not in package)
+tests/
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+
+# Example files (kept in git but not in package)
+examples/
+
+# Local development
+.local/
+local/
+
+# Debug
+debug.log
+*.pid
+*.seed

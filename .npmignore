@@ -1,24 +1,26 @@
-# Source files (only ship dist/)
+# Note: package.json "files" field whitelists ["dist", "README.md"]
+# This .npmignore is supplementary to exclude sensitive files
+
+# Source files (TypeScript source not needed, only compiled dist/)
 src/
+tsconfig.json
+*.tsbuildinfo
 
 # Test files
+tests/
 *.test.js
 *.test.ts
 *.spec.js
 *.spec.ts
-test/
-tests/
-__tests__/
-**/__tests__/
 vitest.config.ts
 coverage/
+.nyc_output/
 
 # Documentation (GitHub only)
 docs/
 examples/
 *.md
 !README.md
-ENHANCEMENTS.md
 
 # Development files
 .github/
@@ -28,33 +30,39 @@ ENHANCEMENTS.md
 .eslintrc*
 .prettierrc*
 *.log
-.DS_Store
+
+# Environment & Secrets
 .env
 .env.*
-tsconfig.json
-jsconfig.json
-*.swp
-*.swo
-*~
+*.key
+*.pem
+*.p12
+*.pfx
+secrets.json
+credentials.json
+serviceAccount.json
 
 # Source control
 .git
 .gitignore
 .gitattributes
 
-# Build/CI artifacts
-*.tgz
-node_modules/
-coverage/
-.nyc_output/
-dist/
-build/
-.npmrc
-
 # OS files
+.DS_Store
 Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
 
 # Package manager lock files
 package-lock.json
 yarn.lock
 pnpm-lock.yaml
+
+# Temporary & cache
+*.tmp
+*.temp
+.cache/
+tmp/
+node_modules/
