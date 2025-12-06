@@ -1,15 +1,16 @@
 /**
  * Media Kit Factory
  * 
- * Creates a configured media management instance.
+ * Creates a configured media management instance powered by mongokit.
  * 
  * @example
  * ```ts
  * import { createMedia } from '@classytic/media-kit';
  * import { S3Provider } from '@classytic/media-kit/providers/s3';
+ * import { cachePlugin, createMemoryCache } from '@classytic/mongokit';
  * import mongoose from 'mongoose';
  * 
- * // 1. Create media kit instance
+ * // 1. Create media kit instance with mongokit plugins
  * const media = createMedia({
  *   provider: new S3Provider({ bucket: 'my-bucket', region: 'us-east-1' }),
  *   folders: {
@@ -25,6 +26,10 @@
  *       avatar: { aspectRatio: 1, fit: 'cover' },
  *     },
  *   },
+ *   // Mongokit plugins
+ *   plugins: [
+ *     cachePlugin({ adapter: createMemoryCache() })
+ *   ],
  * });
  * 
  * // 2. Create mongoose model from schema
@@ -33,17 +38,30 @@
  * // 3. Initialize with model
  * media.init(Media);
  * 
- * // 4. Use it
+ * // 4. Use it - full mongokit features available
  * const uploaded = await media.upload({
  *   buffer: fileBuffer,
  *   filename: 'product.jpg',
  *   mimeType: 'image/jpeg',
  *   folder: 'products/featured',
  * });
+ * 
+ * // Smart pagination (auto-detects offset vs keyset)
+ * const page1 = await media.getAll({ page: 1, limit: 20 });
+ * const stream = await media.getAll({ sort: { createdAt: -1 }, limit: 50 });
+ * const next = await media.getAll({ after: stream.next, sort: { createdAt: -1 } });
+ * 
+ * // Direct repository access for advanced queries
+ * const stats = await media.repository.getStorageByFolder();
  * ```
  */
 
-import mongoose, { Model, Schema } from 'mongoose';
+import { Model, Schema } from 'mongoose';
+import type {
+  OffsetPaginationResult,
+  KeysetPaginationResult,
+  SortSpec,
+} from '@classytic/mongokit';
 import type {
   MediaKitConfig,
   MediaKit,
@@ -56,27 +74,24 @@ import type {
   BulkResult,
   ProcessingOptions,
   AspectRatioPreset,
+  MediaEventName,
+  EventListener,
+  EventContext,
+  EventResult,
+  EventError,
+  GeneratedVariant,
+  MediaModel,
 } from './types';
 import { createMediaSchema, DEFAULT_BASE_FOLDERS } from './schema/media.schema';
 import { MediaRepository } from './repository/media.repository';
 import { ImageProcessor } from './processing/image';
 import {
   isAllowedMimeType,
-  getMimeType,
   FILE_TYPE_PRESETS,
   isImage
 } from './utils/mime';
 import { extractBaseFolder, isValidFolder, normalizeFolderPath } from './utils/folders';
 import { generateAltText } from './utils/alt-text';
-import { computeFileHash } from './utils/hash';
-import type {
-  MediaEventName,
-  EventListener,
-  EventContext,
-  EventResult,
-  EventError,
-  GeneratedVariant
-} from './types';
 
 /**
  * Default configuration
@@ -114,11 +129,10 @@ class MediaKitImpl implements MediaKit {
   readonly config: MediaKitConfig;
   readonly provider: MediaKitConfig['provider'];
   readonly schema: Schema<IMediaDocument>;
-  readonly repository?: unknown;
-
-  private repo: MediaRepository | null = null;
+  
+  private _repository: MediaRepository | null = null;
   private processor: ImageProcessor | null = null;
-  private model: Model<IMediaDocument> | null = null;
+  private model: MediaModel | null = null;
   private logger: MediaKitConfig['logger'];
   private eventListeners: Map<MediaEventName, EventListener[]> = new Map();
 
@@ -155,13 +169,28 @@ class MediaKitImpl implements MediaKit {
   }
 
   /**
+   * Get repository (throws if not initialized)
+   */
+  get repository(): MediaRepository {
+    if (!this._repository) {
+      throw new Error('MediaKit not initialized. Call media.init(Model) first.');
+    }
+    return this._repository;
+  }
+
+  /**
    * Initialize with mongoose model
    */
-  init(model: Model<IMediaDocument>): this {
+  init(model: MediaModel): this {
     this.model = model;
-    this.repo = new MediaRepository(model, {
+    
+    // Create mongokit-powered repository
+    this._repository = new MediaRepository(model, {
       multiTenancy: this.config.multiTenancy,
+      plugins: this.config.plugins,
+      pagination: this.config.pagination,
     });
+    
     return this;
   }
 
@@ -191,16 +220,6 @@ class MediaKitImpl implements MediaKit {
   }
 
   /**
-   * Get repository (throws if not initialized)
-   */
-  private getRepo(): MediaRepository {
-    if (!this.repo) {
-      throw new Error('MediaKit not initialized. Call media.init(Model) first.');
-    }
-    return this.repo;
-  }
-
-  /**
    * Log helper
    */
   private log(level: 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>) {
@@ -220,7 +239,7 @@ class MediaKitImpl implements MediaKit {
     const organizationId = context?.organizationId;
     const field = this.config.multiTenancy.field || 'organizationId';
 
-    if (!organizationId) {
+    if (!organizationId && this.config.multiTenancy.required) {
       throw new Error(`Multi-tenancy enabled: '${field}' is required in context`);
     }
 
@@ -273,7 +292,7 @@ class MediaKitImpl implements MediaKit {
    * Upload single file
    */
   async upload(input: UploadInput, context?: OperationContext): Promise<IMediaDocument> {
-    const repo = this.getRepo();
+    const repo = this.repository;
     const { buffer, filename, mimeType, folder, title, contentType, skipProcessing } = input;
     let { alt } = input;
     const organizationId = this.requireTenant(context);
@@ -411,8 +430,8 @@ class MediaKitImpl implements MediaKit {
         }
       }
 
-      // Create database record
-      const media = await repo.create({
+      // Create database record using mongokit repository
+      const media = await repo.createMedia({
         filename: filename.split('/').pop() || filename,
         originalName: filename,
         mimeType: finalMimeType,
@@ -465,13 +484,39 @@ class MediaKitImpl implements MediaKit {
   }
 
   /**
+   * Get media by ID
+   */
+  async getById(id: string, context?: OperationContext): Promise<IMediaDocument | null> {
+    return this.repository.getMediaById(id, context);
+  }
+
+  /**
+   * Get all media with smart pagination
+   * Auto-detects offset (page) vs keyset (cursor) based on params
+   */
+  async getAll(
+    params: {
+      filters?: Record<string, unknown>;
+      sort?: SortSpec | string;
+      limit?: number;
+      page?: number;
+      cursor?: string;
+      after?: string;
+      search?: string;
+    } = {},
+    context?: OperationContext
+  ): Promise<OffsetPaginationResult<IMediaDocument> | KeysetPaginationResult<IMediaDocument>> {
+    return this.repository.getAllMedia(params, context);
+  }
+
+  /**
    * Delete single file
    */
   async delete(id: string, context?: OperationContext): Promise<boolean> {
-    const repo = this.getRepo();
+    const repo = this.repository;
 
     // Get media to find storage key
-    const media = await repo.getById(id, context);
+    const media = await repo.getMediaById(id, context);
     if (!media) {
       return false;
     }
@@ -511,7 +556,7 @@ class MediaKitImpl implements MediaKit {
     }
 
     // Delete from database
-    const deleted = await repo.delete(id, context);
+    const deleted = await repo.deleteMedia(id, context);
 
     if (deleted) {
       this.log('info', 'Media deleted', { id });
@@ -550,7 +595,7 @@ class MediaKitImpl implements MediaKit {
     targetFolder: string, 
     context?: OperationContext
   ): Promise<{ modifiedCount: number }> {
-    const repo = this.getRepo();
+    const repo = this.repository;
     const folder = normalizeFolderPath(targetFolder);
     
     // Validate folder
@@ -566,28 +611,28 @@ class MediaKitImpl implements MediaKit {
    * Get folder tree
    */
   async getFolderTree(context?: OperationContext): Promise<FolderTree> {
-    return this.getRepo().getFolderTree(context);
+    return this.repository.getFolderTree(context);
   }
 
   /**
    * Get folder stats
    */
   async getFolderStats(folder: string, context?: OperationContext): Promise<FolderStats> {
-    return this.getRepo().getFolderStats(folder, context);
+    return this.repository.getFolderStats(folder, context);
   }
 
   /**
    * Get breadcrumb
    */
   getBreadcrumb(folder: string): BreadcrumbItem[] {
-    return this.getRepo().getBreadcrumb(folder);
+    return this.repository.getBreadcrumb(folder);
   }
 
   /**
    * Delete folder (all files in folder)
    */
   async deleteFolder(folder: string, context?: OperationContext): Promise<BulkResult> {
-    const repo = this.getRepo();
+    const repo = this.repository;
     const files = await repo.getFilesInFolder(folder, context);
 
     const result: BulkResult = { success: [], failed: [] };
@@ -626,7 +671,7 @@ class MediaKitImpl implements MediaKit {
     // Bulk delete from database
     const successIds = result.success;
     if (successIds.length > 0) {
-      await repo.deleteMany(successIds, context);
+      await repo.deleteManyMedia(successIds, context);
     }
 
     this.log('info', 'Folder deleted', {
@@ -642,7 +687,7 @@ class MediaKitImpl implements MediaKit {
 /**
  * Create media kit instance
  */
-export function createMedia(config: MediaKitConfig): MediaKit & { init: (model: Model<IMediaDocument>) => MediaKit } {
+export function createMedia(config: MediaKitConfig): MediaKit {
   return new MediaKitImpl(config);
 }
 

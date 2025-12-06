@@ -1,15 +1,17 @@
 /**
  * @classytic/media-kit
  * 
- * Production-grade media management for Mongoose with pluggable storage providers.
+ * Production-grade media management for Mongoose powered by @classytic/mongokit.
+ * Features pluggable storage providers, smart pagination, and full TypeScript support.
  * 
  * @example
  * ```ts
  * import { createMedia, createMediaSchema } from '@classytic/media-kit';
  * import { S3Provider } from '@classytic/media-kit/providers/s3';
+ * import { cachePlugin, createMemoryCache } from '@classytic/mongokit';
  * import mongoose from 'mongoose';
  * 
- * // Create media kit
+ * // Create media kit with mongokit plugins
  * const media = createMedia({
  *   provider: new S3Provider({
  *     bucket: 'my-bucket',
@@ -22,6 +24,10 @@
  *     format: 'webp',
  *     quality: 80,
  *   },
+ *   // Mongokit cache plugin
+ *   plugins: [
+ *     cachePlugin({ adapter: createMemoryCache() })
+ *   ],
  * });
  * 
  * // Create model and initialize
@@ -35,6 +41,14 @@
  *   mimeType: 'image/jpeg',
  *   folder: 'products/featured',
  * });
+ * 
+ * // Smart pagination (mongokit-powered)
+ * const page1 = await media.getAll({ page: 1, limit: 20 });
+ * const stream = await media.getAll({ sort: { createdAt: -1 }, limit: 50 });
+ * const next = await media.getAll({ after: stream.next, sort: { createdAt: -1 } });
+ * 
+ * // Direct repository access for advanced queries
+ * const stats = await media.repository.getStorageByFolder();
  * ```
  * 
  * @packageDocumentation
@@ -47,9 +61,9 @@ export { createMedia } from './media';
 export { createMediaSchema, MediaSchema, DEFAULT_BASE_FOLDERS } from './schema/media.schema';
 export type { MediaSchemaOptions } from './schema/media.schema';
 
-// Repository
+// Repository (extends mongokit Repository)
 export { createMediaRepository, MediaRepository } from './repository/media.repository';
-export type { MediaRepositoryOptions } from './repository/media.repository';
+export type { MediaRepositoryOptions, FolderAggregateResult } from './repository/media.repository';
 
 // Processing
 export { ImageProcessor, createImageProcessor } from './processing/image';
@@ -60,7 +74,7 @@ export * from './utils/mime';
 export * from './utils/hash';
 export * from './utils/alt-text';
 
-// Types
+// Types - Media Kit specific
 export type {
   // Storage
   StorageProvider,
@@ -73,18 +87,25 @@ export type {
   ProcessingOptions,
   ProcessedImage,
   ImageProcessor as IImageProcessor,
+  SizeVariant,
+  GeneratedVariant,
+  AltGenerationConfig,
   
   // Documents
   IMedia,
   IMediaDocument,
   MediaModel,
+  ExifMetadata,
+  VideoMetadata,
   
   // Configuration
   MediaKitConfig,
   FileTypesConfig,
   FolderConfig,
   MultiTenancyConfig,
-  Logger,
+  FieldAccessConfig,
+  DeduplicationConfig,
+  MediaKitLogger,
   
   // Operations
   OperationContext,
@@ -97,6 +118,50 @@ export type {
   BreadcrumbItem,
   FolderStats,
   
+  // Events
+  MediaEventName,
+  EventContext,
+  EventResult,
+  EventError,
+  EventListener,
+  EventEmitter,
+  
   // Main
   MediaKit,
+} from './types';
+
+// Re-export mongokit types for convenience
+export type {
+  // Pagination
+  PaginationConfig,
+  OffsetPaginationResult,
+  KeysetPaginationResult,
+  AggregatePaginationResult,
+  PaginationResult,
+  SortSpec,
+  SortDirection,
+  PopulateSpec,
+  SelectSpec,
+  
+  // Plugins
+  Plugin,
+  PluginFunction,
+  PluginType,
+  
+  // Cache
+  CacheAdapter,
+  CacheOptions,
+  CacheOperationOptions,
+  
+  // Repository
+  RepositoryContext,
+  RepositoryEvent,
+  EventPayload,
+  OperationOptions,
+  CreateOptions,
+  UpdateOptions,
+  DeleteResult,
+  
+  // Error
+  HttpError,
 } from './types';

@@ -38,7 +38,7 @@ describe('Package Contents', () => {
     expect(packageJson.scripts.prepublishOnly).toContain('typecheck');
   });
 
-  it('should have all peer dependencies marked as optional', () => {
+  it('should have correct peer dependencies configuration', () => {
     const packageJson = JSON.parse(
       readFileSync(join(__dirname, '../package.json'), 'utf-8')
     );
@@ -50,10 +50,13 @@ describe('Package Contents', () => {
     expect(peerDepsMeta['sharp']).toEqual({ optional: true });
     expect(peerDepsMeta['@aws-sdk/client-s3']).toEqual({ optional: true });
     expect(peerDepsMeta['@google-cloud/storage']).toEqual({ optional: true });
-    expect(peerDepsMeta['@classytic/mongokit']).toEqual({ optional: true });
 
-    // mongoose should be required (not optional)
+    // mongoose and mongokit should be required (not optional)
     expect(peerDepsMeta['mongoose']).toBeUndefined();
+    expect(peerDepsMeta['@classytic/mongokit']).toBeUndefined();
+    
+    // mongokit should be >=2.1.0
+    expect(peerDeps['@classytic/mongokit']).toBe('>=2.1.0');
   });
 
   it('should only have mime-types as runtime dependency', () => {

@@ -1,11 +1,13 @@
 /**
- * Integration Tests - Full Upload/Delete Flow
+ * Integration Tests - Full Upload/Delete Flow with Mongokit Features
  */
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import mongoose from 'mongoose';
 import { createMedia } from '../src/media';
-import type { StorageProvider, UploadResult, UploadOptions } from '../src/types';
+import { MediaRepository } from '../src/repository/media.repository';
+import type { StorageProvider, UploadResult, UploadOptions, IMediaDocument } from '../src/types';
+import type { OffsetPaginationResult, KeysetPaginationResult } from '@classytic/mongokit';
 
 // Mock in-memory storage provider
 class MemoryStorageProvider implements StorageProvider {
@@ -43,8 +45,8 @@ describe('Media Kit Integration Tests', () => {
   let provider: MemoryStorageProvider;
 
   beforeAll(async () => {
-    // Connect to test database
-    await mongoose.connect('mongodb://localhost:27017/mediakit-test');
+    // Connect to test database (unique name to avoid conflicts)
+    await mongoose.connect('mongodb://localhost:27017/mediakit-integration-test');
   });
 
   afterAll(async () => {
@@ -52,8 +54,8 @@ describe('Media Kit Integration Tests', () => {
     await mongoose.disconnect();
   });
 
-  afterEach(async () => {
-    // Clean up all test collections
+  beforeEach(async () => {
+    // Clean up before each test for isolation
     const collections = await mongoose.connection.db?.collections();
     if (collections) {
       for (const collection of collections) {
@@ -66,10 +68,8 @@ describe('Media Kit Integration Tests', () => {
       delete mongoose.models[key];
     });
 
-    // Clear storage
-    if (provider) {
-      provider.clear();
-    }
+    // Create fresh provider
+    provider = new MemoryStorageProvider();
   });
 
   describe('Upload Flow', () => {
@@ -366,6 +366,312 @@ describe('Media Kit Integration Tests', () => {
           folder: 'invalid',
         })
       ).rejects.toThrow(/Invalid base folder/);
+    });
+  });
+
+  describe('Mongokit Integration', () => {
+    it('should expose mongokit Repository with full features', async () => {
+      provider = new MemoryStorageProvider();
+      const media = createMedia({
+        provider,
+        suppressWarnings: true,
+      });
+
+      const Media = mongoose.model('MediaRepoTest', media.schema);
+      media.init(Media);
+
+      // Repository should be a MediaRepository (extends mongokit Repository)
+      expect(media.repository).toBeInstanceOf(MediaRepository);
+      expect(media.repository.Model).toBe(Media);
+    });
+
+    it('should support offset pagination via getAll', async () => {
+      provider = new MemoryStorageProvider();
+      const media = createMedia({
+        provider,
+        suppressWarnings: true,
+      });
+
+      const Media = mongoose.model('MediaOffsetTest', media.schema);
+      media.init(Media);
+
+      // Upload 15 files
+      for (let i = 0; i < 15; i++) {
+        await media.upload({
+          buffer: Buffer.from(`file${i}`),
+          filename: `file${i}.txt`,
+          mimeType: 'text/plain',
+          folder: 'general',
+        });
+      }
+
+      // Get page 1 with offset pagination
+      const page1 = await media.getAll({ page: 1, limit: 10 });
+
+      expect(page1.method).toBe('offset');
+      expect(page1.docs).toHaveLength(10);
+      expect((page1 as OffsetPaginationResult<IMediaDocument>).page).toBe(1);
+      expect((page1 as OffsetPaginationResult<IMediaDocument>).total).toBe(15);
+      expect((page1 as OffsetPaginationResult<IMediaDocument>).pages).toBe(2);
+      expect((page1 as OffsetPaginationResult<IMediaDocument>).hasNext).toBe(true);
+
+      // Get page 2
+      const page2 = await media.getAll({ page: 2, limit: 10 });
+      expect(page2.docs).toHaveLength(5);
+      expect((page2 as OffsetPaginationResult<IMediaDocument>).hasNext).toBe(false);
+    });
+
+    it('should support keyset (cursor) pagination via getAll', async () => {
+      provider = new MemoryStorageProvider();
+      const media = createMedia({
+        provider,
+        suppressWarnings: true,
+      });
+
+      const Media = mongoose.model('MediaKeysetTest', media.schema);
+      media.init(Media);
+
+      // Upload 15 files with slight delay to ensure different timestamps
+      for (let i = 0; i < 15; i++) {
+        await media.upload({
+          buffer: Buffer.from(`file${i}`),
+          filename: `file${i}.txt`,
+          mimeType: 'text/plain',
+          folder: 'general',
+        });
+      }
+
+      // Get first batch with keyset pagination (no page param = keyset mode)
+      const batch1 = await media.getAll({ 
+        sort: { createdAt: -1 }, 
+        limit: 10 
+      });
+
+      expect(batch1.method).toBe('keyset');
+      expect(batch1.docs).toHaveLength(10);
+      expect((batch1 as KeysetPaginationResult<IMediaDocument>).hasMore).toBe(true);
+      expect((batch1 as KeysetPaginationResult<IMediaDocument>).next).toBeDefined();
+
+      // Get next batch using cursor
+      const batch2 = await media.getAll({ 
+        after: (batch1 as KeysetPaginationResult<IMediaDocument>).next!,
+        sort: { createdAt: -1 }, 
+        limit: 10 
+      });
+
+      expect(batch2.docs).toHaveLength(5);
+      expect((batch2 as KeysetPaginationResult<IMediaDocument>).hasMore).toBe(false);
+    });
+
+    it('should support filtering with pagination', async () => {
+      provider = new MemoryStorageProvider();
+      const media = createMedia({
+        provider,
+        folders: {
+          baseFolders: ['images', 'documents'],
+        },
+        suppressWarnings: true,
+      });
+
+      const Media = mongoose.model('MediaFilterTest', media.schema);
+      media.init(Media);
+
+      // Upload files to different folders
+      await media.upload({
+        buffer: Buffer.from('img1'),
+        filename: 'img1.jpg',
+        mimeType: 'image/jpeg',
+        folder: 'images',
+      });
+      await media.upload({
+        buffer: Buffer.from('img2'),
+        filename: 'img2.jpg',
+        mimeType: 'image/jpeg',
+        folder: 'images',
+      });
+      await media.upload({
+        buffer: Buffer.from('doc1'),
+        filename: 'doc1.pdf',
+        mimeType: 'application/pdf',
+        folder: 'documents',
+      });
+
+      // Filter by folder
+      const imagesOnly = await media.getAll({
+        filters: { folder: 'images' },
+        page: 1,
+        limit: 10,
+      });
+
+      expect(imagesOnly.docs).toHaveLength(2);
+      expect(imagesOnly.docs.every(d => d.folder === 'images')).toBe(true);
+    });
+
+    it('should provide repository analytics methods', async () => {
+      provider = new MemoryStorageProvider();
+      const media = createMedia({
+        provider,
+        folders: {
+          baseFolders: ['images', 'documents'],
+        },
+        suppressWarnings: true,
+      });
+
+      const Media = mongoose.model('MediaAnalyticsTest', media.schema);
+      media.init(Media);
+
+      // Upload files
+      await media.upload({
+        buffer: Buffer.alloc(1000),
+        filename: 'img1.jpg',
+        mimeType: 'image/jpeg',
+        folder: 'images',
+      });
+      await media.upload({
+        buffer: Buffer.alloc(2000),
+        filename: 'img2.jpg',
+        mimeType: 'image/jpeg',
+        folder: 'images',
+      });
+      await media.upload({
+        buffer: Buffer.alloc(500),
+        filename: 'doc1.pdf',
+        mimeType: 'application/pdf',
+        folder: 'documents',
+      });
+
+      // Get total storage used
+      const totalStorage = await media.repository.getTotalStorageUsed();
+      expect(totalStorage).toBe(3500);
+
+      // Get storage by folder
+      const storageByFolder = await media.repository.getStorageByFolder();
+      expect(storageByFolder).toHaveLength(2);
+      
+      const imagesFolder = storageByFolder.find(f => f.folder === 'images');
+      expect(imagesFolder?.size).toBe(3000);
+      expect(imagesFolder?.count).toBe(2);
+
+      const docsFolder = storageByFolder.find(f => f.folder === 'documents');
+      expect(docsFolder?.size).toBe(500);
+      expect(docsFolder?.count).toBe(1);
+    });
+
+    it('should support getById method', async () => {
+      provider = new MemoryStorageProvider();
+      const media = createMedia({
+        provider,
+        suppressWarnings: true,
+      });
+
+      const Media = mongoose.model('MediaGetByIdTest', media.schema);
+      media.init(Media);
+
+      const uploaded = await media.upload({
+        buffer: Buffer.from('test'),
+        filename: 'test.txt',
+        mimeType: 'text/plain',
+        folder: 'general',
+      });
+
+      const found = await media.getById((uploaded as any)._id.toString());
+      expect(found).toBeDefined();
+      expect(found!.filename).toBe('test.txt');
+
+      // Non-existent ID should return null
+      const notFound = await media.getById('507f1f77bcf86cd799439011');
+      expect(notFound).toBeNull();
+    });
+
+    it('should support repository direct access for advanced queries', async () => {
+      provider = new MemoryStorageProvider();
+      const media = createMedia({
+        provider,
+        folders: {
+          baseFolders: ['images', 'documents'],
+        },
+        suppressWarnings: true,
+      });
+
+      const Media = mongoose.model('MediaAdvancedTest', media.schema);
+      media.init(Media);
+
+      // Upload files
+      await media.upload({
+        buffer: Buffer.from('img'),
+        filename: 'photo.jpg',
+        mimeType: 'image/jpeg',
+        folder: 'images/vacation',
+      });
+      await media.upload({
+        buffer: Buffer.from('doc'),
+        filename: 'report.pdf',
+        mimeType: 'application/pdf',
+        folder: 'documents/work',
+      });
+
+      // Use repository getByMimeType
+      const images = await media.repository.getByMimeType('image/*');
+      expect(images.docs).toHaveLength(1);
+      expect(images.docs[0].mimeType).toBe('image/jpeg');
+
+      // Use repository getRecentUploads
+      const recent = await media.repository.getRecentUploads(5);
+      expect(recent).toHaveLength(2);
+
+      // Use repository countInFolder
+      const imageCount = await media.repository.countInFolder('images');
+      expect(imageCount).toBe(1);
+    });
+
+    it('should support folder tree operations', async () => {
+      provider = new MemoryStorageProvider();
+      const media = createMedia({
+        provider,
+        folders: {
+          baseFolders: ['images', 'documents'],
+        },
+        suppressWarnings: true,
+      });
+
+      const Media = mongoose.model('MediaFolderTreeTest', media.schema);
+      media.init(Media);
+
+      // Upload files to nested folders
+      await media.upload({
+        buffer: Buffer.from('img1'),
+        filename: 'photo1.jpg',
+        mimeType: 'image/jpeg',
+        folder: 'images/vacation/2024',
+      });
+      await media.upload({
+        buffer: Buffer.from('img2'),
+        filename: 'photo2.jpg',
+        mimeType: 'image/jpeg',
+        folder: 'images/vacation/2024',
+      });
+      await media.upload({
+        buffer: Buffer.from('doc'),
+        filename: 'report.pdf',
+        mimeType: 'application/pdf',
+        folder: 'documents',
+      });
+
+      // Get folder tree
+      const tree = await media.getFolderTree();
+      expect(tree.folders.length).toBeGreaterThan(0);
+      expect(tree.meta.totalFiles).toBe(3);
+
+      // Get folder stats
+      const stats = await media.getFolderStats('images');
+      expect(stats.totalFiles).toBe(2);
+
+      // Get breadcrumb
+      const breadcrumb = media.getBreadcrumb('images/vacation/2024');
+      expect(breadcrumb).toHaveLength(3);
+      expect(breadcrumb[0].name).toBe('images');
+      expect(breadcrumb[1].name).toBe('vacation');
+      expect(breadcrumb[2].name).toBe('2024');
     });
   });
 });

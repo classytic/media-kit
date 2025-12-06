@@ -2,9 +2,49 @@
  * @classytic/media-kit - Type Definitions
  * 
  * Clean, self-documenting types for media management.
+ * Re-exports relevant mongokit types for convenience.
  */
 
 import type { Document, Schema, Model, Types } from 'mongoose';
+import type { MediaRepository } from './repository/media.repository';
+
+// Re-export mongokit types for consumers
+export type {
+  // Pagination
+  PaginationConfig,
+  OffsetPaginationResult,
+  KeysetPaginationResult,
+  AggregatePaginationResult,
+  PaginationResult,
+  SortSpec,
+  SortDirection,
+  PopulateSpec,
+  SelectSpec,
+  
+  // Repository
+  RepositoryContext,
+  RepositoryEvent,
+  EventPayload,
+  
+  // Plugins
+  Plugin,
+  PluginFunction,
+  PluginType,
+  
+  // Cache
+  CacheAdapter,
+  CacheOptions,
+  CacheOperationOptions,
+  
+  // Operations
+  OperationOptions,
+  CreateOptions,
+  UpdateOptions,
+  DeleteResult,
+  
+  // Error
+  HttpError,
+} from '@classytic/mongokit';
 
 // ============================================
 // STORAGE PROVIDER TYPES
@@ -358,15 +398,19 @@ export interface MediaKitConfig {
   /** File deduplication config */
   deduplication?: DeduplicationConfig;
   /** Logger instance (optional) */
-  logger?: Logger;
+  logger?: MediaKitLogger;
   /** Suppress warnings about missing optional dependencies (default: false) */
   suppressWarnings?: boolean;
+  /** Mongokit plugins to apply to the repository */
+  plugins?: import('@classytic/mongokit').PluginType[];
+  /** Pagination configuration for the repository */
+  pagination?: import('@classytic/mongokit').PaginationConfig;
 }
 
 /**
  * Logger interface (compatible with console, pino, winston, etc.)
  */
-export interface Logger {
+export interface MediaKitLogger {
   info(message: string, meta?: Record<string, unknown>): void;
   warn(message: string, meta?: Record<string, unknown>): void;
   error(message: string, meta?: Record<string, unknown>): void;
@@ -474,7 +518,7 @@ export interface BulkResult<T = string> {
 // ============================================
 
 /**
- * Available event names (follows mongokit pattern)
+ * Media-specific event names
  */
 export type MediaEventName =
   | 'before:upload'
@@ -537,7 +581,7 @@ export interface EventError<T = unknown> {
 export type EventListener<T = unknown> = (payload: T) => void | Promise<void>;
 
 /**
- * Event emitter interface (compatible with mongokit pattern)
+ * Event emitter interface
  */
 export interface EventEmitter {
   /** Register event listener */
@@ -560,11 +604,14 @@ export interface MediaKit extends EventEmitter {
   readonly provider: StorageProvider;
   /** Mongoose schema (use this to create your model) */
   readonly schema: Schema<IMediaDocument>;
-  /** Underlying repository (if using @classytic/mongokit) */
-  readonly repository?: unknown;
+  /** 
+   * Mongokit-powered repository with full pagination, events, and plugin support
+   * Available after calling init()
+   */
+  readonly repository: MediaRepository;
 
   // Initialization
-  init(model: MediaModel): void;
+  init(model: MediaModel): this;
 
   // Core operations
   upload(input: UploadInput, context?: OperationContext): Promise<IMediaDocument>;
@@ -572,6 +619,21 @@ export interface MediaKit extends EventEmitter {
   delete(id: string, context?: OperationContext): Promise<boolean>;
   deleteMany(ids: string[], context?: OperationContext): Promise<BulkResult>;
   move(ids: string[], targetFolder: string, context?: OperationContext): Promise<{ modifiedCount: number }>;
+
+  // Query operations (proxied to repository)
+  getById(id: string, context?: OperationContext): Promise<IMediaDocument | null>;
+  getAll(
+    params?: {
+      filters?: Record<string, unknown>;
+      sort?: import('@classytic/mongokit').SortSpec | string;
+      limit?: number;
+      page?: number;
+      cursor?: string;
+      after?: string;
+      search?: string;
+    },
+    context?: OperationContext
+  ): Promise<import('@classytic/mongokit').OffsetPaginationResult<IMediaDocument> | import('@classytic/mongokit').KeysetPaginationResult<IMediaDocument>>;
 
   // Folder operations
   getFolderTree(context?: OperationContext): Promise<FolderTree>;
