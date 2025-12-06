@@ -77,11 +77,26 @@ describe('Package Contents', () => {
     // Main export
     expect(packageJson.exports['.']).toBeDefined();
     expect(packageJson.exports['.'].import).toBe('./dist/index.mjs');
-    expect(packageJson.exports['.'].require).toBe('./dist/index.js');
+    expect(packageJson.exports['.'].require).toBe('./dist/index.cjs');
     expect(packageJson.exports['.'].types).toBe('./dist/index.d.ts');
 
     // Provider exports
     expect(packageJson.exports['./providers/s3']).toBeDefined();
+    expect(packageJson.exports['./providers/s3'].import).toBe('./dist/providers/s3.provider.mjs');
+    expect(packageJson.exports['./providers/s3'].require).toBe('./dist/providers/s3.provider.cjs');
+    
     expect(packageJson.exports['./providers/gcs']).toBeDefined();
+    expect(packageJson.exports['./providers/gcs'].import).toBe('./dist/providers/gcs.provider.mjs');
+    expect(packageJson.exports['./providers/gcs'].require).toBe('./dist/providers/gcs.provider.cjs');
+  });
+
+  it('should have type: module for ESM-first', () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(__dirname, '../package.json'), 'utf-8')
+    );
+
+    expect(packageJson.type).toBe('module');
+    expect(packageJson.main).toBe('dist/index.cjs');
+    expect(packageJson.module).toBe('dist/index.mjs');
   });
 });

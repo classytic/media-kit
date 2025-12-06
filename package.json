@@ -1,25 +1,26 @@
 {
   "name": "@classytic/media-kit",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Production-grade media management powered by mongokit - smart pagination, caching, events, and pluggable storage",
-  "main": "dist/index.js",
+  "type": "module",
+  "main": "dist/index.cjs",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
+      "require": "./dist/index.cjs"
     },
     "./providers/s3": {
       "types": "./dist/providers/s3.provider.d.ts",
       "import": "./dist/providers/s3.provider.mjs",
-      "require": "./dist/providers/s3.provider.js"
+      "require": "./dist/providers/s3.provider.cjs"
     },
     "./providers/gcs": {
       "types": "./dist/providers/gcs.provider.d.ts",
       "import": "./dist/providers/gcs.provider.mjs",
-      "require": "./dist/providers/gcs.provider.js"
+      "require": "./dist/providers/gcs.provider.cjs"
     }
   },
   "files": [
@@ -27,8 +28,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsup src/index.ts src/providers/s3.provider.ts src/providers/gcs.provider.ts --format cjs,esm --dts --clean",
-    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "build": "tsup",
+    "dev": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
