@@ -78,6 +78,7 @@ const media = createMedia({
       accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
       secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
     },
+    // acl: 'public-read', // Only needed if your bucket uses ACLs (not bucket policies)
   }),
   folders: {
     baseFolders: ['products', 'users', 'blog'],
@@ -359,8 +360,12 @@ const provider = new S3Provider({
   },
   // Optional: Custom CDN URL
   publicUrl: 'https://cdn.example.com',
-  // Optional: ACL for uploads
-  acl: 'public-read', // default
+
+  // Optional: ACL for uploads (defaults to undefined)
+  // When undefined, AWS SDK won't send ACL parameter - use bucket policies instead
+  // acl: 'public-read',  // Only set if your bucket uses ACLs
+  // acl: 'private',
+  // acl: 'authenticated-read',
 });
 ```
 

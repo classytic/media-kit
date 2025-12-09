@@ -54,7 +54,7 @@ export class S3Provider implements StorageProvider {
 
   constructor(config: S3ProviderConfig) {
     this.config = {
-      acl: 'public-read',
+      acl: undefined,
       ...config,
     };
     // Don't initialize immediately - let it fail gracefully on first use
@@ -123,7 +123,7 @@ export class S3Provider implements StorageProvider {
       Key: key,
       Body: buffer,
       ContentType: mimeType,
-      ACL: this.config.acl,
+      ...(this.config.acl && { ACL: this.config.acl }),
       Metadata: options.metadata,
     });
 

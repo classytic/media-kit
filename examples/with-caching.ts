@@ -18,6 +18,7 @@ const mediaWithMemoryCache = createMedia({
   provider: new S3Provider({
     bucket: process.env.S3_BUCKET!,
     region: process.env.AWS_REGION!,
+    // acl: 'public-read', // Only needed if your bucket uses ACLs (not bucket policies)
   }),
   // Add mongokit cache plugin
   plugins: [
@@ -58,6 +59,7 @@ const mediaWithRedis = createMedia({
   provider: new S3Provider({
     bucket: process.env.S3_BUCKET!,
     region: process.env.AWS_REGION!,
+    // acl: 'public-read', // Only needed if your bucket uses ACLs (not bucket policies)
   }),
   plugins: [
     cachePlugin({

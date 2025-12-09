@@ -20,6 +20,9 @@ const media = createMedia({
   provider: new S3Provider({
     bucket: process.env.S3_BUCKET!,
     region: process.env.AWS_REGION!,
+    // Note: ACL defaults to undefined (no ACL parameter sent to S3)
+    // Use bucket policies for access control instead of ACLs
+    // acl: 'public-read', // Only set if your bucket explicitly requires ACLs
   }),
   folders: {
     baseFolders: ['products', 'users', 'blog'],

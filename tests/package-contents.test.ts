@@ -55,8 +55,8 @@ describe('Package Contents', () => {
     expect(peerDepsMeta['mongoose']).toBeUndefined();
     expect(peerDepsMeta['@classytic/mongokit']).toBeUndefined();
     
-    // mongokit should be >=2.1.0
-    expect(peerDeps['@classytic/mongokit']).toBe('>=2.1.0');
+    // mongokit should be >=3.0.0
+    expect(peerDeps['@classytic/mongokit']).toBe('>=3.0.0');
   });
 
   it('should only have mime-types as runtime dependency', () => {
@@ -69,34 +69,40 @@ describe('Package Contents', () => {
     expect(deps).toEqual(['mime-types']);
   });
 
+  it('should be ESM-only with clean exports', () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(__dirname, '../package.json'), 'utf-8')
+    );
+
+    // ESM-only setup
+    expect(packageJson.type).toBe('module');
+    expect(packageJson.main).toBe('./dist/index.js');
+    expect(packageJson.types).toBe('./dist/index.d.ts');
+    
+    // No module field needed for ESM-only
+    expect(packageJson.module).toBeUndefined();
+  });
+
   it('should export main entry points correctly', () => {
     const packageJson = JSON.parse(
       readFileSync(join(__dirname, '../package.json'), 'utf-8')
     );
 
-    // Main export
-    expect(packageJson.exports['.']).toBeDefined();
-    expect(packageJson.exports['.'].import).toBe('./dist/index.mjs');
-    expect(packageJson.exports['.'].require).toBe('./dist/index.cjs');
-    expect(packageJson.exports['.'].types).toBe('./dist/index.d.ts');
+    // Main export - simple ESM-only
+    expect(packageJson.exports['.']).toEqual({
+      types: './dist/index.d.ts',
+      default: './dist/index.js',
+    });
 
     // Provider exports
-    expect(packageJson.exports['./providers/s3']).toBeDefined();
-    expect(packageJson.exports['./providers/s3'].import).toBe('./dist/providers/s3.provider.mjs');
-    expect(packageJson.exports['./providers/s3'].require).toBe('./dist/providers/s3.provider.cjs');
+    expect(packageJson.exports['./providers/s3']).toEqual({
+      types: './dist/providers/s3.provider.d.ts',
+      default: './dist/providers/s3.provider.js',
+    });
     
-    expect(packageJson.exports['./providers/gcs']).toBeDefined();
-    expect(packageJson.exports['./providers/gcs'].import).toBe('./dist/providers/gcs.provider.mjs');
-    expect(packageJson.exports['./providers/gcs'].require).toBe('./dist/providers/gcs.provider.cjs');
-  });
-
-  it('should have type: module for ESM-first', () => {
-    const packageJson = JSON.parse(
-      readFileSync(join(__dirname, '../package.json'), 'utf-8')
-    );
-
-    expect(packageJson.type).toBe('module');
-    expect(packageJson.main).toBe('dist/index.cjs');
-    expect(packageJson.module).toBe('dist/index.mjs');
+    expect(packageJson.exports['./providers/gcs']).toEqual({
+      types: './dist/providers/gcs.provider.d.ts',
+      default: './dist/providers/gcs.provider.js',
+    });
   });
 });

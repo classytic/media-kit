@@ -6,17 +6,18 @@ export default defineConfig({
     'src/providers/s3.provider.ts',
     'src/providers/gcs.provider.ts',
   ],
-  format: ['cjs', 'esm'],
+  format: ['esm'],
   dts: true,
   clean: true,
   splitting: true,
   sourcemap: true,
   treeshake: true,
-  external: ['mongoose', '@classytic/mongokit', 'sharp', '@aws-sdk/client-s3', '@aws-sdk/s3-request-presigner', '@google-cloud/storage'],
-  outExtension({ format }) {
-    return {
-      js: format === 'esm' ? '.mjs' : '.cjs',
-    };
-  },
+  external: [
+    'mongoose',
+    '@classytic/mongokit',
+    'sharp',
+    '@aws-sdk/client-s3',
+    '@aws-sdk/s3-request-presigner',
+    '@google-cloud/storage',
+  ],
 });
-
