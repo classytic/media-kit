@@ -56,7 +56,7 @@
  * ```
  */
 
-import { Model, Schema } from 'mongoose';
+import { Schema } from 'mongoose';
 import type {
   OffsetPaginationResult,
   KeysetPaginationResult,
@@ -82,45 +82,13 @@ import type {
   GeneratedVariant,
   MediaModel,
 } from './types';
-import { createMediaSchema, DEFAULT_BASE_FOLDERS } from './schema/media.schema';
+import { createMediaSchema } from './schema/media.schema';
 import { MediaRepository } from './repository/media.repository';
 import { ImageProcessor } from './processing/image';
-import {
-  isAllowedMimeType,
-  FILE_TYPE_PRESETS,
-  isImage
-} from './utils/mime';
+import { isAllowedMimeType, isImage, updateFilenameExtension } from './utils/mime';
 import { extractBaseFolder, isValidFolder, normalizeFolderPath } from './utils/folders';
 import { generateAltText } from './utils/alt-text';
-
-/**
- * Default configuration
- */
-const DEFAULT_CONFIG: Partial<MediaKitConfig> = {
-  fileTypes: {
-    allowed: [...FILE_TYPE_PRESETS.all],
-    maxSize: 50 * 1024 * 1024, // 50MB
-  },
-  folders: {
-    baseFolders: DEFAULT_BASE_FOLDERS,
-    defaultFolder: 'general',
-    contentTypeMap: {},
-  },
-  processing: {
-    enabled: true,
-    maxWidth: 2048,
-    quality: 80,
-    format: 'webp',
-    aspectRatios: {
-      default: { preserveRatio: true },
-    },
-  },
-  multiTenancy: {
-    enabled: false,
-    field: 'organizationId',
-    required: false,
-  },
-};
+import { mergeConfig } from './config';
 
 /**
  * Media Kit Implementation
@@ -132,20 +100,12 @@ class MediaKitImpl implements MediaKit {
   
   private _repository: MediaRepository | null = null;
   private processor: ImageProcessor | null = null;
-  private model: MediaModel | null = null;
+  private _model: MediaModel | null = null;
   private logger: MediaKitConfig['logger'];
   private eventListeners: Map<MediaEventName, EventListener[]> = new Map();
 
   constructor(config: MediaKitConfig) {
-    // Merge with defaults
-    this.config = {
-      ...DEFAULT_CONFIG,
-      ...config,
-      fileTypes: { ...DEFAULT_CONFIG.fileTypes, ...config.fileTypes },
-      folders: { ...DEFAULT_CONFIG.folders, ...config.folders },
-      processing: { ...DEFAULT_CONFIG.processing, ...config.processing },
-      multiTenancy: { ...DEFAULT_CONFIG.multiTenancy, ...config.multiTenancy },
-    } as MediaKitConfig;
+    this.config = mergeConfig(config);
 
     this.provider = config.provider;
     this.logger = config.logger;
@@ -182,7 +142,7 @@ class MediaKitImpl implements MediaKit {
    * Initialize with mongoose model
    */
   init(model: MediaModel): this {
-    this.model = model;
+    this._model = model;
     
     // Create mongokit-powered repository
     this._repository = new MediaRepository(model, {
@@ -274,6 +234,11 @@ class MediaKitImpl implements MediaKit {
    * Validate file
    */
   validateFile(buffer: Buffer, filename: string, mimeType: string): void {
+    // Check for empty file
+    if (!buffer || buffer.length === 0) {
+      throw new Error(`Cannot upload empty file '${filename}'. Buffer is empty or missing.`);
+    }
+
     const { allowed = [], maxSize } = this.config.fileTypes || {};
 
     // Check MIME type
@@ -339,6 +304,7 @@ class MediaKitImpl implements MediaKit {
       // Process image if applicable
       let finalBuffer = buffer;
       let finalMimeType = mimeType;
+      let finalFilename = filename;
       let dimensions: { width: number; height: number } | undefined;
       const variants: GeneratedVariant[] = [];
 
@@ -366,6 +332,11 @@ class MediaKitImpl implements MediaKit {
           finalMimeType = processed.mimeType;
           dimensions = { width: processed.width, height: processed.height };
 
+          // Update filename extension if format changed
+          if (finalMimeType !== mimeType) {
+            finalFilename = updateFilenameExtension(filename, finalMimeType);
+          }
+
           // Generate size variants if configured
           const sizeVariants = this.config.processing?.sizes;
           if (sizeVariants && sizeVariants.length > 0) {
@@ -379,7 +350,12 @@ class MediaKitImpl implements MediaKit {
             for (let i = 0; i < sizeVariants.length; i++) {
               const variant = sizeVariants[i];
               const variantResult = variantResults[i];
-              const variantFilename = `${filename.replace(/\.[^.]+$/, '')}-${variant.name}${filename.match(/\.[^.]+$/)?.[0] || ''}`;
+              // Use processed MIME type for correct extension
+              const baseFilename = finalFilename.replace(/\.[^.]+$/, '');
+              const variantFilename = updateFilenameExtension(
+                `${baseFilename}-${variant.name}`,
+                variantResult.mimeType
+              );
 
               const uploadResult = await this.provider.upload(
                 variantResult.buffer,
@@ -415,7 +391,7 @@ class MediaKitImpl implements MediaKit {
       }
 
       // Upload main file to storage
-      const result = await this.provider.upload(finalBuffer, filename, {
+      const result = await this.provider.upload(finalBuffer, finalFilename, {
         folder: targetFolder,
         contentType: contentType || this.getContentType(targetFolder),
         organizationId: organizationId as string,
@@ -432,7 +408,7 @@ class MediaKitImpl implements MediaKit {
 
       // Create database record using mongokit repository
       const media = await repo.createMedia({
-        filename: filename.split('/').pop() || filename,
+        filename: finalFilename.split('/').pop() || finalFilename,
         originalName: filename,
         mimeType: finalMimeType,
         size: result.size,

@@ -178,11 +178,40 @@ export function formatFileSize(bytes: number): string {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let size = bytes;
   let unitIndex = 0;
-  
+
   while (size >= 1024 && unitIndex < units.length - 1) {
     size /= 1024;
     unitIndex++;
   }
-  
+
   return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+/**
+ * Update filename extension to match MIME type
+ *
+ * @param filename - Original filename
+ * @param newMimeType - New MIME type after processing
+ * @returns Updated filename with correct extension
+ *
+ * @example
+ * updateFilenameExtension('photo.jpg', 'image/webp') // → 'photo.webp'
+ * updateFilenameExtension('doc.pdf', 'application/pdf') // → 'doc.pdf' (no change)
+ */
+export function updateFilenameExtension(filename: string, newMimeType: string): string {
+  const newExt = getExtension(newMimeType);
+  if (!newExt || newExt === 'bin') {
+    return filename; // Can't determine extension, keep original
+  }
+
+  // Check if filename has an extension
+  const hasExtension = /\.[^.]+$/.test(filename);
+
+  if (hasExtension) {
+    // Replace extension: 'photo.jpg' → 'photo.webp'
+    return filename.replace(/\.[^.]+$/, `.${newExt}`);
+  } else {
+    // Add extension: 'photo' → 'photo.webp'
+    return `${filename}.${newExt}`;
+  }
 }

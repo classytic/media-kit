@@ -57,6 +57,9 @@
 // Main factory
 export { createMedia } from './media';
 
+// Configuration
+export { DEFAULT_CONFIG, mergeConfig } from './config';
+
 // Schema
 export { createMediaSchema, MediaSchema, DEFAULT_BASE_FOLDERS } from './schema/media.schema';
 export type { MediaSchemaOptions } from './schema/media.schema';
