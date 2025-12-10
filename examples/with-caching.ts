@@ -61,6 +61,19 @@ const mediaWithRedis = createMedia({
     region: process.env.AWS_REGION!,
     // acl: 'public-read', // Only needed if your bucket uses ACLs (not bucket policies)
   }),
+  processing: {
+    enabled: true,
+    format: 'webp',
+    // Sharp memory optimization (v2.0.3)
+    sharpOptions: {
+      concurrency: 2,
+      cache: false,
+    },
+  },
+  // Concurrency control (v2.0.3)
+  concurrency: {
+    maxConcurrent: 10, // Higher for production with caching
+  },
   plugins: [
     cachePlugin({
       adapter: redisAdapter,

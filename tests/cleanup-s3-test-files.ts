@@ -4,9 +4,9 @@
  * Removes all test files uploaded during S3 integration tests.
  *
  * Usage:
- *   npx tsx tests/cleanup-s3-test-files.ts
+ *   npm run test:cleanup
  *
- * This script is NOT in package.json - run manually when needed.
+ * Requires tests/.env with AWS credentials.
  */
 
 import { S3Client, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';

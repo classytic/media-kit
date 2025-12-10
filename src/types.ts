@@ -154,6 +154,16 @@ export interface GeneratedVariant {
 }
 
 /**
+ * Sharp memory optimization options
+ */
+export interface SharpOptions {
+  /** Maximum number of images to process concurrently (default: 2) */
+  concurrency?: number;
+  /** Enable Sharp's internal cache (default: false - disabled for better memory management) */
+  cache?: boolean;
+}
+
+/**
  * Image processing configuration
  */
 export interface ProcessingConfig {
@@ -171,6 +181,8 @@ export interface ProcessingConfig {
   sizes?: SizeVariant[];
   /** Enable automatic alt text generation */
   generateAlt?: boolean | AltGenerationConfig;
+  /** Sharp memory optimization options */
+  sharpOptions?: SharpOptions;
 }
 
 /**
@@ -380,6 +392,14 @@ export interface DeduplicationConfig {
 }
 
 /**
+ * Concurrency control configuration
+ */
+export interface ConcurrencyConfig {
+  /** Maximum number of concurrent upload operations (default: 5) */
+  maxConcurrent?: number;
+}
+
+/**
  * Main media-kit configuration
  */
 export interface MediaKitConfig {
@@ -397,6 +417,8 @@ export interface MediaKitConfig {
   fieldAccess?: FieldAccessConfig;
   /** File deduplication config */
   deduplication?: DeduplicationConfig;
+  /** Concurrency control (prevents memory crashes under load) */
+  concurrency?: ConcurrencyConfig;
   /** Logger instance (optional) */
   logger?: MediaKitLogger;
   /** Suppress warnings about missing optional dependencies (default: false) */

@@ -88,6 +88,7 @@ import { ImageProcessor } from './processing/image';
 import { isAllowedMimeType, isImage, updateFilenameExtension } from './utils/mime';
 import { extractBaseFolder, isValidFolder, normalizeFolderPath } from './utils/folders';
 import { generateAltText } from './utils/alt-text';
+import { Semaphore } from './utils/semaphore';
 import { mergeConfig } from './config';
 
 /**
@@ -97,12 +98,13 @@ class MediaKitImpl implements MediaKit {
   readonly config: MediaKitConfig;
   readonly provider: MediaKitConfig['provider'];
   readonly schema: Schema<IMediaDocument>;
-  
+
   private _repository: MediaRepository | null = null;
   private processor: ImageProcessor | null = null;
   private _model: MediaModel | null = null;
   private logger: MediaKitConfig['logger'];
   private eventListeners: Map<MediaEventName, EventListener[]> = new Map();
+  private uploadSemaphore: Semaphore;
 
   constructor(config: MediaKitConfig) {
     this.config = mergeConfig(config);
@@ -110,16 +112,24 @@ class MediaKitImpl implements MediaKit {
     this.provider = config.provider;
     this.logger = config.logger;
 
+    // Initialize concurrency control
+    const maxConcurrent = this.config.concurrency?.maxConcurrent ?? 5;
+    this.uploadSemaphore = new Semaphore(maxConcurrent);
+
     // Create schema
     this.schema = createMediaSchema({
       baseFolders: this.config.folders?.baseFolders,
       multiTenancy: this.config.multiTenancy,
     });
 
-    // Initialize processor
+    // Initialize processor with Sharp options
     if (this.config.processing?.enabled) {
       try {
-        this.processor = new ImageProcessor();
+        const sharpOptions = this.config.processing?.sharpOptions;
+        this.processor = new ImageProcessor({
+          concurrency: sharpOptions?.concurrency ?? 2,
+          cache: sharpOptions?.cache ?? false,
+        });
       } catch {
         if (!this.config.suppressWarnings) {
           this.log('warn', 'Image processing disabled: sharp not available. Install with: npm install sharp');
@@ -254,7 +264,7 @@ class MediaKitImpl implements MediaKit {
   }
 
   /**
-   * Upload single file
+   * Upload single file with concurrency control
    */
   async upload(input: UploadInput, context?: OperationContext): Promise<IMediaDocument> {
     const repo = this.repository;
@@ -271,161 +281,30 @@ class MediaKitImpl implements MediaKit {
     this.emit('before:upload', eventCtx);
 
     try {
-      // Validate
+      // Validate (before acquiring semaphore slot)
       this.validateFile(buffer, filename, mimeType);
 
-      // Generate alt text if not provided and image
-      if (!alt && isImage(mimeType)) {
-        const generateAltConfig = this.config.processing?.generateAlt;
-        if (generateAltConfig) {
-          const enabled = typeof generateAltConfig === 'boolean'
-            ? generateAltConfig
-            : generateAltConfig.enabled;
-
-          if (enabled) {
-            alt = generateAltText(filename);
-            if (this.logger?.debug) {
-              this.logger.debug('Generated alt text', { filename, alt });
-            }
-          }
-        }
-      }
-
-      // Normalize folder
-      const targetFolder = normalizeFolderPath(folder || this.config.folders?.defaultFolder || 'general');
-      const baseFolder = extractBaseFolder(targetFolder);
-
-      // Validate folder
-      const baseFolders = this.config.folders?.baseFolders || [];
-      if (baseFolders.length > 0 && !isValidFolder(targetFolder, baseFolders)) {
-        throw new Error(`Invalid base folder. Allowed: ${baseFolders.join(', ')}`);
-      }
-
-      // Process image if applicable
-      let finalBuffer = buffer;
-      let finalMimeType = mimeType;
-      let finalFilename = filename;
-      let dimensions: { width: number; height: number } | undefined;
-      const variants: GeneratedVariant[] = [];
-
-      const shouldProcess = !skipProcessing
-        && this.config.processing?.enabled
-        && this.processor
-        && isImage(mimeType);
-
-      if (shouldProcess && this.processor) {
-        const effectiveContentType = contentType || this.getContentType(targetFolder);
-        const aspectRatio = this.getAspectRatio(effectiveContentType);
-
-        const processOpts: ProcessingOptions = {
-          maxWidth: this.config.processing?.maxWidth,
-          quality: this.config.processing?.quality,
-          format: this.config.processing?.format === 'original'
-            ? undefined
-            : this.config.processing?.format,
-          aspectRatio,
-        };
-
-        try {
-          const processed = await this.processor.process(buffer, processOpts);
-          finalBuffer = processed.buffer;
-          finalMimeType = processed.mimeType;
-          dimensions = { width: processed.width, height: processed.height };
-
-          // Update filename extension if format changed
-          if (finalMimeType !== mimeType) {
-            finalFilename = updateFilenameExtension(filename, finalMimeType);
-          }
-
-          // Generate size variants if configured
-          const sizeVariants = this.config.processing?.sizes;
-          if (sizeVariants && sizeVariants.length > 0) {
-            const variantResults = await this.processor.generateVariants(
-              buffer,
-              sizeVariants,
-              processOpts
-            );
-
-            // Upload each variant
-            for (let i = 0; i < sizeVariants.length; i++) {
-              const variant = sizeVariants[i];
-              const variantResult = variantResults[i];
-              // Use processed MIME type for correct extension
-              const baseFilename = finalFilename.replace(/\.[^.]+$/, '');
-              const variantFilename = updateFilenameExtension(
-                `${baseFilename}-${variant.name}`,
-                variantResult.mimeType
-              );
-
-              const uploadResult = await this.provider.upload(
-                variantResult.buffer,
-                variantFilename,
-                {
-                  folder: targetFolder,
-                  contentType: effectiveContentType,
-                  organizationId: organizationId as string,
-                }
-              );
-
-              variants.push({
-                name: variant.name,
-                url: uploadResult.url,
-                key: uploadResult.key,
-                size: uploadResult.size,
-                width: variantResult.width,
-                height: variantResult.height,
-              });
-            }
-
-            this.log('info', 'Generated size variants', {
-              filename,
-              variants: variants.map(v => v.name)
-            });
-          }
-        } catch (err) {
-          this.log('warn', 'Image processing failed, uploading original', {
-            filename,
-            error: (err as Error).message
-          });
-        }
-      }
-
-      // Upload main file to storage
-      const result = await this.provider.upload(finalBuffer, finalFilename, {
-        folder: targetFolder,
-        contentType: contentType || this.getContentType(targetFolder),
-        organizationId: organizationId as string,
+      // Use semaphore to control concurrency and prevent memory crashes
+      const media = await this.uploadSemaphore.run(async () => {
+        return this.performUpload({
+          buffer,
+          filename,
+          mimeType,
+          folder,
+          alt,
+          title,
+          contentType,
+          skipProcessing,
+          organizationId,
+          context,
+          repo,
+        });
       });
-
-      // If dimensions not set from processing, try to get them
-      if (!dimensions && isImage(mimeType) && this.processor) {
-        try {
-          dimensions = await this.processor.getDimensions(buffer);
-        } catch {
-          // Ignore
-        }
-      }
-
-      // Create database record using mongokit repository
-      const media = await repo.createMedia({
-        filename: finalFilename.split('/').pop() || finalFilename,
-        originalName: filename,
-        mimeType: finalMimeType,
-        size: result.size,
-        url: result.url,
-        key: result.key,
-        baseFolder,
-        folder: targetFolder,
-        alt,
-        title,
-        dimensions,
-        variants: variants.length > 0 ? variants : undefined,
-      }, context);
 
       this.log('info', 'Media uploaded', {
         id: (media as any)._id,
-        folder: targetFolder,
-        size: result.size
+        folder: media.folder,
+        size: media.size
       });
 
       // Emit after:upload event
@@ -447,6 +326,185 @@ class MediaKitImpl implements MediaKit {
       this.emit('error:upload', errorEvent);
       throw error;
     }
+  }
+
+  /**
+   * Internal upload implementation (runs within semaphore)
+   */
+  private async performUpload(params: {
+    buffer: Buffer;
+    filename: string;
+    mimeType: string;
+    folder?: string;
+    alt?: string;
+    title?: string;
+    contentType?: string;
+    skipProcessing?: boolean;
+    organizationId?: string | import('mongoose').Types.ObjectId;
+    context?: OperationContext;
+    repo: MediaRepository;
+  }): Promise<IMediaDocument> {
+    const {
+      buffer,
+      filename,
+      mimeType,
+      folder,
+      title,
+      contentType,
+      skipProcessing,
+      organizationId,
+      context,
+      repo,
+    } = params;
+    let { alt } = params;
+
+    // Generate alt text if not provided and image
+    if (!alt && isImage(mimeType)) {
+      const generateAltConfig = this.config.processing?.generateAlt;
+      if (generateAltConfig) {
+        const enabled = typeof generateAltConfig === 'boolean'
+          ? generateAltConfig
+          : generateAltConfig.enabled;
+
+        if (enabled) {
+          alt = generateAltText(filename);
+          if (this.logger?.debug) {
+            this.logger.debug('Generated alt text', { filename, alt });
+          }
+        }
+      }
+    }
+
+    // Normalize folder
+    const targetFolder = normalizeFolderPath(folder || this.config.folders?.defaultFolder || 'general');
+    const baseFolder = extractBaseFolder(targetFolder);
+
+    // Validate folder
+    const baseFolders = this.config.folders?.baseFolders || [];
+    if (baseFolders.length > 0 && !isValidFolder(targetFolder, baseFolders)) {
+      throw new Error(`Invalid base folder. Allowed: ${baseFolders.join(', ')}`);
+    }
+
+    // Process image if applicable
+    let finalBuffer = buffer;
+    let finalMimeType = mimeType;
+    let finalFilename = filename;
+    let dimensions: { width: number; height: number } | undefined;
+    const variants: GeneratedVariant[] = [];
+
+    const shouldProcess = !skipProcessing
+      && this.config.processing?.enabled
+      && this.processor
+      && isImage(mimeType);
+
+    if (shouldProcess && this.processor) {
+      const effectiveContentType = contentType || this.getContentType(targetFolder);
+      const aspectRatio = this.getAspectRatio(effectiveContentType);
+
+      const processOpts: ProcessingOptions = {
+        maxWidth: this.config.processing?.maxWidth,
+        quality: this.config.processing?.quality,
+        format: this.config.processing?.format === 'original'
+          ? undefined
+          : this.config.processing?.format,
+        aspectRatio,
+      };
+
+      try {
+        const processed = await this.processor.process(buffer, processOpts);
+        finalBuffer = processed.buffer;
+        finalMimeType = processed.mimeType;
+        dimensions = { width: processed.width, height: processed.height };
+
+        // Update filename extension if format changed
+        if (finalMimeType !== mimeType) {
+          finalFilename = updateFilenameExtension(filename, finalMimeType);
+        }
+
+        // Generate and upload size variants sequentially (memory-efficient)
+        const sizeVariants = this.config.processing?.sizes;
+        if (sizeVariants && sizeVariants.length > 0) {
+          for (const variant of sizeVariants) {
+            // Process one variant at a time to reduce memory usage
+            const [variantResult] = await this.processor.generateVariants(
+              buffer,
+              [variant],
+              processOpts
+            );
+
+            // Upload immediately after processing (don't hold all buffers in memory)
+            const baseFilename = finalFilename.replace(/\.[^.]+$/, '');
+            const variantFilename = updateFilenameExtension(
+              `${baseFilename}-${variant.name}`,
+              variantResult.mimeType
+            );
+
+            const uploadResult = await this.provider.upload(
+              variantResult.buffer,
+              variantFilename,
+              {
+                folder: targetFolder,
+                contentType: effectiveContentType,
+                organizationId: organizationId as string,
+              }
+            );
+
+            variants.push({
+              name: variant.name,
+              url: uploadResult.url,
+              key: uploadResult.key,
+              size: uploadResult.size,
+              width: variantResult.width,
+              height: variantResult.height,
+            });
+          }
+
+          this.log('info', 'Generated size variants', {
+            filename,
+            variants: variants.map(v => v.name)
+          });
+        }
+      } catch (err) {
+        this.log('warn', 'Image processing failed, uploading original', {
+          filename,
+          error: (err as Error).message
+        });
+      }
+    }
+
+    // Upload main file to storage
+    const result = await this.provider.upload(finalBuffer, finalFilename, {
+      folder: targetFolder,
+      contentType: contentType || this.getContentType(targetFolder),
+      organizationId: organizationId as string,
+    });
+
+    // If dimensions not set from processing, try to get them
+    if (!dimensions && isImage(mimeType) && this.processor) {
+      try {
+        dimensions = await this.processor.getDimensions(buffer);
+      } catch {
+        // Ignore
+      }
+    }
+
+    // Create database record using mongokit repository
+    const media = await repo.createMedia({
+      filename: finalFilename.split('/').pop() || finalFilename,
+      originalName: filename,
+      mimeType: finalMimeType,
+      size: result.size,
+      url: result.url,
+      key: result.key,
+      baseFolder,
+      folder: targetFolder,
+      alt,
+      title,
+      dimensions,
+      variants: variants.length > 0 ? variants : undefined,
+    }, context);
+
+    return media;
   }
 
   /**

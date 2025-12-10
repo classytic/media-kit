@@ -17,6 +17,7 @@
  */
 
 import type { StorageProvider, UploadResult, UploadOptions } from '../types';
+import { withRetry, type RetryOptions } from '../utils/retry';
 import crypto from 'crypto';
 
 /**
@@ -105,15 +106,15 @@ export class S3Provider implements StorageProvider {
   }
 
   /**
-   * Upload file to S3
+   * Upload file to S3 with automatic retry on transient failures
    */
   async upload(buffer: Buffer, filename: string, options: UploadOptions = {}): Promise<UploadResult> {
     const { PutObjectCommand } = await import('@aws-sdk/client-s3');
     const client = await this.getClient();
-    
+
     const folder = options.folder || 'uploads';
     const key = this.generateKey(filename, folder);
-    
+
     // Detect MIME type
     const mimeTypes = await import('mime-types');
     const mimeType = mimeTypes.lookup(filename) || 'application/octet-stream';
@@ -127,7 +128,11 @@ export class S3Provider implements StorageProvider {
       Metadata: options.metadata,
     });
 
-    await client.send(command);
+    // Retry on transient failures (network issues, throttling, etc.)
+    await withRetry(
+      () => client.send(command),
+      this.getRetryOptions()
+    );
 
     // Build public URL
     const url = this.config.publicUrl
@@ -145,7 +150,19 @@ export class S3Provider implements StorageProvider {
   }
 
   /**
-   * Delete file from S3
+   * Get retry options for S3 operations
+   */
+  private getRetryOptions(): RetryOptions {
+    return {
+      maxRetries: 3,
+      baseDelay: 100,
+      maxDelay: 5000,
+      backoffMultiplier: 2,
+    };
+  }
+
+  /**
+   * Delete file from S3 with automatic retry
    */
   async delete(key: string): Promise<boolean> {
     const { DeleteObjectCommand } = await import('@aws-sdk/client-s3');
@@ -159,7 +176,10 @@ export class S3Provider implements StorageProvider {
       Key: actualKey,
     });
 
-    await client.send(command);
+    await withRetry(
+      () => client.send(command),
+      this.getRetryOptions()
+    );
     return true;
   }
 

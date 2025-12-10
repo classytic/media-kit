@@ -1,6 +1,6 @@
 {
   "name": "@classytic/media-kit",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "description": "Production-grade media management powered by mongokit - smart pagination, caching, events, and pluggable storage",
   "type": "module",
   "main": "./dist/index.js",
@@ -28,6 +28,7 @@
     "dev": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:cleanup": "npx tsx tests/cleanup-s3-test-files.ts",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build && npm run test && npm run typecheck",
     "publish:dry": "npm publish --dry-run --access public",

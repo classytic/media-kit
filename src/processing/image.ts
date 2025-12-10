@@ -53,13 +53,23 @@ export class ImageProcessor implements IImageProcessor {
   private sharp: any;
   private available = false;
 
-  constructor() {
-    this.initSharp();
+  constructor(options?: { concurrency?: number; cache?: boolean }) {
+    this.initSharp(options);
   }
 
-  private async initSharp(): Promise<void> {
+  private async initSharp(options?: { concurrency?: number; cache?: boolean }): Promise<void> {
     try {
       this.sharp = (await import('sharp')).default;
+
+      // Configure Sharp for optimal memory usage
+      if (this.sharp) {
+        // Disable cache by default to reduce memory usage
+        this.sharp.cache(options?.cache ?? false);
+
+        // Limit concurrency to prevent memory spikes
+        this.sharp.concurrency(options?.concurrency ?? 2);
+      }
+
       this.available = true;
     } catch {
       this.available = false;

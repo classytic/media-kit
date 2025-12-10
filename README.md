@@ -233,6 +233,106 @@ media.on('error:upload', async (event) => {
 // - before:move, after:move, error:move
 ```
 
+---
+
+## Production-Ready Features (v2.0.3)
+
+### Concurrency Control
+
+Prevent memory crashes under high load with built-in concurrency limiting:
+
+```typescript
+const media = createMedia({
+  provider: s3Provider,
+  // Limit concurrent uploads (default: 5)
+  concurrency: {
+    maxConcurrent: 10, // Allow up to 10 parallel uploads
+  },
+});
+
+// Safe to call many uploads in parallel
+await Promise.all([
+  media.upload(file1),
+  media.upload(file2),
+  media.upload(file3),
+  // ... more files - only 10 will process at once
+]);
+```
+
+### Sharp Memory Optimization
+
+Configure Sharp's memory usage for better performance under load:
+
+```typescript
+const media = createMedia({
+  provider: s3Provider,
+  processing: {
+    enabled: true,
+    format: 'webp',
+    // Sharp memory optimization
+    sharpOptions: {
+      concurrency: 2,  // Process max 2 images at once (default)
+      cache: false,    // Disable Sharp cache (default, reduces memory)
+    },
+  },
+});
+```
+
+### Automatic Retry with Exponential Backoff
+
+S3/GCS operations automatically retry on transient failures:
+
+- Network errors (ECONNRESET, ECONNREFUSED, timeout)
+- Rate limiting (429, throttling)
+- Server errors (500, 502, 503, 504)
+
+Retry configuration:
+- **Max retries:** 3
+- **Base delay:** 100ms
+- **Max delay:** 5000ms
+- **Backoff multiplier:** 2x with jitter
+
+No configuration needed - this is enabled by default for all provider operations.
+
+### Sequential Variant Processing
+
+Size variants are now processed and uploaded one at a time, reducing memory usage for large images with many variants:
+
+```typescript
+const media = createMedia({
+  provider: s3Provider,
+  processing: {
+    enabled: true,
+    sizes: [
+      { name: 'thumbnail', width: 150, height: 150 },
+      { name: 'medium', width: 800 },
+      { name: 'large', width: 1920 },
+      { name: 'xlarge', width: 2560 },
+    ],
+  },
+});
+
+// Variants are processed sequentially (memory-efficient)
+// instead of all at once
+```
+
+### Increased File Size Limit
+
+Default max file size increased from 50MB to 100MB:
+
+```typescript
+const media = createMedia({
+  provider: s3Provider,
+  fileTypes: {
+    maxSize: 100 * 1024 * 1024, // 100MB (new default)
+    // Or customize:
+    // maxSize: 200 * 1024 * 1024, // 200MB
+  },
+});
+```
+
+---
+
 ### Integration with @classytic/mongokit
 
 Use mongokit's powerful pagination and search features:
@@ -301,7 +401,7 @@ const media = createMedia({
   // File type restrictions
   fileTypes: {
     allowed: ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'],
-    maxSize: 10 * 1024 * 1024, // 10MB
+    maxSize: 100 * 1024 * 1024, // 100MB (default)
   },
 
   // Folder organization
@@ -328,6 +428,22 @@ const media = createMedia({
       avatar: { aspectRatio: 1, fit: 'cover' },      // Square
       default: { preserveRatio: true },              // Keep original
     },
+    // Size variants (auto-generated)
+    sizes: [
+      { name: 'thumbnail', width: 150, height: 150 },
+      { name: 'medium', width: 800 },
+      { name: 'large', width: 1920 },
+    ],
+    // Sharp memory optimization
+    sharpOptions: {
+      concurrency: 2, // Process max 2 images at once
+      cache: false,   // Disable Sharp cache to reduce memory
+    },
+  },
+
+  // Concurrency control (prevents memory crashes)
+  concurrency: {
+    maxConcurrent: 5, // Max parallel uploads
   },
 
   // Multi-tenancy (for SaaS)
@@ -339,6 +455,9 @@ const media = createMedia({
 
   // Logger (optional)
   logger: console,
+
+  // Suppress warnings about missing optional dependencies
+  suppressWarnings: false,
 });
 ```
 

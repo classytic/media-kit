@@ -11,7 +11,7 @@ import { DEFAULT_BASE_FOLDERS } from './schema/media.schema';
 export const DEFAULT_CONFIG: Partial<MediaKitConfig> = {
   fileTypes: {
     allowed: [...FILE_TYPE_PRESETS.all],
-    maxSize: 50 * 1024 * 1024, // 50MB
+    maxSize: 100 * 1024 * 1024, // 100MB (increased from 50MB for better UX)
   },
   folders: {
     baseFolders: DEFAULT_BASE_FOLDERS,
@@ -26,11 +26,20 @@ export const DEFAULT_CONFIG: Partial<MediaKitConfig> = {
     aspectRatios: {
       default: { preserveRatio: true },
     },
+    // Sharp memory optimization - disable cache to prevent memory leaks under load
+    sharpOptions: {
+      concurrency: 2, // Process max 2 images at once
+      cache: false,   // Disable Sharp cache to reduce memory usage
+    },
   },
   multiTenancy: {
     enabled: false,
     field: 'organizationId',
     required: false,
+  },
+  // Concurrency control - limit parallel uploads to prevent crashes
+  concurrency: {
+    maxConcurrent: 5, // Max 5 uploads at once (can be overridden per instance)
   },
 };
 
@@ -43,7 +52,15 @@ export function mergeConfig(config: MediaKitConfig): MediaKitConfig {
     ...config,
     fileTypes: { ...DEFAULT_CONFIG.fileTypes, ...config.fileTypes },
     folders: { ...DEFAULT_CONFIG.folders, ...config.folders },
-    processing: { ...DEFAULT_CONFIG.processing, ...config.processing },
+    processing: {
+      ...DEFAULT_CONFIG.processing,
+      ...config.processing,
+      sharpOptions: {
+        ...DEFAULT_CONFIG.processing?.sharpOptions,
+        ...config.processing?.sharpOptions,
+      },
+    },
     multiTenancy: { ...DEFAULT_CONFIG.multiTenancy, ...config.multiTenancy },
+    concurrency: { ...DEFAULT_CONFIG.concurrency, ...config.concurrency },
   } as MediaKitConfig;
 }
