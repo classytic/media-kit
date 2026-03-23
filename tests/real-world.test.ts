@@ -1,6 +1,6 @@
 /**
  * Real-World Scenario Tests
- * 
+ *
  * Tests for common production use cases:
  * - E-commerce: product images with variants
  * - Blog: post images with alt text
@@ -11,39 +11,12 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import mongoose from 'mongoose';
 import { createMedia } from '../src/media';
-import type { StorageProvider, UploadResult, UploadOptions } from '../src/types';
-
-// Mock storage provider
-class MockStorageProvider implements StorageProvider {
-  readonly name = 'mock';
-  private storage = new Map<string, Buffer>();
-
-  async upload(buffer: Buffer, filename: string, options?: UploadOptions): Promise<UploadResult> {
-    const key = `${options?.folder || 'uploads'}/${Date.now()}-${filename}`;
-    this.storage.set(key, buffer);
-    return {
-      url: `https://cdn.example.com/${key}`,
-      key,
-      size: buffer.length,
-      mimeType: 'application/octet-stream',
-    };
-  }
-
-  async delete(key: string): Promise<boolean> {
-    return this.storage.delete(key);
-  }
-
-  async exists(key: string): Promise<boolean> {
-    return this.storage.has(key);
-  }
-
-  clear() {
-    this.storage.clear();
-  }
-}
+import { MemoryStorageDriver } from './helpers/memory-driver';
+import type { StorageDriver, WriteResult, FileStat } from '../src/types';
+import { Readable } from 'stream';
 
 describe('Real-World Scenarios', () => {
-  let provider: MockStorageProvider;
+  let driver: MemoryStorageDriver;
 
   beforeAll(async () => {
     await mongoose.connect('mongodb://localhost:27017/mediakit-realworld-test');
@@ -54,7 +27,6 @@ describe('Real-World Scenarios', () => {
   });
 
   beforeEach(async () => {
-    // Clean up before each test
     const collections = await mongoose.connection.db?.collections();
     if (collections) {
       for (const collection of collections) {
@@ -62,24 +34,22 @@ describe('Real-World Scenarios', () => {
       }
     }
     Object.keys(mongoose.models).forEach(key => delete mongoose.models[key]);
-    provider = new MockStorageProvider();
+    driver = new MemoryStorageDriver();
   });
 
   describe('E-commerce: Product Images', () => {
     it('should handle product catalog with multiple images per product', async () => {
       const media = createMedia({
-        provider,
-        folders: { baseFolders: ['products'] },
-        fileTypes: { allowed: [] },
+        driver,
+        processing: { enabled: false },
         suppressWarnings: true,
       });
 
-      const Media = mongoose.model('EcomTest', media.schema);
+      const Media = mongoose.model('Test', media.schema);
       media.init(Media);
 
       const productId = 'prod_123';
-      
-      // Upload 3 images for one product
+
       await media.upload({
         buffer: Buffer.from('main'),
         filename: 'main.jpg',
@@ -99,7 +69,6 @@ describe('Real-World Scenarios', () => {
         folder: `products/${productId}`,
       });
 
-      // Query product images using folder filter
       const productImages = await media.getAll({
         filters: { folder: `products/${productId}` },
       });
@@ -111,13 +80,12 @@ describe('Real-World Scenarios', () => {
   describe('Blog: Post Images with SEO', () => {
     it('should auto-generate SEO-friendly alt text', async () => {
       const media = createMedia({
-        provider,
+        driver,
         processing: { enabled: false, generateAlt: true },
-        fileTypes: { allowed: [] },
         suppressWarnings: true,
       });
 
-      const Media = mongoose.model('BlogTest', media.schema);
+      const Media = mongoose.model('Test', media.schema);
       media.init(Media);
 
       const uploaded = await media.upload({
@@ -132,13 +100,12 @@ describe('Real-World Scenarios', () => {
 
     it('should support custom alt text override', async () => {
       const media = createMedia({
-        provider,
+        driver,
         processing: { enabled: false, generateAlt: true },
-        fileTypes: { allowed: [] },
         suppressWarnings: true,
       });
 
-      const Media = mongoose.model('AltOverrideTest', media.schema);
+      const Media = mongoose.model('Test', media.schema);
       media.init(Media);
 
       const uploaded = await media.upload({
@@ -156,49 +123,44 @@ describe('Real-World Scenarios', () => {
   describe('Multi-tenant SaaS: Organization Isolation', () => {
     it('should isolate files between organizations', async () => {
       const media = createMedia({
-        provider,
+        driver,
         multiTenancy: { enabled: true, field: 'organizationId', required: false },
-        fileTypes: { allowed: [] },
+        processing: { enabled: false },
         suppressWarnings: true,
       });
 
-      const Media = mongoose.model('MultiTenantTest', media.schema);
+      const Media = mongoose.model('Test', media.schema);
       media.init(Media);
 
-      // Use valid ObjectIds
       const org1Id = new mongoose.Types.ObjectId();
       const org2Id = new mongoose.Types.ObjectId();
 
-      // Upload for org1
       await media.upload(
         { buffer: Buffer.from('org1'), filename: 'file.txt', mimeType: 'text/plain', folder: 'general' },
         { organizationId: org1Id }
       );
 
-      // Upload for org2
       await media.upload(
         { buffer: Buffer.from('org2'), filename: 'file.txt', mimeType: 'text/plain', folder: 'general' },
         { organizationId: org2Id }
       );
 
-      // Query org1 - should only see their files
       const org1Files = await media.getAll({}, { organizationId: org1Id });
       expect(org1Files.docs).toHaveLength(1);
 
-      // Query org2 - should only see their files
       const org2Files = await media.getAll({}, { organizationId: org2Id });
       expect(org2Files.docs).toHaveLength(1);
     });
 
     it('should require organizationId when required=true', async () => {
       const media = createMedia({
-        provider,
+        driver,
         multiTenancy: { enabled: true, field: 'organizationId', required: true },
-        fileTypes: { allowed: [] },
+        processing: { enabled: false },
         suppressWarnings: true,
       });
 
-      const Media = mongoose.model('TenantRequiredTest', media.schema);
+      const Media = mongoose.model('Test', media.schema);
       media.init(Media);
 
       await expect(
@@ -215,12 +177,12 @@ describe('Real-World Scenarios', () => {
   describe('File Management: Bulk Operations', () => {
     it('should handle bulk upload', async () => {
       const media = createMedia({
-        provider,
-        fileTypes: { allowed: [] },
+        driver,
+        processing: { enabled: false },
         suppressWarnings: true,
       });
 
-      const Media = mongoose.model('BulkUploadTest', media.schema);
+      const Media = mongoose.model('Test', media.schema);
       media.init(Media);
 
       const files = Array.from({ length: 10 }, (_, i) => ({
@@ -236,13 +198,12 @@ describe('Real-World Scenarios', () => {
 
     it('should move files between folders', async () => {
       const media = createMedia({
-        provider,
-        folders: { baseFolders: ['inbox', 'archive'] },
-        fileTypes: { allowed: [] },
+        driver,
+        processing: { enabled: false },
         suppressWarnings: true,
       });
 
-      const Media = mongoose.model('MoveTest', media.schema);
+      const Media = mongoose.model('Test', media.schema);
       media.init(Media);
 
       const uploaded = await media.upload({
@@ -262,12 +223,12 @@ describe('Real-World Scenarios', () => {
   describe('Storage Analytics', () => {
     it('should calculate total storage used', async () => {
       const media = createMedia({
-        provider,
-        fileTypes: { allowed: [] },
+        driver,
+        processing: { enabled: false },
         suppressWarnings: true,
       });
 
-      const Media = mongoose.model('StorageTest', media.schema);
+      const Media = mongoose.model('Test', media.schema);
       media.init(Media);
 
       await media.upload({ buffer: Buffer.alloc(1000), filename: 'a.txt', mimeType: 'text/plain', folder: 'general' });
@@ -279,13 +240,12 @@ describe('Real-World Scenarios', () => {
 
     it('should break down storage by folder', async () => {
       const media = createMedia({
-        provider,
-        folders: { baseFolders: ['images', 'documents'] },
-        fileTypes: { allowed: [] },
+        driver,
+        processing: { enabled: false },
         suppressWarnings: true,
       });
 
-      const Media = mongoose.model('BreakdownTest', media.schema);
+      const Media = mongoose.model('Test', media.schema);
       media.init(Media);
 
       await media.upload({ buffer: Buffer.alloc(3000), filename: 'img.jpg', mimeType: 'image/jpeg', folder: 'images' });
@@ -300,60 +260,26 @@ describe('Real-World Scenarios', () => {
     });
   });
 
-  describe('CDN Integration', () => {
-    it('should use custom CDN URL', async () => {
-      class CDNProvider implements StorageProvider {
-        readonly name = 'cdn';
-        async upload(buffer: Buffer, filename: string, options?: UploadOptions): Promise<UploadResult> {
-          return {
-            url: `https://cdn.mysite.com/${options?.folder}/${filename}`,
-            key: `${options?.folder}/${filename}`,
-            size: buffer.length,
-            mimeType: 'image/jpeg',
-          };
-        }
-        async delete() { return true; }
-        async exists() { return true; }
-      }
-
-      const media = createMedia({
-        provider: new CDNProvider(),
-        fileTypes: { allowed: [] },
-        suppressWarnings: true,
-      });
-
-      const Media = mongoose.model('CDNTest', media.schema);
-      media.init(Media);
-
-      const uploaded = await media.upload({
-        buffer: Buffer.from('image'),
-        filename: 'hero.jpg',
-        mimeType: 'image/jpeg',
-        folder: 'images',
-      });
-
-      expect(uploaded.url).toBe('https://cdn.mysite.com/images/hero.jpg');
-    });
-  });
-
   describe('Error Handling', () => {
-    it('should handle storage provider errors', async () => {
-      class FailingProvider implements StorageProvider {
-        readonly name = 'failing';
-        async upload(): Promise<UploadResult> {
-          throw new Error('Storage unavailable');
-        }
-        async delete() { return false; }
-        async exists() { return false; }
-      }
+    it('should handle storage driver errors', async () => {
+      // Failing driver that throws on write()
+      const failingDriver: StorageDriver = {
+        name: 'failing',
+        async write(): Promise<WriteResult> { throw new Error('Storage unavailable'); },
+        async read(): Promise<NodeJS.ReadableStream> { return Readable.from(Buffer.alloc(0)); },
+        async delete() { return false; },
+        async exists() { return false; },
+        async stat(): Promise<FileStat> { return { size: 0, contentType: '' }; },
+        getPublicUrl(key: string) { return `https://cdn.example.com/${key}`; },
+      };
 
       const media = createMedia({
-        provider: new FailingProvider(),
-        fileTypes: { allowed: [] },
+        driver: failingDriver,
+        processing: { enabled: false },
         suppressWarnings: true,
       });
 
-      const Media = mongoose.model('ErrorTest', media.schema);
+      const Media = mongoose.model('Test', media.schema);
       media.init(Media);
 
       await expect(
@@ -367,22 +293,23 @@ describe('Real-World Scenarios', () => {
     });
 
     it('should emit error events', async () => {
-      class FailingProvider implements StorageProvider {
-        readonly name = 'failing';
-        async upload(): Promise<UploadResult> {
-          throw new Error('Upload failed');
-        }
-        async delete() { return false; }
-        async exists() { return false; }
-      }
+      const failingDriver: StorageDriver = {
+        name: 'failing',
+        async write(): Promise<WriteResult> { throw new Error('Upload failed'); },
+        async read(): Promise<NodeJS.ReadableStream> { return Readable.from(Buffer.alloc(0)); },
+        async delete() { return false; },
+        async exists() { return false; },
+        async stat(): Promise<FileStat> { return { size: 0, contentType: '' }; },
+        getPublicUrl(key: string) { return `https://cdn.example.com/${key}`; },
+      };
 
       const media = createMedia({
-        provider: new FailingProvider(),
-        fileTypes: { allowed: [] },
+        driver: failingDriver,
+        processing: { enabled: false },
         suppressWarnings: true,
       });
 
-      const Media = mongoose.model('ErrorEventTest', media.schema);
+      const Media = mongoose.model('Test', media.schema);
       media.init(Media);
 
       let errorCaught: any = null;
@@ -409,12 +336,12 @@ describe('Real-World Scenarios', () => {
   describe('Recent Uploads', () => {
     it('should get recent uploads in order', async () => {
       const media = createMedia({
-        provider,
-        fileTypes: { allowed: [] },
+        driver,
+        processing: { enabled: false },
         suppressWarnings: true,
       });
 
-      const Media = mongoose.model('RecentTest', media.schema);
+      const Media = mongoose.model('Test', media.schema);
       media.init(Media);
 
       await media.upload({ buffer: Buffer.from('1'), filename: 'first.txt', mimeType: 'text/plain', folder: 'general' });
@@ -424,7 +351,59 @@ describe('Real-World Scenarios', () => {
       const recent = await media.repository.getRecentUploads(2);
 
       expect(recent).toHaveLength(2);
-      expect(recent[0].filename).toBe('third.txt');
+      // `filename` is the storage key filename, use `originalFilename` for the original
+      expect(recent[0].originalFilename).toBe('third.txt');
+    });
+  });
+
+  describe('Tags & Search', () => {
+    it('should tag and search files', async () => {
+      const media = createMedia({
+        driver,
+        processing: { enabled: false },
+        suppressWarnings: true,
+      });
+
+      const Media = mongoose.model('Test', media.schema);
+      media.init(Media);
+
+      const uploaded = await media.upload({
+        buffer: Buffer.from('hero'),
+        filename: 'hero-banner.jpg',
+        mimeType: 'image/jpeg',
+        folder: 'images',
+        tags: ['hero', 'banner'],
+      });
+
+      expect(uploaded.tags).toEqual(['hero', 'banner']);
+
+      // Add more tags
+      const updated = await media.addTags((uploaded as any)._id.toString(), ['featured']);
+      expect(updated.tags).toContain('featured');
+    });
+  });
+
+  describe('Status Lifecycle', () => {
+    it('should track upload status lifecycle', async () => {
+      const media = createMedia({
+        driver,
+        processing: { enabled: false },
+        suppressWarnings: true,
+      });
+
+      const Media = mongoose.model('Test', media.schema);
+      media.init(Media);
+
+      const uploaded = await media.upload({
+        buffer: Buffer.from('test'),
+        filename: 'test.txt',
+        mimeType: 'text/plain',
+        folder: 'general',
+      });
+
+      expect(uploaded.status).toBe('ready');
+      expect(uploaded.hash).toBeDefined();
+      expect(uploaded.hash.length).toBeGreaterThan(0);
     });
   });
 });

@@ -1,22 +1,19 @@
 /**
  * Media Kit Factory
- * 
- * Creates a configured media management instance powered by mongokit.
- * 
+ *
+ * Thin facade that creates a configured media management instance.
+ * All operation logic is delegated to modules in ./operations/.
+ *
  * @example
  * ```ts
  * import { createMedia } from '@classytic/media-kit';
  * import { S3Provider } from '@classytic/media-kit/providers/s3';
  * import { cachePlugin, createMemoryCache } from '@classytic/mongokit';
  * import mongoose from 'mongoose';
- * 
- * // 1. Create media kit instance with mongokit plugins
+ *
  * const media = createMedia({
- *   provider: new S3Provider({ bucket: 'my-bucket', region: 'us-east-1' }),
- *   folders: {
- *     baseFolders: ['products', 'users', 'posts'],
- *     defaultFolder: 'general',
- *   },
+ *   driver: new S3Provider({ bucket: 'my-bucket', region: 'us-east-1' }),
+ *   folders: { defaultFolder: 'general' },
  *   processing: {
  *     enabled: true,
  *     format: 'webp',
@@ -26,33 +23,21 @@
  *       avatar: { aspectRatio: 1, fit: 'cover' },
  *     },
  *   },
- *   // Mongokit plugins
- *   plugins: [
- *     cachePlugin({ adapter: createMemoryCache() })
- *   ],
+ *   plugins: [cachePlugin({ adapter: createMemoryCache() })],
  * });
- * 
- * // 2. Create mongoose model from schema
+ *
  * const Media = mongoose.model('Media', media.schema);
- * 
- * // 3. Initialize with model
  * media.init(Media);
- * 
- * // 4. Use it - full mongokit features available
+ *
  * const uploaded = await media.upload({
  *   buffer: fileBuffer,
  *   filename: 'product.jpg',
  *   mimeType: 'image/jpeg',
  *   folder: 'products/featured',
  * });
- * 
- * // Smart pagination (auto-detects offset vs keyset)
- * const page1 = await media.getAll({ page: 1, limit: 20 });
- * const stream = await media.getAll({ sort: { createdAt: -1 }, limit: 50 });
- * const next = await media.getAll({ after: stream.next, sort: { createdAt: -1 } });
- * 
- * // Direct repository access for advanced queries
- * const stats = await media.repository.getStorageByFolder();
+ *
+ * const page = await media.getAll({ page: 1, limit: 20 });
+ * const results = await media.search('shoes', { limit: 10 });
  * ```
  */
 
@@ -67,50 +52,92 @@ import type {
   MediaKit,
   IMediaDocument,
   UploadInput,
+  ConfirmUploadInput,
+  PresignedUploadResult,
   OperationContext,
   FolderTree,
   FolderStats,
+  FolderNode,
   BreadcrumbItem,
   BulkResult,
-  ProcessingOptions,
-  AspectRatioPreset,
+  RewriteResult,
   MediaEventName,
   EventListener,
-  EventContext,
-  EventResult,
-  EventError,
-  GeneratedVariant,
+  Unsubscribe,
+  FocalPoint,
+  ImportOptions,
+  StorageDriver,
   MediaModel,
+  ImageAdapter,
+  InitiateMultipartInput,
+  MultipartUploadSession,
+  CompleteMultipartInput,
+  SignedPartResult,
+  BatchPresignInput,
+  BatchPresignResult,
 } from './types';
+import type { OperationDeps } from './operations/types';
+import { MediaEventEmitter } from './events';
 import { createMediaSchema } from './schema/media.schema';
 import { MediaRepository } from './repository/media.repository';
 import { ImageProcessor } from './processing/image';
-import { isAllowedMimeType, isImage, updateFilenameExtension } from './utils/mime';
-import { extractBaseFolder, isValidFolder, normalizeFolderPath } from './utils/folders';
-import { generateAltText } from './utils/alt-text';
 import { Semaphore } from './utils/semaphore';
 import { mergeConfig } from './config';
+
+// Operation imports (direct — no barrel for tree-shaking)
+import { upload, uploadMany } from './operations/upload';
+import { replace } from './operations/replace';
+import { deleteMedia, deleteMany } from './operations/delete';
+import { softDelete, restore, purgeDeleted } from './operations/soft-delete';
+import { importFromUrl } from './operations/url-import';
+import {
+  getSignedUploadUrl,
+  confirmUpload,
+  initiateMultipartUpload,
+  signUploadPart,
+  signUploadParts,
+  completeMultipartUpload,
+  abortMultipartUpload,
+  generateBatchPutUrls,
+} from './operations/presigned';
+import { addTags, removeTags } from './operations/tags';
+import { setFocalPoint } from './operations/focal-point';
+import { getById, getAll, search } from './operations/queries';
+import { move } from './operations/move';
+import {
+  getFolderTree,
+  getFolderStats,
+  getBreadcrumb,
+  deleteFolder,
+  renameFolder,
+  getSubfolders,
+} from './operations/folders';
+import { getContentType as getContentTypeHelper, validateFile as validateFileHelper } from './operations/helpers';
 
 /**
  * Media Kit Implementation
  */
 class MediaKitImpl implements MediaKit {
   readonly config: MediaKitConfig;
-  readonly provider: MediaKitConfig['provider'];
+  readonly driver: StorageDriver;
   readonly schema: Schema<IMediaDocument>;
 
   private _repository: MediaRepository | null = null;
-  private processor: ImageProcessor | null = null;
-  private _model: MediaModel | null = null;
+  private _deps: OperationDeps | null = null;
+  private processor: ImageProcessor | ImageAdapter | null = null;
+  private processorReady: Promise<void> | null = null;
   private logger: MediaKitConfig['logger'];
-  private eventListeners: Map<MediaEventName, EventListener[]> = new Map();
+  private events: MediaEventEmitter;
   private uploadSemaphore: Semaphore;
 
   constructor(config: MediaKitConfig) {
     this.config = mergeConfig(config);
 
-    this.provider = config.provider;
-    this.logger = config.logger;
+    this.driver = this.config.driver;
+    this.logger = this.config.logger;
+
+    // Initialize event emitter
+    this.events = new MediaEventEmitter(this.logger);
 
     // Initialize concurrency control
     const maxConcurrent = this.config.concurrency?.maxConcurrent ?? 5;
@@ -118,29 +145,48 @@ class MediaKitImpl implements MediaKit {
 
     // Create schema
     this.schema = createMediaSchema({
-      baseFolders: this.config.folders?.baseFolders,
       multiTenancy: this.config.multiTenancy,
     });
 
-    // Initialize processor with Sharp options
-    if (this.config.processing?.enabled) {
-      try {
-        const sharpOptions = this.config.processing?.sharpOptions;
-        this.processor = new ImageProcessor({
-          concurrency: sharpOptions?.concurrency ?? 2,
-          cache: sharpOptions?.cache ?? false,
-        });
-      } catch {
-        if (!this.config.suppressWarnings) {
-          this.log('warn', 'Image processing disabled: sharp not available. Install with: npm install sharp');
+    // Initialize processor: custom adapter → built-in Sharp → none
+    if (this.config.processing?.imageAdapter) {
+      this.processor = this.config.processing.imageAdapter;
+      this.processorReady = Promise.resolve();
+    } else if (this.config.processing?.enabled) {
+      const sharpOptions = this.config.processing?.sharpOptions;
+      const sharpProcessor = new ImageProcessor({
+        concurrency: sharpOptions?.concurrency ?? 2,
+        cache: sharpOptions?.cache ?? false,
+      });
+      this.processor = sharpProcessor;
+
+      this.processorReady = sharpProcessor.waitUntilReady().then((available) => {
+        if (!available) {
+          this.processor = null;
+          if (!this.config.suppressWarnings) {
+            this.logger?.warn?.(
+              'Image processing disabled: sharp not available. Install with: npm install sharp',
+            );
+          }
         }
-      }
+      }).catch(() => {
+        this.processor = null;
+        if (!this.config.suppressWarnings) {
+          this.logger?.warn?.(
+            'Image processing disabled: sharp not available. Install with: npm install sharp',
+          );
+        }
+      });
+    } else {
+      this.processor = null;
+      this.processorReady = Promise.resolve();
     }
   }
 
-  /**
-   * Get repository (throws if not initialized)
-   */
+  // ============================================
+  // INITIALIZATION
+  // ============================================
+
   get repository(): MediaRepository {
     if (!this._repository) {
       throw new Error('MediaKit not initialized. Call media.init(Model) first.');
@@ -148,386 +194,155 @@ class MediaKitImpl implements MediaKit {
     return this._repository;
   }
 
-  /**
-   * Initialize with mongoose model
-   */
   init(model: MediaModel): this {
-    this._model = model;
-    
-    // Create mongokit-powered repository
+    if (this._repository) {
+      throw new Error('MediaKit already initialized. Create a new instance instead of calling init() twice.');
+    }
+
     this._repository = new MediaRepository(model, {
       multiTenancy: this.config.multiTenancy,
       plugins: this.config.plugins,
       pagination: this.config.pagination,
+      cache: this.config.cache ? {
+        adapter: this.config.cache.adapter,
+        byIdTtl: this.config.cache.byIdTtl,
+        queryTtl: this.config.cache.queryTtl,
+        prefix: this.config.cache.prefix,
+      } : undefined,
     });
-    
+
     return this;
   }
 
-  /**
-   * Event system: Register event listener
-   */
-  on<T = unknown>(event: MediaEventName, listener: EventListener<T>): void {
-    const listeners = this.eventListeners.get(event) || [];
-    listeners.push(listener as EventListener);
-    this.eventListeners.set(event, listeners);
-  }
+  // ============================================
+  // SHARED DEPS (cached after first access)
+  // ============================================
 
-  /**
-   * Event system: Emit event
-   */
-  emit<T = unknown>(event: MediaEventName, payload: T): void {
-    const listeners = this.eventListeners.get(event) || [];
-    for (const listener of listeners) {
-      try {
-        void Promise.resolve(listener(payload));
-      } catch (err) {
-        this.log('error', `Event listener error: ${event}`, {
-          error: (err as Error).message
-        });
-      }
+  private get deps(): OperationDeps {
+    if (!this._deps) {
+      const self = this;
+      this._deps = {
+        config: this.config,
+        driver: this.driver,
+        repository: this.repository, // triggers getter, throws if not init'd
+        get processor() { return self.processor; },
+        processorReady: this.processorReady,
+        events: this.events,
+        uploadSemaphore: this.uploadSemaphore,
+        logger: this.logger,
+      };
     }
+    return this._deps;
   }
 
-  /**
-   * Log helper
-   */
-  private log(level: 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>) {
-    if (this.logger) {
-      this.logger[level](message, meta);
-    }
+  // ============================================
+  // EVENT SYSTEM
+  // ============================================
+
+  on<T = unknown>(event: MediaEventName, listener: EventListener<T>): Unsubscribe {
+    return this.events.on(event, listener);
   }
 
-  /**
-   * Require tenant context when multi-tenancy is enabled
-   */
-  private requireTenant(context?: OperationContext): OperationContext['organizationId'] | undefined {
-    if (!this.config.multiTenancy?.enabled) {
-      return undefined;
-    }
+  // ============================================
+  // LIFECYCLE
+  // ============================================
 
-    const organizationId = context?.organizationId;
-    const field = this.config.multiTenancy.field || 'organizationId';
-
-    if (!organizationId && this.config.multiTenancy.required) {
-      throw new Error(`Multi-tenancy enabled: '${field}' is required in context`);
-    }
-
-    return organizationId;
+  dispose(): void {
+    this.events.removeAllListeners();
+    this._repository = null;
+    this._deps = null;
+    this.processor = null;
+    this.processorReady = null;
   }
 
-  /**
-   * Get content type from folder path
-   */
-  getContentType(folder: string): string {
-    const contentTypeMap = this.config.folders?.contentTypeMap || {};
-    const folderLower = folder.toLowerCase();
+  // ============================================
+  // PUBLIC HELPERS
+  // ============================================
 
-    for (const [contentType, patterns] of Object.entries(contentTypeMap)) {
-      if (patterns.some((p: string) => folderLower.includes(p.toLowerCase()))) {
-        return contentType;
-      }
-    }
-
-    return 'default';
-  }
-
-  /**
-   * Get aspect ratio preset for content type
-   */
-  private getAspectRatio(contentType: string): AspectRatioPreset | undefined {
-    return this.config.processing?.aspectRatios?.[contentType] 
-      || this.config.processing?.aspectRatios?.default;
-  }
-
-  /**
-   * Validate file
-   */
   validateFile(buffer: Buffer, filename: string, mimeType: string): void {
-    // Check for empty file
-    if (!buffer || buffer.length === 0) {
-      throw new Error(`Cannot upload empty file '${filename}'. Buffer is empty or missing.`);
-    }
-
-    const { allowed = [], maxSize } = this.config.fileTypes || {};
-
-    // Check MIME type
-    if (allowed.length > 0 && !isAllowedMimeType(mimeType, allowed)) {
-      throw new Error(`File type '${mimeType}' is not allowed. Allowed: ${allowed.join(', ')}`);
-    }
-
-    // Check size
-    if (maxSize && buffer.length > maxSize) {
-      const maxMB = Math.round(maxSize / 1024 / 1024);
-      throw new Error(`File size exceeds limit of ${maxMB}MB`);
-    }
+    validateFileHelper({ config: this.config }, buffer, filename, mimeType);
   }
 
-  /**
-   * Upload single file with concurrency control
-   */
+  getContentType(folder: string): string {
+    return getContentTypeHelper({ config: this.config }, folder);
+  }
+
+  // ============================================
+  // CORE OPERATIONS (delegates)
+  // ============================================
+
   async upload(input: UploadInput, context?: OperationContext): Promise<IMediaDocument> {
-    const repo = this.repository;
-    const { buffer, filename, mimeType, folder, title, contentType, skipProcessing } = input;
-    let { alt } = input;
-    const organizationId = this.requireTenant(context);
-
-    // Emit before:upload event
-    const eventCtx: EventContext<UploadInput> = {
-      data: input,
-      context,
-      timestamp: new Date()
-    };
-    this.emit('before:upload', eventCtx);
-
-    try {
-      // Validate (before acquiring semaphore slot)
-      this.validateFile(buffer, filename, mimeType);
-
-      // Use semaphore to control concurrency and prevent memory crashes
-      const media = await this.uploadSemaphore.run(async () => {
-        return this.performUpload({
-          buffer,
-          filename,
-          mimeType,
-          folder,
-          alt,
-          title,
-          contentType,
-          skipProcessing,
-          organizationId,
-          context,
-          repo,
-        });
-      });
-
-      this.log('info', 'Media uploaded', {
-        id: (media as any)._id,
-        folder: media.folder,
-        size: media.size
-      });
-
-      // Emit after:upload event
-      const resultEvent: EventResult<UploadInput, IMediaDocument> = {
-        context: eventCtx,
-        result: media,
-        timestamp: new Date()
-      };
-      this.emit('after:upload', resultEvent);
-
-      return media;
-    } catch (error) {
-      // Emit error:upload event
-      const errorEvent: EventError<UploadInput> = {
-        context: eventCtx,
-        error: error as Error,
-        timestamp: new Date()
-      };
-      this.emit('error:upload', errorEvent);
-      throw error;
-    }
+    return upload(this.deps, input, context);
   }
 
-  /**
-   * Internal upload implementation (runs within semaphore)
-   */
-  private async performUpload(params: {
-    buffer: Buffer;
-    filename: string;
-    mimeType: string;
-    folder?: string;
-    alt?: string;
-    title?: string;
-    contentType?: string;
-    skipProcessing?: boolean;
-    organizationId?: string | import('mongoose').Types.ObjectId;
-    context?: OperationContext;
-    repo: MediaRepository;
-  }): Promise<IMediaDocument> {
-    const {
-      buffer,
-      filename,
-      mimeType,
-      folder,
-      title,
-      contentType,
-      skipProcessing,
-      organizationId,
-      context,
-      repo,
-    } = params;
-    let { alt } = params;
-
-    // Generate alt text if not provided and image
-    if (!alt && isImage(mimeType)) {
-      const generateAltConfig = this.config.processing?.generateAlt;
-      if (generateAltConfig) {
-        const enabled = typeof generateAltConfig === 'boolean'
-          ? generateAltConfig
-          : generateAltConfig.enabled;
-
-        if (enabled) {
-          alt = generateAltText(filename);
-          if (this.logger?.debug) {
-            this.logger.debug('Generated alt text', { filename, alt });
-          }
-        }
-      }
-    }
-
-    // Normalize folder
-    const targetFolder = normalizeFolderPath(folder || this.config.folders?.defaultFolder || 'general');
-    const baseFolder = extractBaseFolder(targetFolder);
-
-    // Validate folder
-    const baseFolders = this.config.folders?.baseFolders || [];
-    if (baseFolders.length > 0 && !isValidFolder(targetFolder, baseFolders)) {
-      throw new Error(`Invalid base folder. Allowed: ${baseFolders.join(', ')}`);
-    }
-
-    // Process image if applicable
-    let finalBuffer = buffer;
-    let finalMimeType = mimeType;
-    let finalFilename = filename;
-    let dimensions: { width: number; height: number } | undefined;
-    const variants: GeneratedVariant[] = [];
-
-    const shouldProcess = !skipProcessing
-      && this.config.processing?.enabled
-      && this.processor
-      && isImage(mimeType);
-
-    if (shouldProcess && this.processor) {
-      const effectiveContentType = contentType || this.getContentType(targetFolder);
-      const aspectRatio = this.getAspectRatio(effectiveContentType);
-
-      const processOpts: ProcessingOptions = {
-        maxWidth: this.config.processing?.maxWidth,
-        quality: this.config.processing?.quality,
-        format: this.config.processing?.format === 'original'
-          ? undefined
-          : this.config.processing?.format,
-        aspectRatio,
-      };
-
-      try {
-        const processed = await this.processor.process(buffer, processOpts);
-        finalBuffer = processed.buffer;
-        finalMimeType = processed.mimeType;
-        dimensions = { width: processed.width, height: processed.height };
-
-        // Update filename extension if format changed
-        if (finalMimeType !== mimeType) {
-          finalFilename = updateFilenameExtension(filename, finalMimeType);
-        }
-
-        // Generate and upload size variants sequentially (memory-efficient)
-        const sizeVariants = this.config.processing?.sizes;
-        if (sizeVariants && sizeVariants.length > 0) {
-          for (const variant of sizeVariants) {
-            // Process one variant at a time to reduce memory usage
-            const [variantResult] = await this.processor.generateVariants(
-              buffer,
-              [variant],
-              processOpts
-            );
-
-            // Upload immediately after processing (don't hold all buffers in memory)
-            const baseFilename = finalFilename.replace(/\.[^.]+$/, '');
-            const variantFilename = updateFilenameExtension(
-              `${baseFilename}-${variant.name}`,
-              variantResult.mimeType
-            );
-
-            const uploadResult = await this.provider.upload(
-              variantResult.buffer,
-              variantFilename,
-              {
-                folder: targetFolder,
-                contentType: effectiveContentType,
-                organizationId: organizationId as string,
-              }
-            );
-
-            variants.push({
-              name: variant.name,
-              url: uploadResult.url,
-              key: uploadResult.key,
-              size: uploadResult.size,
-              width: variantResult.width,
-              height: variantResult.height,
-            });
-          }
-
-          this.log('info', 'Generated size variants', {
-            filename,
-            variants: variants.map(v => v.name)
-          });
-        }
-      } catch (err) {
-        this.log('warn', 'Image processing failed, uploading original', {
-          filename,
-          error: (err as Error).message
-        });
-      }
-    }
-
-    // Upload main file to storage
-    const result = await this.provider.upload(finalBuffer, finalFilename, {
-      folder: targetFolder,
-      contentType: contentType || this.getContentType(targetFolder),
-      organizationId: organizationId as string,
-    });
-
-    // If dimensions not set from processing, try to get them
-    if (!dimensions && isImage(mimeType) && this.processor) {
-      try {
-        dimensions = await this.processor.getDimensions(buffer);
-      } catch {
-        // Ignore
-      }
-    }
-
-    // Create database record using mongokit repository
-    const media = await repo.createMedia({
-      filename: finalFilename.split('/').pop() || finalFilename,
-      originalName: filename,
-      mimeType: finalMimeType,
-      size: result.size,
-      url: result.url,
-      key: result.key,
-      baseFolder,
-      folder: targetFolder,
-      alt,
-      title,
-      dimensions,
-      variants: variants.length > 0 ? variants : undefined,
-    }, context);
-
-    return media;
-  }
-
-  /**
-   * Upload multiple files
-   */
   async uploadMany(inputs: UploadInput[], context?: OperationContext): Promise<IMediaDocument[]> {
-    const results = await Promise.all(
-      inputs.map(input => this.upload(input, context))
-    );
-    return results;
+    return uploadMany(this.deps, inputs, context);
   }
 
-  /**
-   * Get media by ID
-   */
+  async replace(id: string, input: UploadInput, context?: OperationContext): Promise<IMediaDocument> {
+    return replace(this.deps, id, input, context);
+  }
+
+  async delete(id: string, context?: OperationContext): Promise<boolean> {
+    return deleteMedia(this.deps, id, context);
+  }
+
+  async deleteMany(ids: string[], context?: OperationContext): Promise<BulkResult> {
+    return deleteMany(this.deps, ids, context);
+  }
+
+  // ============================================
+  // SOFT DELETES
+  // ============================================
+
+  async softDelete(id: string, context?: OperationContext): Promise<IMediaDocument> {
+    return softDelete(this.deps, id, context);
+  }
+
+  async restore(id: string, context?: OperationContext): Promise<IMediaDocument> {
+    return restore(this.deps, id, context);
+  }
+
+  async purgeDeleted(olderThan?: Date, context?: OperationContext): Promise<number> {
+    return purgeDeleted(this.deps, olderThan, context);
+  }
+
+  // ============================================
+  // URL IMPORT
+  // ============================================
+
+  async importFromUrl(url: string, options?: ImportOptions, context?: OperationContext): Promise<IMediaDocument> {
+    return importFromUrl(this.deps, url, options, context);
+  }
+
+  // ============================================
+  // TAGS
+  // ============================================
+
+  async addTags(id: string, tags: string[], context?: OperationContext): Promise<IMediaDocument> {
+    return addTags(this.deps, id, tags, context);
+  }
+
+  async removeTags(id: string, tags: string[], context?: OperationContext): Promise<IMediaDocument> {
+    return removeTags(this.deps, id, tags, context);
+  }
+
+  // ============================================
+  // FOCAL POINT
+  // ============================================
+
+  async setFocalPoint(id: string, focalPoint: FocalPoint, context?: OperationContext): Promise<IMediaDocument> {
+    return setFocalPoint(this.deps, id, focalPoint, context);
+  }
+
+  // ============================================
+  // QUERY OPERATIONS
+  // ============================================
+
   async getById(id: string, context?: OperationContext): Promise<IMediaDocument | null> {
-    return this.repository.getMediaById(id, context);
+    return getById(this.deps, id, context);
   }
 
-  /**
-   * Get all media with smart pagination
-   * Auto-detects offset (page) vs keyset (cursor) based on params
-   */
   async getAll(
     params: {
       filters?: Record<string, unknown>;
@@ -538,183 +353,119 @@ class MediaKitImpl implements MediaKit {
       after?: string;
       search?: string;
     } = {},
-    context?: OperationContext
+    context?: OperationContext,
   ): Promise<OffsetPaginationResult<IMediaDocument> | KeysetPaginationResult<IMediaDocument>> {
-    return this.repository.getAllMedia(params, context);
+    return getAll(this.deps, params, context);
   }
 
-  /**
-   * Delete single file
-   */
-  async delete(id: string, context?: OperationContext): Promise<boolean> {
-    const repo = this.repository;
-
-    // Get media to find storage key
-    const media = await repo.getMediaById(id, context);
-    if (!media) {
-      return false;
-    }
-
-    // Delete main file from storage
-    try {
-      await this.provider.delete(media.key);
-    } catch (err) {
-      this.log('warn', 'Failed to delete main file from storage', {
-        id,
-        key: media.key,
-        error: (err as Error).message
-      });
-    }
-
-    // Delete all size variants from storage
-    if (media.variants && media.variants.length > 0) {
-      const variantDeletions = media.variants.map(async (variant) => {
-        try {
-          await this.provider.delete(variant.key);
-        } catch (err) {
-          this.log('warn', 'Failed to delete variant from storage', {
-            id,
-            variant: variant.name,
-            key: variant.key,
-            error: (err as Error).message
-          });
-        }
-      });
-
-      await Promise.all(variantDeletions);
-
-      this.log('info', 'Deleted variants', {
-        id,
-        count: media.variants.length
-      });
-    }
-
-    // Delete from database
-    const deleted = await repo.deleteMedia(id, context);
-
-    if (deleted) {
-      this.log('info', 'Media deleted', { id });
-    }
-
-    return deleted;
+  async search(
+    query: string,
+    params: { limit?: number; page?: number; filters?: Record<string, unknown> } = {},
+    context?: OperationContext,
+  ): Promise<OffsetPaginationResult<IMediaDocument> | KeysetPaginationResult<IMediaDocument>> {
+    return search(this.deps, query, params, context);
   }
 
-  /**
-   * Delete multiple files
-   */
-  async deleteMany(ids: string[], context?: OperationContext): Promise<BulkResult> {
-    const result: BulkResult = { success: [], failed: [] };
+  // ============================================
+  // MOVE
+  // ============================================
 
-    for (const id of ids) {
-      try {
-        const deleted = await this.delete(id, context);
-        if (deleted) {
-          result.success.push(id);
-        } else {
-          result.failed.push({ id, reason: 'Not found' });
-        }
-      } catch (err) {
-        result.failed.push({ id, reason: (err as Error).message });
-      }
-    }
-
-    return result;
+  async move(ids: string[], targetFolder: string, context?: OperationContext): Promise<RewriteResult> {
+    return move(this.deps, ids, targetFolder, context);
   }
 
-  /**
-   * Move files to different folder
-   */
-  async move(
-    ids: string[], 
-    targetFolder: string, 
-    context?: OperationContext
-  ): Promise<{ modifiedCount: number }> {
-    const repo = this.repository;
-    const folder = normalizeFolderPath(targetFolder);
-    
-    // Validate folder
-    const baseFolders = this.config.folders?.baseFolders || [];
-    if (baseFolders.length > 0 && !isValidFolder(folder, baseFolders)) {
-      throw new Error(`Invalid base folder. Allowed: ${baseFolders.join(', ')}`);
-    }
+  // ============================================
+  // FOLDER OPERATIONS
+  // ============================================
 
-    return repo.moveToFolder(ids, folder, context);
-  }
-
-  /**
-   * Get folder tree
-   */
   async getFolderTree(context?: OperationContext): Promise<FolderTree> {
-    return this.repository.getFolderTree(context);
+    return getFolderTree(this.deps, context);
   }
 
-  /**
-   * Get folder stats
-   */
   async getFolderStats(folder: string, context?: OperationContext): Promise<FolderStats> {
-    return this.repository.getFolderStats(folder, context);
+    return getFolderStats(this.deps, folder, context);
   }
 
-  /**
-   * Get breadcrumb
-   */
   getBreadcrumb(folder: string): BreadcrumbItem[] {
-    return this.repository.getBreadcrumb(folder);
+    return getBreadcrumb(this.deps, folder);
   }
 
-  /**
-   * Delete folder (all files in folder)
-   */
   async deleteFolder(folder: string, context?: OperationContext): Promise<BulkResult> {
-    const repo = this.repository;
-    const files = await repo.getFilesInFolder(folder, context);
+    return deleteFolder(this.deps, folder, context);
+  }
 
-    const result: BulkResult = { success: [], failed: [] };
+  async renameFolder(oldPath: string, newPath: string, context?: OperationContext): Promise<RewriteResult> {
+    return renameFolder(this.deps, oldPath, newPath, context);
+  }
 
-    // Delete each file (main + variants)
-    for (const file of files) {
-      try {
-        // Delete main file
-        await this.provider.delete(file.key);
+  async getSubfolders(parentPath: string, context?: OperationContext): Promise<FolderNode[]> {
+    return getSubfolders(this.deps, parentPath, context);
+  }
 
-        // Delete all variants
-        if (file.variants && file.variants.length > 0) {
-          await Promise.all(
-            file.variants.map((variant) =>
-              this.provider.delete(variant.key).catch((err) => {
-                this.log('warn', 'Failed to delete variant in folder deletion', {
-                  folder,
-                  fileId: (file as any)._id.toString(),
-                  variant: variant.name,
-                  error: (err as Error).message
-                });
-              })
-            )
-          );
-        }
+  // ============================================
+  // PRESIGNED UPLOAD FLOW
+  // ============================================
 
-        result.success.push((file as any)._id.toString());
-      } catch (err) {
-        result.failed.push({
-          id: (file as any)._id.toString(),
-          reason: (err as Error).message
-        });
-      }
+  async getSignedUploadUrl(
+    filename: string,
+    contentType: string,
+    options: { folder?: string; expiresIn?: number } = {},
+  ): Promise<PresignedUploadResult> {
+    return getSignedUploadUrl(this.deps, filename, contentType, options);
+  }
+
+  async confirmUpload(input: ConfirmUploadInput, context?: OperationContext): Promise<IMediaDocument> {
+    return confirmUpload(this.deps, input, context);
+  }
+
+  // ============================================
+  // MULTIPART UPLOAD FLOW
+  // ============================================
+
+  async initiateMultipartUpload(input: InitiateMultipartInput): Promise<MultipartUploadSession> {
+    return initiateMultipartUpload(this.deps, input);
+  }
+
+  async signUploadPart(key: string, uploadId: string, partNumber: number, expiresIn?: number): Promise<SignedPartResult> {
+    return signUploadPart(this.deps, key, uploadId, partNumber, expiresIn);
+  }
+
+  async signUploadParts(key: string, uploadId: string, partNumbers: number[], expiresIn?: number): Promise<SignedPartResult[]> {
+    return signUploadParts(this.deps, key, uploadId, partNumbers, expiresIn);
+  }
+
+  async completeMultipartUpload(input: CompleteMultipartInput, context?: OperationContext): Promise<IMediaDocument> {
+    return completeMultipartUpload(this.deps, input, context);
+  }
+
+  async abortMultipartUpload(key: string, uploadId: string): Promise<void> {
+    return abortMultipartUpload(this.deps, key, uploadId);
+  }
+
+  // ============================================
+  // RESUMABLE UPLOAD HELPERS (GCS)
+  // ============================================
+
+  async abortResumableUpload(sessionUri: string): Promise<void> {
+    if (!this.driver.abortResumableUpload) {
+      throw new Error(`Driver '${this.driver.name}' does not support resumable abort`);
     }
+    return this.driver.abortResumableUpload(sessionUri);
+  }
 
-    // Bulk delete from database
-    const successIds = result.success;
-    if (successIds.length > 0) {
-      await repo.deleteManyMedia(successIds, context);
+  async getResumableUploadStatus(sessionUri: string): Promise<{ uploadedBytes: number }> {
+    if (!this.driver.getResumableUploadStatus) {
+      throw new Error(`Driver '${this.driver.name}' does not support resumable status query`);
     }
+    return this.driver.getResumableUploadStatus(sessionUri);
+  }
 
-    this.log('info', 'Folder deleted', {
-      folder,
-      deleted: result.success.length,
-      failed: result.failed.length
-    });
+  // ============================================
+  // BATCH PRESIGNED URLS
+  // ============================================
 
-    return result;
+  async generateBatchPutUrls(input: BatchPresignInput): Promise<BatchPresignResult> {
+    return generateBatchPutUrls(this.deps, input);
   }
 }
 

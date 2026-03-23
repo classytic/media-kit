@@ -15,7 +15,7 @@ export default defineConfig({
   resolve: {
     alias: {
       // Resolve @classytic/mongokit to the installed npm package
-      '@classytic/mongokit': resolve(__dirname, 'node_modules/@classytic/mongokit/dist/index.js'),
+      '@classytic/mongokit': resolve(__dirname, 'node_modules/@classytic/mongokit/dist/index.mjs'),
     },
   },
 });

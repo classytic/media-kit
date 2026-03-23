@@ -51,7 +51,26 @@ export function computeDeduplicationHash(buffer: Buffer): string {
  */
 export function buffersEqual(buffer1: Buffer, buffer2: Buffer): boolean {
   if (buffer1.length !== buffer2.length) return false;
-  return computeFileHash(buffer1) === computeFileHash(buffer2);
+  return Buffer.compare(buffer1, buffer2) === 0;
+}
+
+/**
+ * Compute hash from a readable stream (memory-efficient for large files).
+ * Avoids buffering the entire file into memory.
+ *
+ * @param stream - Readable stream or async iterable
+ * @param algorithm - Hash algorithm (default: sha256)
+ * @returns Hex-encoded hash string
+ */
+export async function computeStreamHash(
+  stream: NodeJS.ReadableStream | AsyncIterable<Buffer>,
+  algorithm: 'md5' | 'sha1' | 'sha256' = 'sha256'
+): Promise<string> {
+  const hash = crypto.createHash(algorithm);
+  for await (const chunk of stream as AsyncIterable<Buffer>) {
+    hash.update(chunk);
+  }
+  return hash.digest('hex');
 }
 
 export default computeFileHash;

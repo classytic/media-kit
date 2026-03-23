@@ -1,173 +1,702 @@
 # MediaKit API
 
-Core API reference for Media Kit.
+Core API reference for `@classytic/media-kit`.
 
 ## createMedia(config)
 
-Create a new Media Kit instance.
+Create a new MediaKit instance.
 
 ```typescript
 import { createMedia } from '@classytic/media-kit';
+import { S3Provider } from '@classytic/media-kit/providers/s3';
 
-const media = createMedia(config);
+const media = createMedia({
+  driver: new S3Provider({ bucket: 'my-bucket', region: 'us-east-1' }),
+  folders: { defaultFolder: 'general' },
+  processing: {
+    enabled: true,
+    format: 'webp',
+    quality: 80,
+    aspectRatios: {
+      product: { aspectRatio: 3 / 4, fit: 'cover' },
+      avatar: { aspectRatio: 1, fit: 'cover' },
+    },
+  },
+});
 ```
 
 ### Parameters
 
-- `config` - Configuration object
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `config` | `MediaKitConfig` | Configuration object (see [Config Reference](#configuration) below) |
 
 ### Returns
 
-MediaKit instance with methods and schema.
+`MediaKit` instance. You must call `init(model)` before using any operations.
 
-## MediaKit Instance
+## Initialization
 
-### Properties
+After creating a MediaKit instance, register it with a Mongoose model:
 
-#### `schema`
+```typescript
+import mongoose from 'mongoose';
 
-Mongoose schema for media files.
+const Media = mongoose.model('Media', media.schema);
+media.init(Media);
+```
+
+## Properties
+
+### `schema`
+
+Mongoose schema for media documents. Use this to create your model before calling `init()`.
 
 ```typescript
 const Media = mongoose.model('Media', media.schema);
 ```
 
-### Methods
+### `driver`
 
-#### `init(model)`
+The `StorageDriver` instance provided in config. Read-only.
 
-Initialize Media Kit with Mongoose model.
+### `repository`
+
+The underlying `MediaRepository` (mongokit-powered). Available after `init()`. Throws if accessed before initialization.
+
+### `config`
+
+The resolved `MediaKitConfig`. Read-only.
+
+## Methods
+
+### `init(model)`
+
+Initialize MediaKit with a Mongoose model. Must be called before any operation.
 
 ```typescript
 media.init(Media);
 ```
 
-#### `upload(input, context?)`
+**Returns:** `this` (chainable)
 
-Upload a single file.
+---
+
+### `upload(input, context?)`
+
+Upload a single file. Follows the status lifecycle: `pending` -> `processing` -> `ready` (or `error`).
+
+Automatically computes a SHA-256 hash, generates a title from the filename, and runs image processing when enabled.
 
 ```typescript
 const file = await media.upload({
-  buffer: Buffer,
-  filename: string,
-  mimeType: string,
-  folder?: string,
-  title?: string,
-  alt?: string,
-  caption?: string,
-  organizationId?: string,
+  buffer: fileBuffer,
+  filename: 'product-shot.jpg',
+  mimeType: 'image/jpeg',
+  folder: 'products/featured',
+  description: 'Main product image',
+  tags: ['product', 'featured'],
+  focalPoint: { x: 0.5, y: 0.3 },
 });
 ```
 
-**Returns:** Uploaded file document
+**Parameters:**
 
-#### `uploadMany(inputs, context?)`
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `buffer` | `Buffer` | Yes | File data |
+| `filename` | `string` | Yes | Original filename |
+| `mimeType` | `string` | Yes | MIME type |
+| `folder` | `string` | No | Target folder path (defaults to `folders.defaultFolder`) |
+| `alt` | `string` | No | Alt text for images |
+| `title` | `string` | No | Display title (auto-generated from filename if omitted) |
+| `description` | `string` | No | File description |
+| `tags` | `string[]` | No | Searchable tags |
+| `focalPoint` | `FocalPoint` | No | Smart crop anchor point `{ x: 0-1, y: 0-1 }` |
+| `contentType` | `string` | No | Processing hint (e.g., `'product'`, `'avatar'`) |
+| `skipProcessing` | `boolean` | No | Skip image processing for this upload |
 
-Upload multiple files.
+**Returns:** `Promise<IMediaDocument>` -- the saved document with `status: 'ready'`
+
+**Events:** `before:upload`, `after:upload`, `error:upload`
+
+---
+
+### `uploadMany(inputs, context?)`
+
+Upload multiple files concurrently. Uses `Promise.allSettled` internally -- successful uploads are returned even if some fail.
 
 ```typescript
 const files = await media.uploadMany([
-  { buffer, filename, mimeType },
-  { buffer, filename, mimeType },
+  { buffer: buf1, filename: 'a.jpg', mimeType: 'image/jpeg' },
+  { buffer: buf2, filename: 'b.png', mimeType: 'image/png' },
 ]);
 ```
 
-**Returns:** Array of uploaded file documents
+**Returns:** `Promise<IMediaDocument[]>` -- only the successfully uploaded documents
 
-#### `delete(id, context?)`
+**Events:** `before:uploadMany`, `after:uploadMany`
 
-Delete a file by ID.
+---
+
+### `delete(id, context?)`
+
+Hard-delete a file. Removes the main file and all variants from storage, then deletes the database record.
 
 ```typescript
-const deleted = await media.delete('file_id');
+const deleted = await media.delete('64f1a2b3c4d5e6f7a8b9c0d1');
 ```
 
-**Returns:** `true` if deleted
+**Returns:** `Promise<boolean>` -- `true` if deleted, `false` if not found
 
-#### `deleteMany(ids, context?)`
+**Events:** `before:delete`, `after:delete`, `error:delete`
 
-Delete multiple files.
+---
+
+### `deleteMany(ids, context?)`
+
+Hard-delete multiple files.
 
 ```typescript
-const result = await media.deleteMany(['id1', 'id2']);
+const result = await media.deleteMany(['id1', 'id2', 'id3']);
+// { success: ['id1', 'id2'], failed: [{ id: 'id3', reason: 'Not found' }] }
+```
+
+**Returns:** `Promise<BulkResult>` -- `{ success: string[], failed: Array<{ id: string, reason: string }> }`
+
+**Events:** `before:deleteMany`, `after:deleteMany`
+
+---
+
+### `deleteFolder(folder, context?)`
+
+Delete all files in a folder including their variants from storage.
+
+```typescript
+const result = await media.deleteFolder('images/temp');
 // { success: ['id1', 'id2'], failed: [] }
 ```
 
-**Returns:** Object with `success` and `failed` arrays
+**Returns:** `Promise<BulkResult>`
 
-#### `deleteFolder(folder, context?)`
+---
 
-Delete all files in a folder.
+### `replace(id, input, context?)`
 
-```typescript
-const count = await media.deleteFolder('images/temp');
-```
-
-**Returns:** Number of files deleted
-
-#### `on(event, listener)`
-
-Listen to events.
+Replace a file's content while preserving the same document ID. Deletes the old file and variants from storage, uploads the new content, re-processes images, and updates the database record.
 
 ```typescript
-media.on('after:upload', (event) => {
-  console.log('Uploaded:', event.result);
+const updated = await media.replace('64f1a2b3c4d5e6f7a8b9c0d1', {
+  buffer: newBuffer,
+  filename: 'updated-product.jpg',
+  mimeType: 'image/jpeg',
 });
 ```
 
-**Events:**
-- `before:upload`, `after:upload`, `error:upload`
-- `before:delete`, `after:delete`, `error:delete`
-- `before:list`, `after:list`
+**Parameters:** Same `UploadInput` fields as `upload()`. The `id` is the document to replace.
 
-#### `emit(event, payload)`
+**Returns:** `Promise<IMediaDocument>` -- the updated document (same `_id`)
 
-Emit custom events (advanced).
+**Events:** `before:replace`, `after:replace`, `error:replace`
+
+---
+
+### `softDelete(id, context?)`
+
+Soft-delete a file by setting `deletedAt` to the current timestamp. The file remains in storage and can be restored.
 
 ```typescript
-media.emit('custom:event', { data: 'value' });
+const trashed = await media.softDelete('64f1a2b3c4d5e6f7a8b9c0d1');
+console.log(trashed.deletedAt); // Date
 ```
 
-## File Document
+**Returns:** `Promise<IMediaDocument>`
 
-Fields on uploaded file documents:
+**Events:** `before:softDelete`, `after:softDelete`
+
+> Requires `softDelete.enabled: true` in config for the feature to be meaningful. Soft-deleted files are excluded from normal queries unless `includeTrashed: true` is set in the context.
+
+---
+
+### `restore(id, context?)`
+
+Restore a soft-deleted file by clearing `deletedAt`.
+
+```typescript
+const restored = await media.restore('64f1a2b3c4d5e6f7a8b9c0d1');
+console.log(restored.deletedAt); // null
+```
+
+**Returns:** `Promise<IMediaDocument>`
+
+**Events:** `before:restore`, `after:restore`
+
+---
+
+### `purgeDeleted(olderThan?, context?)`
+
+Permanently delete all soft-deleted files older than the given date. Removes files from both storage and database.
+
+```typescript
+// Purge files soft-deleted more than 30 days ago (default)
+const count = await media.purgeDeleted();
+
+// Purge files soft-deleted before a specific date
+const count = await media.purgeDeleted(new Date('2024-01-01'));
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `olderThan` | `Date` | Cutoff date (defaults to `softDelete.ttlDays` ago, which defaults to 30 days) |
+
+**Returns:** `Promise<number>` -- count of purged records
+
+---
+
+### `importFromUrl(url, options?, context?)`
+
+Import a file from a remote URL. Streams the response, detects filename and MIME type from headers, and runs through the standard upload flow.
+
+```typescript
+const file = await media.importFromUrl('https://example.com/photo.jpg', {
+  folder: 'imports',
+  tags: ['imported', 'external'],
+  title: 'External Photo',
+  maxSize: 10 * 1024 * 1024, // 10MB
+  timeout: 15000,
+});
+```
+
+**Parameters:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `url` | `string` | URL to fetch |
+| `options.folder` | `string` | Target folder |
+| `options.filename` | `string` | Override detected filename |
+| `options.alt` | `string` | Alt text |
+| `options.title` | `string` | Display title |
+| `options.tags` | `string[]` | Tags to apply |
+| `options.maxSize` | `number` | Max file size in bytes (defaults to `fileTypes.maxSize`) |
+| `options.timeout` | `number` | Request timeout in ms (default: `30000`) |
+
+**Returns:** `Promise<IMediaDocument>`
+
+**Events:** `before:import`, `after:import`, `error:import`
+
+---
+
+### `getById(id, context?)`
+
+Get a single media document by ID.
+
+```typescript
+const file = await media.getById('64f1a2b3c4d5e6f7a8b9c0d1');
+```
+
+**Returns:** `Promise<IMediaDocument | null>`
+
+---
+
+### `getAll(params?, context?)`
+
+Get all media with smart pagination. Auto-detects offset (page-based) vs keyset (cursor-based) pagination based on the parameters provided.
+
+```typescript
+// Offset pagination
+const page = await media.getAll({ page: 1, limit: 20 });
+
+// Keyset (cursor) pagination
+const page = await media.getAll({ cursor: 'abc123', limit: 20 });
+
+// With filters and sorting
+const page = await media.getAll({
+  filters: { mimeType: 'image/jpeg', folder: 'products' },
+  sort: '-createdAt',
+  limit: 50,
+});
+```
+
+**Parameters:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `filters` | `Record<string, unknown>` | MongoDB-style filter object |
+| `sort` | `SortSpec \| string` | Sort specification (e.g., `'-createdAt'`) |
+| `limit` | `number` | Page size |
+| `page` | `number` | Page number (offset pagination) |
+| `cursor` | `string` | Cursor token (keyset pagination) |
+| `after` | `string` | Alias for `cursor` |
+| `search` | `string` | Search query |
+
+**Returns:** `Promise<OffsetPaginationResult<IMediaDocument> | KeysetPaginationResult<IMediaDocument>>`
+
+---
+
+### `addTags(id, tags, context?)`
+
+Add tags to a media document. Duplicate tags are ignored.
+
+```typescript
+const file = await media.addTags('64f1a2b3c4d5e6f7a8b9c0d1', ['featured', 'hero']);
+```
+
+**Returns:** `Promise<IMediaDocument>`
+
+---
+
+### `removeTags(id, tags, context?)`
+
+Remove tags from a media document.
+
+```typescript
+const file = await media.removeTags('64f1a2b3c4d5e6f7a8b9c0d1', ['draft']);
+```
+
+**Returns:** `Promise<IMediaDocument>`
+
+---
+
+### `setFocalPoint(id, focalPoint, context?)`
+
+Set the focal point on a media document for smart cropping. Coordinates must be between 0.0 and 1.0.
+
+```typescript
+const file = await media.setFocalPoint('64f1a2b3c4d5e6f7a8b9c0d1', {
+  x: 0.3, // 30% from left
+  y: 0.2, // 20% from top
+});
+```
+
+**Returns:** `Promise<IMediaDocument>`
+
+---
+
+### `search(query, params?, context?)`
+
+Full-text search across media documents (title, tags, description, originalFilename).
+
+```typescript
+const results = await media.search('shoes', { limit: 10, page: 1 });
+```
+
+**Parameters:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `query` | `string` | Search query text |
+| `params.limit` | `number` | Page size |
+| `params.page` | `number` | Page number |
+| `params.filters` | `Record<string, unknown>` | Additional filters |
+
+**Returns:** `Promise<OffsetPaginationResult<IMediaDocument> | KeysetPaginationResult<IMediaDocument>>`
+
+---
+
+### `move(ids, folder, context?)`
+
+Move files to a different folder (database-level path update).
+
+```typescript
+const result = await media.move(['id1', 'id2'], 'products/archived');
+// { modifiedCount: 2 }
+```
+
+**Returns:** `Promise<{ modifiedCount: number }>`
+
+**Events:** `before:move`, `after:move`, `error:move`
+
+---
+
+### `getSignedUploadUrl(filename, contentType, options?)`
+
+Generate a presigned upload URL for direct browser-to-cloud uploads. The driver must support `getSignedUploadUrl`.
+
+```typescript
+const result = await media.getSignedUploadUrl('photo.jpg', 'image/jpeg', {
+  folder: 'uploads',
+  expiresIn: 3600,
+});
+// { uploadUrl, key, publicUrl, expiresIn, headers? }
+```
+
+**Parameters:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `filename` | `string` | Name of the file to upload |
+| `contentType` | `string` | MIME type |
+| `options.folder` | `string` | Target folder (defaults to `folders.defaultFolder`) |
+| `options.expiresIn` | `number` | Expiration in seconds (default: driver-specific) |
+
+**Returns:** `Promise<PresignedUploadResult>`
+
+**Events:** `before:presignedUpload`, `after:presignedUpload`
+
+---
+
+### `confirmUpload(input, context?)`
+
+Confirm a presigned upload. Verifies the file exists in storage, fetches metadata, computes hash, and creates the database record with `status: 'ready'`.
+
+```typescript
+const file = await media.confirmUpload({
+  key: 'uploads/1707123456-abc123-photo.jpg',
+  filename: 'photo.jpg',
+  mimeType: 'image/jpeg',
+  size: 204800,
+  folder: 'uploads',
+  title: 'My Photo',
+});
+```
+
+**Parameters:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `key` | `string` | Yes | Storage key from the presigned upload |
+| `filename` | `string` | Yes | Original filename |
+| `mimeType` | `string` | Yes | MIME type |
+| `size` | `number` | Yes | File size in bytes |
+| `folder` | `string` | No | Target folder (derived from key if omitted) |
+| `alt` | `string` | No | Alt text |
+| `title` | `string` | No | Display title |
+| `url` | `string` | No | Override public URL |
+
+**Returns:** `Promise<IMediaDocument>`
+
+**Events:** `before:confirmUpload`, `after:confirmUpload`
+
+---
+
+### `renameFolder(oldPath, newPath, context?)`
+
+Rename a folder by updating the folder path on all files within it.
+
+```typescript
+const result = await media.renameFolder('images/temp', 'images/final');
+// { modifiedCount: 12 }
+```
+
+**Returns:** `Promise<{ modifiedCount: number }>`
+
+**Events:** `before:rename`, `after:rename`
+
+---
+
+### `getSubfolders(parentPath, context?)`
+
+Get immediate subfolders of a path.
+
+```typescript
+const subfolders = await media.getSubfolders('images');
+// [{ id: 'images/avatars', name: 'avatars', path: 'images/avatars', stats: {...}, children: [] }]
+```
+
+**Returns:** `Promise<FolderNode[]>`
+
+---
+
+### `getFolderTree(context?)`
+
+Get the full folder tree for UI navigation.
+
+```typescript
+const tree = await media.getFolderTree();
+// { folders: [...], meta: { totalFiles: 150, totalSize: 52428800 } }
+```
+
+**Returns:** `Promise<FolderTree>`
+
+---
+
+### `getFolderStats(folder, context?)`
+
+Get stats for a specific folder.
+
+```typescript
+const stats = await media.getFolderStats('products');
+// { totalFiles, totalSize, avgSize, mimeTypes, oldestFile, newestFile }
+```
+
+**Returns:** `Promise<FolderStats>`
+
+---
+
+### `getBreadcrumb(folder)`
+
+Get breadcrumb trail for a folder path. Synchronous.
+
+```typescript
+const crumbs = media.getBreadcrumb('products/shoes/running');
+// [{ name: 'products', path: 'products' }, { name: 'shoes', path: 'products/shoes' }, ...]
+```
+
+**Returns:** `BreadcrumbItem[]`
+
+---
+
+### `on(event, listener)`
+
+Register an event listener. Returns an unsubscribe function.
+
+```typescript
+const unsubscribe = media.on('after:upload', async (event) => {
+  console.log('Uploaded:', event.result.filename);
+  // Listeners can be async -- they are awaited
+});
+
+// Later: remove listener
+unsubscribe();
+```
+
+**Returns:** `Unsubscribe` (a `() => void` function)
+
+---
+
+### `emit(event, payload)`
+
+Emit an event and await all listeners. Useful for custom events or testing.
+
+```typescript
+await media.emit('after:upload', {
+  context: { data: input, timestamp: new Date() },
+  result: uploadedDoc,
+  timestamp: new Date(),
+});
+```
+
+**Returns:** `Promise<void>`
+
+---
+
+### `validateFile(buffer, filename, mimeType)`
+
+Validate a file against the configured `fileTypes` rules (allowed MIME types and max size). Throws on validation failure.
+
+```typescript
+media.validateFile(buffer, 'photo.jpg', 'image/jpeg');
+```
+
+---
+
+### `getContentType(folder)`
+
+Get the content type string for a folder path based on `folders.contentTypeMap`.
+
+```typescript
+const contentType = media.getContentType('products/shoes');
+// 'product' (if mapped)
+```
+
+**Returns:** `string`
+
+## Event Reference
+
+All events are awaitable. Listener functions can return a `Promise` and they will be awaited before the operation continues.
+
+| Event | Payload Type | Description |
+|-------|-------------|-------------|
+| `before:upload` | `EventContext<UploadInput>` | Before single file upload |
+| `after:upload` | `EventResult<UploadInput, IMediaDocument>` | After successful upload |
+| `error:upload` | `EventError<UploadInput>` | On upload failure |
+| `before:uploadMany` | `EventContext<UploadInput[]>` | Before batch upload |
+| `after:uploadMany` | `EventResult<UploadInput[], { successes, errors }>` | After batch upload |
+| `before:delete` | `EventContext<{ id }>` | Before hard delete |
+| `after:delete` | `EventResult<{ id }, { id, deleted }>` | After hard delete |
+| `error:delete` | `EventError<{ id }>` | On delete failure |
+| `before:deleteMany` | `EventContext<{ ids }>` | Before batch delete |
+| `after:deleteMany` | `EventResult<{ ids }, BulkResult>` | After batch delete |
+| `before:replace` | `EventContext<{ id, input }>` | Before file replacement |
+| `after:replace` | `EventResult<{ id, input }, IMediaDocument>` | After file replacement |
+| `error:replace` | `EventError<{ id, input }>` | On replacement failure |
+| `before:softDelete` | `EventContext<{ id }>` | Before soft delete |
+| `after:softDelete` | `EventResult<{ id }, IMediaDocument>` | After soft delete |
+| `before:restore` | `EventContext<{ id }>` | Before restore |
+| `after:restore` | `EventResult<{ id }, IMediaDocument>` | After restore |
+| `before:import` | `EventContext<{ url, options? }>` | Before URL import |
+| `after:import` | `EventResult<{ url, options? }, IMediaDocument>` | After URL import |
+| `error:import` | `EventError<{ url, options? }>` | On import failure |
+| `before:move` | `EventContext<{ ids, targetFolder }>` | Before move |
+| `after:move` | `EventResult<{ ids, targetFolder }, { modifiedCount }>` | After move |
+| `error:move` | `EventError<{ ids, targetFolder }>` | On move failure |
+| `before:presignedUpload` | `EventContext<{ filename, contentType, folder, key }>` | Before presigned URL generation |
+| `after:presignedUpload` | `EventResult<..., PresignedUploadResult>` | After presigned URL generation |
+| `before:confirmUpload` | `EventContext<ConfirmUploadInput>` | Before confirming presigned upload |
+| `after:confirmUpload` | `EventResult<ConfirmUploadInput, IMediaDocument>` | After confirming presigned upload |
+| `before:rename` | `EventContext<{ oldPath, newPath }>` | Before folder rename |
+| `after:rename` | `EventResult<{ oldPath, newPath }, { modifiedCount }>` | After folder rename |
+| `before:validate` | `EventContext<{ filename, mimeType, buffer }>` | Before image validation/processing |
+| `after:process` | `EventResult<{ filename, mimeType }, { width, height, mimeType }>` | After image processing |
+
+## File Document Shape
+
+Fields on `IMediaDocument`:
 
 ```typescript
 {
   _id: ObjectId,
-  filename: string,
-  mimeType: string,
-  size: number,
-  url: string,
-  key: string,
-  folder: string,
 
-  // Optional
-  title?: string,
-  alt?: string,
-  caption?: string,
-  description?: string,
+  // Identity (Directus triple-name pattern)
+  filename: string,           // Sanitized storage filename
+  originalFilename: string,   // Original filename as uploaded
+  title: string,              // Display title (auto-generated or user-set)
+
+  // Storage
+  key: string,                // Storage key/path
+  url: string,                // Public URL
+  mimeType: string,           // MIME type
+  size: number,               // File size in bytes
+  hash: string,               // SHA-256 content hash (auto-computed)
+
+  // Status lifecycle
+  status: 'pending' | 'processing' | 'ready' | 'error',
+  errorMessage?: string,      // Set when status is 'error'
+
+  // Organization
+  folder: string,             // Full folder path (free-form, no enum)
+  tags: string[],             // Searchable tags
+  alt?: string,               // Alt text
+  description?: string,       // Description (replaces v2 'caption')
 
   // Image metadata
   width?: number,
   height?: number,
-  aspectRatio?: number,
+  aspectRatio?: number,       // Auto-computed (width / height)
+  focalPoint?: {              // Smart crop anchor
+    x: number,                // 0.0 (left) to 1.0 (right)
+    y: number,                // 0.0 (top) to 1.0 (bottom)
+  },
 
-  // Variants
-  variants?: Array<{
-    name: string,
-    url: string,
-    key: string,
+  // Variants (each with independent metadata)
+  variants: Array<{
+    name: string,             // e.g., 'thumbnail', 'medium'
+    key: string,              // Storage key
+    url: string,              // Public URL
+    filename: string,         // Variant-specific filename
+    mimeType: string,         // Variant-specific MIME type
     size: number,
     width?: number,
     height?: number,
   }>,
 
-  // Organization
-  organizationId?: string,
+  // Video/Audio
+  duration?: number,          // Duration in milliseconds
+
+  // Extensible
+  metadata: Record<string, unknown>,
+  exif?: ExifMetadata,
+
+  // Soft delete
+  deletedAt?: Date | null,    // null = active, Date = soft-deleted
+
+  // Audit
+  uploadedBy?: ObjectId,
+  organizationId?: ObjectId,  // For multi-tenancy
 
   // Timestamps
-  uploadedAt: Date,
   createdAt: Date,
   updatedAt: Date,
 }
@@ -175,55 +704,99 @@ Fields on uploaded file documents:
 
 ## Configuration
 
-Full config object reference:
+Full `MediaKitConfig` reference:
 
 ```typescript
 {
-  // Required
-  provider: StorageProvider,
+  // Required: storage driver instance
+  driver: StorageDriver,
 
-  // Folders
+  // Folder settings
   folders?: {
-    baseFolders?: string[],
-    defaultFolder?: string,
-    enableSubfolders?: boolean,
+    defaultFolder?: string,                    // Default: 'general'
+    contentTypeMap?: Record<string, string[]>, // Folder pattern -> content type
+    enableSubfolders?: boolean,                // Default: true
   },
 
   // File validation
   fileTypes?: {
-    allowed?: string[],
-    maxSize?: number,
+    allowed?: string[],  // Allowed MIME types (e.g., ['image/*', 'application/pdf'])
+    maxSize?: number,    // Max file size in bytes
   },
 
-  // Image processing
+  // Image processing (requires `sharp`)
   processing?: {
-    enabled?: boolean,
-    quality?: number,
-    format?: 'webp' | 'jpeg' | 'png' | 'avif',
+    enabled?: boolean,                          // Default: true
+    quality?: number,                           // 1-100
+    format?: 'webp' | 'jpeg' | 'png' | 'avif' | 'original',
     maxWidth?: number,
-    generateAlt?: boolean,
-    sizes?: Array<{
+    aspectRatios?: Record<string, {             // By content type
+      aspectRatio?: number,
+      fit?: 'cover' | 'contain' | 'fill' | 'inside' | 'outside',
+      preserveRatio?: boolean,
+    }>,
+    sizes?: Array<{                             // Size variants
       name: string,
       width?: number,
       height?: number,
       quality?: number,
-      format?: string,
-      aspectRatio?: {
-        aspectRatio: number,
-        fit: 'cover' | 'contain' | 'fill',
-      },
+      format?: 'webp' | 'jpeg' | 'png' | 'avif' | 'original',
+      aspectRatio?: AspectRatioPreset,
+      condition?: (original: { width: number; height: number; mimeType: string }) => boolean,
     }>,
+    generateAlt?: boolean | {
+      enabled: boolean,
+      strategy?: 'filename' | 'ai',
+      fallback?: string,
+      generator?: (filename: string, buffer?: Buffer) => string | Promise<string>,
+    },
+    sharpOptions?: {
+      concurrency?: number,  // Default: 2
+      cache?: boolean,       // Default: false
+    },
   },
 
   // Multi-tenancy
-  multitenancy?: {
-    enabled?: boolean,
-    organizationField?: string,
-    enforceIsolation?: boolean,
+  multiTenancy?: {
+    enabled: boolean,
+    field?: string,     // Default: 'organizationId'
+    required?: boolean, // Require org ID on all operations
   },
 
-  // Other
+  // File deduplication (by content hash)
+  deduplication?: {
+    enabled: boolean,
+    returnExisting?: boolean,        // Default: true
+    algorithm?: 'md5' | 'sha256',   // Default: 'sha256'
+  },
+
+  // Soft deletes
+  softDelete?: {
+    enabled: boolean,
+    ttlDays?: number,  // Auto-purge TTL in days (default: 30, 0 to disable)
+  },
+
+  // Concurrency control
+  concurrency?: {
+    maxConcurrent?: number,  // Default: 5
+  },
+
+  // Logging
+  logger?: {
+    info(message: string, meta?: Record<string, unknown>): void,
+    warn(message: string, meta?: Record<string, unknown>): void,
+    error(message: string, meta?: Record<string, unknown>): void,
+    debug?(message: string, meta?: Record<string, unknown>): void,
+  },
+
+  // Suppress warnings about missing optional deps (e.g., sharp)
   suppressWarnings?: boolean,
+
+  // Mongokit plugins (e.g., cachePlugin)
+  plugins?: PluginType[],
+
+  // Mongokit pagination config
+  pagination?: PaginationConfig,
 }
 ```
 
@@ -233,18 +806,67 @@ Import types for TypeScript:
 
 ```typescript
 import type {
+  // Core
   MediaKitConfig,
   MediaKit,
+  IMedia,
   IMediaDocument,
+  MediaModel,
+
+  // Operations
   UploadInput,
-  StorageProvider,
-  UploadResult,
-  UploadOptions,
+  ConfirmUploadInput,
+  OperationContext,
+  BulkResult,
+  ImportOptions,
+
+  // Storage
+  StorageDriver,
+  WriteResult,
+  FileStat,
+  PresignedUploadResult,
+
+  // Processing
+  ProcessingConfig,
+  SizeVariant,
+  GeneratedVariant,
+  AspectRatioPreset,
+  FocalPoint,
+
+  // Config
+  FolderConfig,
+  FileTypesConfig,
+  MultiTenancyConfig,
+  DeduplicationConfig,
+  SoftDeleteConfig,
+  ConcurrencyConfig,
+
+  // Folders
+  FolderTree,
+  FolderNode,
+  FolderStats,
+  BreadcrumbItem,
+
+  // Events
   MediaEventName,
+  EventListener,
+  EventContext,
+  EventResult,
+  EventError,
+  Unsubscribe,
+
+  // Transforms
+  TransformParams,
+  TransformRequest,
+  TransformResponse,
+  TransformCache,
+
+  // Status
+  MediaStatus,
 } from '@classytic/media-kit';
 ```
 
 ## Next Steps
 
-- [Providers API](./providers.mdx) - Storage provider reference
-- [Types](./types.mdx) - Full TypeScript types
+- [Types Reference](./types.mdx) -- Full TypeScript type definitions
+- [Drivers Reference](./providers.mdx) -- Storage driver implementations

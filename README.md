@@ -1,838 +1,645 @@
 # @classytic/media-kit
 
-> Production-grade media management for Mongoose with pluggable storage providers
+Production-grade media management for Mongoose with pluggable storage drivers, image processing presets, presigned uploads, multipart/resumable uploads, and smart pagination.
 
-**Works with:** Ecommerce • Hotels • Schools • ERPs • SaaS • Personal vaults
+Built on [@classytic/mongokit](https://github.com/classytic/mongokit) for pagination, search, and repository patterns.
 
-- ✅ **Pluggable storage** - S3, GCS, or bring your own
-- ✅ **Multi-size generation** - Auto-generate thumbnail, medium, large variants
-- ✅ **Image processing** - WebP conversion, aspect ratios, quality control
-- ✅ **Alt text generation** - Automatic accessibility from filenames
-- ✅ **Event system** - Hooks for upload, delete, and custom logic
-- ✅ **Multi-tenancy** - Built-in organization isolation
-- ✅ **Folder organization** - Virtual folders with tree structure for UI
-- ✅ **Mongokit integration** - Advanced pagination, search, and filters
-- ✅ **Type-safe** - Full TypeScript support
-- ✅ **Framework agnostic** - Works with Express, Fastify, NestJS, etc.
+## Features
 
----
+- **Storage drivers** — S3, GCS, Local, Storage Router (multi-backend), or bring your own
+- **Image processing** — resize, format conversion (WebP/AVIF/JPEG/PNG), variants, ThumbHash, dominant color
+- **Processing presets** — `social-media`, `web-optimized`, `high-quality`, `thumbnail` — one-line config
+- **Enhanced Sharp** — mozjpeg, smart WebP subsampling, AVIF effort tuning out of the box
+- **Camera RAW support** — pluggable `RawAdapter` for CR2, NEF, DNG, ARW, RAF, ORF, PEF
+- **Presigned uploads** — direct client-to-storage with hash verification (skip/etag/sha256)
+- **Multipart & resumable** — S3 multipart or GCS resumable, auto-detected from driver
+- **Batch presigned URLs** — HLS segments, multi-file uploads in one call
+- **Soft delete** — TTL-based with restore, purge, and full storage cleanup
+- **Folder management** — tree, breadcrumbs, rename, move, subfolder queries
+- **Multi-tenancy** — scoped queries by org/user field
+- **Events** — `before:*/after:*/error:*` hooks on every operation
+- **Focal point** — per-image crop anchor for responsive display
+- **Deduplication** — SHA-256 content hashing
+- **URL import** — fetch remote files with SSRF protection
 
-## 📦 Installation
-
-### Minimal Install (works immediately!)
-
-```bash
-npm install @classytic/media-kit mongoose
-```
-
-**That's it!** The library works with just these two packages. Everything else is optional.
-
-### Optional Features (install when needed)
+## Install
 
 ```bash
-# Image processing (resizing, format conversion, multi-size)
-npm install sharp
-
-# AWS S3 storage
-npm install @aws-sdk/client-s3
-
-# Google Cloud Storage
-npm install @google-cloud/storage
-
-# Advanced pagination and search
-npm install @classytic/mongokit
+npm install @classytic/media-kit @classytic/mongokit mongoose
 ```
 
-### ✨ Graceful Degradation
+Optional peer dependencies — install only what you need:
 
-**The library works even if you don't install optional dependencies:**
-
-- **Without sharp**: File uploads work, but no image processing (resizing, format conversion, etc.)
-- **Without S3/GCS**: Use a custom storage provider (see [examples/minimal-setup.ts](./examples/minimal-setup.ts))
-- **Without mongokit**: Basic CRUD works, but you lose advanced pagination features
-
-**Suppress warnings:**
-```typescript
-const media = createMedia({
-  provider: yourProvider,
-  processing: { enabled: false }, // Disable if no sharp
-  suppressWarnings: true, // No warnings about missing deps
-});
+```bash
+npm install sharp                    # Image processing (resize, format, variants)
+npm install @aws-sdk/client-s3 @aws-sdk/s3-request-presigner  # S3 storage
+npm install @google-cloud/storage    # GCS storage
+npm install mime-types               # Extended MIME detection (built-in fallback included)
 ```
 
----
+The library works without optional deps. Without `sharp`, uploads still work but images won't be processed. Without S3/GCS, use the local provider or bring your own.
 
-## 🚀 Quick Start
+## Quick Start
 
-```typescript
+```ts
 import { createMedia } from '@classytic/media-kit';
 import { S3Provider } from '@classytic/media-kit/providers/s3';
 import mongoose from 'mongoose';
 
-// 1. Create media kit instance
 const media = createMedia({
-  provider: new S3Provider({
+  driver: new S3Provider({
     bucket: 'my-bucket',
     region: 'us-east-1',
     credentials: {
       accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
       secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
     },
-    // acl: 'public-read', // Only needed if your bucket uses ACLs (not bucket policies)
   }),
-  folders: {
-    baseFolders: ['products', 'users', 'blog'],
-  },
 });
 
-// 2. Create Mongoose model from schema
 const Media = mongoose.model('Media', media.schema);
-
-// 3. Initialize with model
 media.init(Media);
 
-// 4. Upload files
-const uploaded = await media.upload({
+const file = await media.upload({
   buffer: fileBuffer,
-  filename: 'product-photo.jpg',
+  filename: 'photo.jpg',
   mimeType: 'image/jpeg',
   folder: 'products/featured',
-  alt: 'Product image',
 });
 
-console.log(uploaded.url); // https://my-bucket.s3.amazonaws.com/...
+console.log(file.url);
 ```
 
----
+## Storage Providers
 
-## 🎯 New Features
+Four built-in providers, all implementing the `StorageDriver` interface:
 
-### Multi-Size Generation
+### S3 (+ S3-compatible)
 
-Automatically generate multiple size variants (thumbnail, medium, large) from a single upload:
-
-```typescript
-const media = createMedia({
-  provider: s3Provider,
-  processing: {
-    enabled: true,
-    format: 'webp',
-    quality: 80,
-    // Define size variants
-    sizes: [
-      { name: 'thumbnail', width: 150, height: 150 },
-      { name: 'medium', width: 800 },
-      { name: 'large', width: 1920 },
-    ],
-  },
-});
-
-// Upload once, get all sizes
-const uploaded = await media.upload({
-  buffer: imageBuffer,
-  filename: 'product.jpg',
-  mimeType: 'image/jpeg',
-  folder: 'products',
-});
-
-console.log(uploaded.url); // Original/processed
-console.log(uploaded.variants); // Array of size variants
-// [
-//   { name: 'thumbnail', url: '...', width: 150, height: 150, size: 5120 },
-//   { name: 'medium', url: '...', width: 800, height: 600, size: 45000 },
-//   { name: 'large', url: '...', width: 1920, height: 1440, size: 180000 }
-// ]
-```
-
-### Automatic Alt Text Generation
-
-Improve accessibility with automatic alt text generation from filenames:
-
-```typescript
-const media = createMedia({
-  provider: s3Provider,
-  processing: {
-    enabled: true,
-    // Enable auto alt-text generation
-    generateAlt: true,
-  },
-});
-
-// Upload without alt text
-const uploaded = await media.upload({
-  buffer: imageBuffer,
-  filename: 'red-running-shoes-nike.jpg',
-  mimeType: 'image/jpeg',
-  // No alt provided
-});
-
-console.log(uploaded.alt); // "Red running shoes nike" (auto-generated)
-```
-
-**Custom alt generation:**
-```typescript
-const media = createMedia({
-  provider: s3Provider,
-  processing: {
-    generateAlt: {
-      enabled: true,
-      strategy: 'filename', // or 'ai' if you have an AI service
-      fallback: 'Product image',
-      generator: async (filename) => {
-        // Your custom logic
-        return `Custom alt for ${filename}`;
-      },
-    },
-  },
-});
-```
-
-### Event System
-
-Hook into upload/delete operations for custom logic:
-
-```typescript
-const media = createMedia({
-  provider: s3Provider,
-});
-
-media.init(MediaModel);
-
-// Before upload hook - modify data
-media.on('before:upload', async (event) => {
-  console.log('Uploading:', event.data.filename);
-  // You can modify event.data here
-});
-
-// After upload hook - trigger actions
-media.on('after:upload', async (event) => {
-  const { result } = event;
-  console.log('Uploaded:', result.url);
-
-  // Send notification
-  await notifyUser(result);
-
-  // Update search index
-  await searchIndex.add(result);
-
-  // Generate thumbnails asynchronously
-  await generateThumbnails(result);
-});
-
-// Error handling
-media.on('error:upload', async (event) => {
-  console.error('Upload failed:', event.error.message);
-  await logError(event.error);
-});
-
-// Available events:
-// - before:upload, after:upload, error:upload
-// - before:uploadMany, after:uploadMany, error:uploadMany
-// - before:delete, after:delete, error:delete
-// - before:deleteMany, after:deleteMany, error:deleteMany
-// - before:move, after:move, error:move
-```
-
----
-
-## Production-Ready Features (v2.0.3)
-
-### Concurrency Control
-
-Prevent memory crashes under high load with built-in concurrency limiting:
-
-```typescript
-const media = createMedia({
-  provider: s3Provider,
-  // Limit concurrent uploads (default: 5)
-  concurrency: {
-    maxConcurrent: 10, // Allow up to 10 parallel uploads
-  },
-});
-
-// Safe to call many uploads in parallel
-await Promise.all([
-  media.upload(file1),
-  media.upload(file2),
-  media.upload(file3),
-  // ... more files - only 10 will process at once
-]);
-```
-
-### Sharp Memory Optimization
-
-Configure Sharp's memory usage for better performance under load:
-
-```typescript
-const media = createMedia({
-  provider: s3Provider,
-  processing: {
-    enabled: true,
-    format: 'webp',
-    // Sharp memory optimization
-    sharpOptions: {
-      concurrency: 2,  // Process max 2 images at once (default)
-      cache: false,    // Disable Sharp cache (default, reduces memory)
-    },
-  },
-});
-```
-
-### Automatic Retry with Exponential Backoff
-
-S3/GCS operations automatically retry on transient failures:
-
-- Network errors (ECONNRESET, ECONNREFUSED, timeout)
-- Rate limiting (429, throttling)
-- Server errors (500, 502, 503, 504)
-
-Retry configuration:
-- **Max retries:** 3
-- **Base delay:** 100ms
-- **Max delay:** 5000ms
-- **Backoff multiplier:** 2x with jitter
-
-No configuration needed - this is enabled by default for all provider operations.
-
-### Sequential Variant Processing
-
-Size variants are now processed and uploaded one at a time, reducing memory usage for large images with many variants:
-
-```typescript
-const media = createMedia({
-  provider: s3Provider,
-  processing: {
-    enabled: true,
-    sizes: [
-      { name: 'thumbnail', width: 150, height: 150 },
-      { name: 'medium', width: 800 },
-      { name: 'large', width: 1920 },
-      { name: 'xlarge', width: 2560 },
-    ],
-  },
-});
-
-// Variants are processed sequentially (memory-efficient)
-// instead of all at once
-```
-
-### Increased File Size Limit
-
-Default max file size increased from 50MB to 100MB:
-
-```typescript
-const media = createMedia({
-  provider: s3Provider,
-  fileTypes: {
-    maxSize: 100 * 1024 * 1024, // 100MB (new default)
-    // Or customize:
-    // maxSize: 200 * 1024 * 1024, // 200MB
-  },
-});
-```
-
----
-
-### Integration with @classytic/mongokit
-
-Use mongokit's powerful pagination and search features:
-
-```typescript
-import { Repository } from '@classytic/mongokit';
-import { createMedia } from '@classytic/media-kit';
-
-// Create media kit
-const media = createMedia({
-  provider: s3Provider,
-});
-
-const Media = mongoose.model('Media', media.schema);
-media.init(Media);
-
-// The repository is exposed
-const repo = media.repository;
-
-// Advanced pagination with mongokit
-const result = await Media.find().paginate({
-  page: 1,
-  limit: 20,
-  sort: '-createdAt',
-  filters: {
-    folder: 'products',
-    mimeType: { $regex: '^image/' }
-  },
-});
-
-// Cursor-based pagination for infinite scroll
-const feed = await Media.find().paginate({
-  limit: 20,
-  after: cursorToken, // From previous request
-  sort: '-createdAt',
-});
-
-// Full-text search (requires text index)
-const searchResults = await Media.find().paginate({
-  search: 'product shoes',
-  limit: 20,
-});
-
-// Filter by folder, type, date range
-const filtered = await Media.find().paginate({
-  filters: {
-    baseFolder: 'products',
-    createdAt: { $gte: new Date('2024-01-01') },
-    dimensions: { $exists: true }, // Only images with dimensions
-  },
-  limit: 50,
-});
-```
-
----
-
-## 📖 Configuration
-
-### Full Configuration Example
-
-```typescript
-const media = createMedia({
-  // Storage provider (required)
-  provider: new S3Provider({ ... }),
-
-  // File type restrictions
-  fileTypes: {
-    allowed: ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'],
-    maxSize: 100 * 1024 * 1024, // 100MB (default)
-  },
-
-  // Folder organization
-  folders: {
-    baseFolders: ['products', 'categories', 'users', 'blog'],
-    defaultFolder: 'general',
-    // Map folders to content types for auto aspect ratio
-    contentTypeMap: {
-      product: ['products', 'product'],
-      category: ['categories', 'category'],
-      avatar: ['users', 'avatars'],
-    },
-  },
-
-  // Image processing (requires sharp)
-  processing: {
-    enabled: true,
-    maxWidth: 2048,
-    quality: 80,
-    format: 'webp', // 'webp' | 'jpeg' | 'png' | 'avif' | 'original'
-    aspectRatios: {
-      product: { aspectRatio: 3/4, fit: 'cover' },   // Vertical
-      category: { aspectRatio: 1, fit: 'cover' },    // Square
-      avatar: { aspectRatio: 1, fit: 'cover' },      // Square
-      default: { preserveRatio: true },              // Keep original
-    },
-    // Size variants (auto-generated)
-    sizes: [
-      { name: 'thumbnail', width: 150, height: 150 },
-      { name: 'medium', width: 800 },
-      { name: 'large', width: 1920 },
-    ],
-    // Sharp memory optimization
-    sharpOptions: {
-      concurrency: 2, // Process max 2 images at once
-      cache: false,   // Disable Sharp cache to reduce memory
-    },
-  },
-
-  // Concurrency control (prevents memory crashes)
-  concurrency: {
-    maxConcurrent: 5, // Max parallel uploads
-  },
-
-  // Multi-tenancy (for SaaS)
-  multiTenancy: {
-    enabled: true,
-    field: 'organizationId',
-    required: true,
-  },
-
-  // Logger (optional)
-  logger: console,
-
-  // Suppress warnings about missing optional dependencies
-  suppressWarnings: false,
-});
-```
-
----
-
-## 🗄️ Storage Providers
-
-### AWS S3
-
-```typescript
+```ts
 import { S3Provider } from '@classytic/media-kit/providers/s3';
 
-const provider = new S3Provider({
+const driver = new S3Provider({
   bucket: 'my-bucket',
   region: 'us-east-1',
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
-  },
-  // Optional: Custom CDN URL
-  publicUrl: 'https://cdn.example.com',
-
-  // Optional: ACL for uploads (defaults to undefined)
-  // When undefined, AWS SDK won't send ACL parameter - use bucket policies instead
-  // acl: 'public-read',  // Only set if your bucket uses ACLs
-  // acl: 'private',
-  // acl: 'authenticated-read',
+  credentials: { accessKeyId: '...', secretAccessKey: '...' },
+  publicUrl: 'https://cdn.example.com',  // optional CDN
+  // S3-compatible (MinIO, R2, etc.):
+  // endpoint: 'https://minio.example.com',
+  // forcePathStyle: true,
 });
 ```
 
 ### Google Cloud Storage
 
-```typescript
+```ts
 import { GCSProvider } from '@classytic/media-kit/providers/gcs';
 
-const provider = new GCSProvider({
+const driver = new GCSProvider({
   bucket: 'my-bucket',
   projectId: 'my-project',
   keyFilename: './service-account.json',
-  // Or use credentials object
-  credentials: {
-    client_email: '...',
-    private_key: '...',
-  },
-  // Optional: Custom CDN URL
-  publicUrl: 'https://cdn.example.com',
 });
 ```
 
-### S3-Compatible (MinIO, Cloudflare R2, etc.)
+### Local Filesystem
 
-```typescript
-const provider = new S3Provider({
-  bucket: 'my-bucket',
-  region: 'auto',
-  endpoint: 'https://my-minio-server.com',
-  forcePathStyle: true,
-  credentials: { ... },
+```ts
+import { LocalProvider } from '@classytic/media-kit/providers/local';
+
+const driver = new LocalProvider({
+  basePath: './uploads',
+  baseUrl: 'http://localhost:3000/uploads',
+});
+```
+
+### Storage Router (multi-backend)
+
+Route files to different backends by key prefix:
+
+```ts
+import { StorageRouter } from '@classytic/media-kit/providers/router';
+
+const driver = new StorageRouter({
+  drivers: {
+    s3: new S3Provider({ ... }),
+    local: new LocalProvider({ ... }),
+  },
+  routes: [
+    { prefix: 'temp/', driver: 'local' },
+    { prefix: 'drafts/', driver: 'local' },
+  ],
+  default: 's3',
 });
 ```
 
 ### Custom Provider
 
-```typescript
-import type { StorageProvider, UploadResult, UploadOptions } from '@classytic/media-kit';
+Implement the `StorageDriver` interface:
 
-class MyProvider implements StorageProvider {
-  readonly name = 'my-provider';
+```ts
+import type { StorageDriver, WriteResult, FileStat } from '@classytic/media-kit';
 
-  async upload(buffer: Buffer, filename: string, options?: UploadOptions): Promise<UploadResult> {
-    // Your upload logic
-    return { url, key, size, mimeType };
+class MyDriver implements StorageDriver {
+  readonly name = 'my-driver';
+
+  async write(key: string, data: Buffer | NodeJS.ReadableStream, contentType: string): Promise<WriteResult> {
+    // ...
+    return { key, url, size };
   }
+  async read(key: string, range?: { start: number; end: number }): Promise<NodeJS.ReadableStream> { ... }
+  async delete(key: string): Promise<boolean> { ... }
+  async exists(key: string): Promise<boolean> { ... }
+  async stat(key: string): Promise<FileStat> { ... }
+  getPublicUrl(key: string): string { ... }
 
-  async delete(key: string): Promise<boolean> {
-    // Your delete logic
-    return true;
-  }
-
-  async exists(key: string): Promise<boolean> {
-    // Check if file exists
-    return true;
-  }
+  // Optional:
+  // list?(prefix: string): AsyncIterable<string>;
+  // copy?(source: string, destination: string): Promise<WriteResult>;
+  // move?(source: string, destination: string): Promise<WriteResult>;
+  // getSignedUrl?(key: string, expiresIn?: number): Promise<string>;
+  // getSignedUploadUrl?(key: string, contentType: string, expiresIn?: number): Promise<PresignedUploadResult>;
+  // createMultipartUpload?(key: string, contentType: string): Promise<{ uploadId: string }>;
+  // signUploadPart?(key: string, uploadId: string, partNumber: number, expiresIn?: number): Promise<SignedPartResult>;
+  // completeMultipartUpload?(key: string, uploadId: string, parts: CompletedPart[]): Promise<{ etag: string; size: number }>;
+  // abortMultipartUpload?(key: string, uploadId: string): Promise<void>;
+  // createResumableUpload?(key: string, contentType: string, options?: { size?: number }): Promise<ResumableUploadSession>;
 }
 ```
 
----
+## Configuration
 
-## 📁 Folder Organization
-
-### Virtual Folders
-
-Files are organized in virtual folders stored as path strings:
-
-```typescript
-// Upload to specific folder
-await media.upload({
-  buffer,
-  filename: 'photo.jpg',
-  mimeType: 'image/jpeg',
-  folder: 'products/electronics/phones', // Nested path
-});
-
-// Results in:
-// baseFolder: 'products'
-// folder: 'products/electronics/phones'
-```
-
-### Folder Tree (for File Explorer UI)
-
-```typescript
-const tree = await media.getFolderTree();
-
-// Response:
-{
-  folders: [
-    {
-      id: 'products',
-      name: 'products',
-      path: 'products',
-      stats: { count: 150, size: 45000000 },
-      children: [
-        {
-          id: 'products/electronics',
-          name: 'electronics',
-          path: 'products/electronics',
-          stats: { count: 50, size: 15000000 },
-          children: []
-        }
-      ]
-    }
-  ],
-  meta: { totalFiles: 500, totalSize: 150000000 }
-}
-```
-
-### Breadcrumb
-
-```typescript
-const breadcrumb = media.getBreadcrumb('products/electronics/phones');
-
-// Response:
-[
-  { name: 'products', path: 'products' },
-  { name: 'electronics', path: 'products/electronics' },
-  { name: 'phones', path: 'products/electronics/phones' }
-]
-```
-
-### Folder Stats
-
-```typescript
-const stats = await media.getFolderStats('products');
-
-// Response:
-{
-  totalFiles: 150,
-  totalSize: 45000000,
-  avgSize: 300000,
-  mimeTypes: ['image/webp', 'image/jpeg'],
-  oldestFile: Date,
-  newestFile: Date
-}
-```
-
----
-
-## 🏢 Multi-Tenancy
-
-Enable organization isolation for SaaS applications:
-
-```typescript
+```ts
 const media = createMedia({
-  provider,
-  multiTenancy: {
+  driver: s3Provider,
+
+  fileTypes: {
+    allowed: ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'],
+    maxSize: 100 * 1024 * 1024, // 100 MB (default)
+  },
+
+  folders: {
+    defaultFolder: 'general',
+    enableSubfolders: true,
+    rewriteKeys: true, // physically move files on rename/move
+    contentTypeMap: {
+      product: ['products'],
+      avatar: ['users', 'avatars'],
+    },
+  },
+
+  processing: {
+    enabled: true,       // requires sharp
+    preset: 'web-optimized',  // or 'social-media' | 'high-quality' | 'thumbnail'
+    format: 'webp',      // 'webp' | 'jpeg' | 'png' | 'avif' | 'original'
+    quality: 80,         // or per-format: { jpeg: 80, webp: 75, avif: 60, png: 90 }
+    maxWidth: 2048,
+    originalHandling: 'keep-variant', // 'keep-variant' | 'replace' | 'discard'
+    generateAlt: true,   // auto alt-text from filename
+    aspectRatios: {
+      product: { aspectRatio: 3 / 4, fit: 'cover' },
+      avatar: { aspectRatio: 1, fit: 'cover' },
+      default: { preserveRatio: true },
+    },
+    sizes: [
+      { name: 'thumbnail', width: 150, height: 150 },
+      { name: 'medium', width: 800 },
+      { name: 'large', width: 1920 },
+    ],
+    sharpOptions: {
+      concurrency: 2,
+      cache: false,
+      mozjpeg: true,             // trellis quantization (default: true)
+      webpSmartSubsample: true,  // sharper chroma (default: true)
+      avifEffort: 6,             // 0-9, higher = slower + smaller (default: 6)
+    },
+  },
+
+  deduplication: { enabled: true, algorithm: 'sha256' },
+  softDelete: { enabled: true, ttlDays: 30 },
+  concurrency: { maxConcurrent: 5 },
+  multiTenancy: { enabled: false, field: 'organizationId' },
+
+  plugins: [/* mongokit plugins */],
+  logger: console,
+  suppressWarnings: false,
+});
+```
+
+All fields except `driver` are optional and have sensible defaults.
+
+## Processing Presets
+
+One-line processing configuration for common use cases. User overrides always win over preset defaults.
+
+```ts
+const media = createMedia({
+  driver,
+  processing: { preset: 'web-optimized' },
+});
+```
+
+| Preset | Max Size | Format | Quality | Variants | Metadata | Use Case |
+|--------|----------|--------|---------|----------|----------|----------|
+| `social-media` | 1080px | JPEG | 80 | thumb (150), small (320), medium (640) | stripped | Social posts, Instagram, Facebook |
+| `web-optimized` | 2048px | WebP | 80 | ThumbHash + dominant color | stripped | Websites, blogs, e-commerce |
+| `high-quality` | 4096px | original | 92 | none | preserved | Photography, print, archives |
+| `thumbnail` | 300px | WebP | 65 | none, no original kept | stripped | Avatars, icons, previews |
+
+Override any preset field:
+
+```ts
+const media = createMedia({
+  driver,
+  processing: {
+    preset: 'social-media',
+    maxWidth: 1200,  // override preset's 1080
+    sizes: [         // override preset's variants
+      { name: 'thumb', width: 200, height: 200 },
+      { name: 'large', width: 1200 },
+    ],
+  },
+});
+```
+
+## Original Image Handling
+
+Control what happens to the original unprocessed image during processing:
+
+```ts
+processing: {
+  enabled: true,
+  originalHandling: 'keep-variant', // default
+}
+```
+
+| Mode | Behavior |
+|------|----------|
+| `keep-variant` | Store original as `__original` variant alongside processed output (default) |
+| `replace` | Only processed image is stored — original is not kept |
+| `discard` | No original stored, only processed + size variants |
+
+## Camera RAW Support
+
+media-kit detects camera RAW formats (CR2, NEF, DNG, ARW, RAF, ORF, PEF) and can convert them before processing via Sharp. **No RAW library is bundled** — you provide a `RawAdapter` with your preferred converter.
+
+Without a `rawAdapter`, RAW files are uploaded as-is (no processing, no thumbnails).
+
+### Approach 1: Extract Embedded JPEG (fastest, recommended)
+
+Every DSLR RAW file embeds a full-resolution JPEG preview. This is the fastest approach — no sensor decoding needed:
+
+```bash
+npm install exiftool-vendored
+```
+
+```ts
+import { exiftool } from 'exiftool-vendored';
+import { writeFileSync, readFileSync, unlinkSync } from 'fs';
+import type { RawAdapter } from '@classytic/media-kit';
+
+const rawAdapter: RawAdapter = {
+  supportedTypes: [
+    'image/x-canon-cr2', 'image/x-nikon-nef', 'image/x-adobe-dng',
+    'image/x-sony-arw', 'image/x-fuji-raf', 'image/x-olympus-orf',
+  ],
+  async convert(buffer, mimeType) {
+    const tmp = `/tmp/raw-${Date.now()}`;
+    const previewPath = `${tmp}.jpg`;
+    writeFileSync(tmp, buffer);
+    await exiftool.extractJpgFromRaw(tmp, previewPath);
+    const jpeg = readFileSync(previewPath);
+    unlinkSync(tmp);
+    unlinkSync(previewPath);
+    return { buffer: jpeg, mimeType: 'image/jpeg' };
+  },
+};
+```
+
+### Approach 2: dcraw (pure JS via WASM)
+
+Full RAW decode to TIFF, then Sharp processes normally:
+
+```bash
+npm install dcraw
+```
+
+```ts
+import dcraw from 'dcraw';
+import type { RawAdapter } from '@classytic/media-kit';
+
+const rawAdapter: RawAdapter = {
+  supportedTypes: [
+    'image/x-canon-cr2', 'image/x-nikon-nef', 'image/x-adobe-dng',
+    'image/x-sony-arw', 'image/x-fuji-raf', 'image/x-olympus-orf',
+  ],
+  async convert(buffer, mimeType) {
+    const tiff = dcraw(buffer, { exportAsTiff: true });
+    return { buffer: Buffer.from(tiff), mimeType: 'image/tiff' };
+  },
+};
+```
+
+### Approach 3: LibRaw WASM (full sensor decode)
+
+Best quality — decodes from raw sensor data:
+
+```bash
+npm install libraw-wasm
+```
+
+```ts
+import LibRaw from 'libraw-wasm';
+import sharp from 'sharp';
+import type { RawAdapter } from '@classytic/media-kit';
+
+const rawAdapter: RawAdapter = {
+  supportedTypes: [
+    'image/x-canon-cr2', 'image/x-nikon-nef', 'image/x-adobe-dng',
+    'image/x-sony-arw', 'image/x-fuji-raf', 'image/x-olympus-orf',
+  ],
+  async convert(buffer, mimeType) {
+    const libraw = await LibRaw.load();
+    const decoded = await libraw.decode(buffer);
+    const tiff = await sharp(decoded.data, {
+      raw: { width: decoded.width, height: decoded.height, channels: 4 },
+    }).tiff().toBuffer();
+    return { buffer: tiff, mimeType: 'image/tiff' };
+  },
+};
+```
+
+### Wire it up
+
+```ts
+const media = createMedia({
+  driver,
+  processing: {
     enabled: true,
-    field: 'organizationId', // Custom field name
-    required: true,          // Require on all operations
+    preset: 'web-optimized',
+    rawAdapter,
   },
 });
 
-// Pass context with organization ID
-const context = { 
-  userId: user._id,
-  organizationId: org._id 
-};
-
-// All operations are scoped to organization
-await media.upload(input, context);
-await media.getFolderTree(context);
-await media.delete(id, context);
+// DSLR uploads now auto-convert → Sharp processes → WebP/AVIF output
+await media.upload({ buffer: cr2Buffer, filename: 'photo.cr2', mimeType: 'image/x-canon-cr2' });
 ```
 
----
+If RAW conversion fails, the file is uploaded as-is (graceful fallback, no crash).
 
-## 🖼️ Image Processing
+## API
 
-### Automatic Processing
+### Upload & Replace
 
-Images are automatically processed based on folder/content type:
+```ts
+const file = await media.upload({ buffer, filename, mimeType, folder, tags, alt, focalPoint }, context?);
+const files = await media.uploadMany([...inputs], context?);
+const replaced = await media.replace(id, { buffer, filename, mimeType }, context?);
+```
 
-```typescript
-// Upload to products folder → 3:4 aspect ratio, WebP
-await media.upload({
-  buffer,
-  filename: 'product.jpg',
-  mimeType: 'image/jpeg',
-  folder: 'products/featured',
+### Delete
+
+```ts
+await media.delete(id, context?);
+await media.deleteMany([id1, id2], context?);   // returns { success[], failed[] }
+await media.deleteFolder('old-folder', context?);
+```
+
+### Soft Delete
+
+Requires `softDelete: { enabled: true }` in config.
+
+```ts
+await media.softDelete(id, context?);
+await media.restore(id, context?);
+await media.purgeDeleted(olderThan?, context?);  // hard-delete expired
+```
+
+### Queries
+
+Powered by mongokit pagination (offset or keyset):
+
+```ts
+const file = await media.getById(id, context?);
+const page = await media.getAll({ page: 1, limit: 20, sort: '-createdAt', filters: { folder: 'products' } }, context?);
+const results = await media.search('shoes', { limit: 10 }, context?);
+```
+
+### Folders
+
+```ts
+const tree = await media.getFolderTree(context?);
+const stats = await media.getFolderStats('products', context?);
+const crumbs = media.getBreadcrumb('products/electronics/phones');
+const subs = await media.getSubfolders('products', context?);
+await media.renameFolder('old/path', 'new/path', context?);
+await media.move([id1, id2], 'target-folder', context?);
+```
+
+### Tags
+
+```ts
+await media.addTags(id, ['sale', 'featured'], context?);
+await media.removeTags(id, ['sale'], context?);
+```
+
+### Focal Point
+
+```ts
+await media.setFocalPoint(id, { x: 0.3, y: 0.2 }, context?);
+```
+
+### Presigned Uploads
+
+Direct client-to-storage uploads (no server buffering):
+
+```ts
+// Server: generate signed URL
+const { uploadUrl, key } = await media.getSignedUploadUrl('photo.jpg', 'image/jpeg', { folder: 'uploads' });
+
+// Client: PUT file directly to S3/GCS
+await fetch(uploadUrl, { method: 'PUT', body: file, headers: { 'Content-Type': 'image/jpeg' } });
+
+// Server: confirm + create DB record
+const doc = await media.confirmUpload({
+  key, filename: 'photo.jpg', mimeType: 'image/jpeg', size: file.size,
+  hashStrategy: 'skip',  // 'skip' (default) | 'etag' | 'sha256'
+  process: true,          // opt-in: generate ThumbHash, variants, dominant color
+}, context?);
+```
+
+### Multipart Upload (large files, resumable)
+
+S3 multipart or GCS resumable — auto-detected from driver:
+
+```ts
+// Initiate (returns discriminated union: type='multipart' or type='resumable')
+const session = await media.initiateMultipartUpload({
+  filename: 'video.mp4', contentType: 'video/mp4', folder: 'videos',
+  partCount: Math.ceil(fileSize / (5 * 1024 * 1024)), // optional: sign all parts upfront
 });
 
-// Upload to users folder → 1:1 aspect ratio, WebP
-await media.upload({
-  buffer,
-  filename: 'avatar.jpg',
-  mimeType: 'image/jpeg',
-  folder: 'users/avatars',
+// S3 path (type='multipart'): upload parts in parallel
+const parts = await Promise.all(
+  chunks.map((chunk, i) =>
+    fetch(session.parts[i].uploadUrl, { method: 'PUT', body: chunk })
+      .then(r => ({ partNumber: i + 1, etag: r.headers.get('etag')! }))
+  )
+);
+
+// Complete: assemble parts + create DB record
+const doc = await media.completeMultipartUpload({
+  key: session.key, uploadId: session.uploadId!, parts,
+  filename: 'video.mp4', mimeType: 'video/mp4', size: fileSize,
+});
+
+// GCS path (type='resumable'): upload chunks to single URI with Content-Range
+// Then call media.confirmUpload({ key: session.key, ... }) — GCS auto-assembles
+
+// On-demand part signing (instead of upfront):
+const part = await media.signUploadPart(key, uploadId, partNumber);
+const parts = await media.signUploadParts(key, uploadId, [1, 2, 3]);
+
+// Abort abandoned uploads:
+await media.abortMultipartUpload(key, uploadId);
+
+// GCS helpers:
+const { uploadedBytes } = await media.getResumableUploadStatus(sessionUri);
+await media.abortResumableUpload(sessionUri);
+```
+
+### Batch Presigned URLs
+
+Generate multiple signed URLs at once (HLS segments, multi-file):
+
+```ts
+const { uploads } = await media.generateBatchPutUrls({
+  files: [
+    { filename: 'segment-0.ts', contentType: 'video/mp2t' },
+    { filename: 'segment-1.ts', contentType: 'video/mp2t' },
+  ],
+  folder: 'live/session-abc',
 });
 ```
 
-### Skip Processing
+### URL Import
 
-```typescript
-await media.upload({
-  buffer,
-  filename: 'original.jpg',
-  mimeType: 'image/jpeg',
-  folder: 'products',
-  skipProcessing: true, // Keep original
+```ts
+const file = await media.importFromUrl('https://example.com/photo.jpg', { folder: 'imports', tags: ['external'] }, context?);
+```
+
+### Lifecycle
+
+```ts
+media.dispose(); // release listeners and cached state
+```
+
+## Events
+
+Subscribe to lifecycle hooks with `on()`. All listeners are awaited (`Promise.allSettled`).
+
+```ts
+media.on('before:upload', async (event) => { /* modify event.data */ });
+media.on('after:upload', async (event) => { await notifyUser(event.result); });
+media.on('error:upload', async (event) => { console.error(event.error); });
+```
+
+Every operation follows a `before:*/after:*/error:*` pattern:
+
+`upload` `uploadMany` `delete` `deleteMany` `move` `replace` `softDelete` `restore` `import` `presignedUpload` `confirmUpload` `rename` `multipartUpload` `completeMultipart`
+
+Plus `before:validate`, `after:process`, and progress events for bulk operations:
+
+```ts
+media.on('progress:move', (event) => {
+  console.log(`${event.completed}/${event.total} files moved`);
 });
 ```
 
-### Force Content Type
+## Multi-Tenancy
 
-```typescript
-await media.upload({
-  buffer,
-  filename: 'photo.jpg',
-  mimeType: 'image/jpeg',
-  folder: 'blog', // Would normally preserve ratio
-  contentType: 'product', // Force 3:4 aspect ratio
+```ts
+const media = createMedia({
+  driver,
+  multiTenancy: { enabled: true, field: 'organizationId', required: true },
+});
+
+// All operations scoped to the org
+const ctx = { userId: user._id, organizationId: org._id };
+await media.upload(input, ctx);
+await media.getAll({ limit: 20 }, ctx);
+```
+
+## Asset Transforms (on-the-fly)
+
+Serve transformed images on the fly with URL query parameters. No pre-generation needed:
+
+```ts
+import { AssetTransform } from '@classytic/media-kit/transforms';
+
+const transform = new AssetTransform(driver, { cache: true });
+
+// Express/Fastify route
+app.get('/assets/:key(*)', async (req, res) => {
+  // GET /assets/products/photo.jpg?w=400&h=300&format=webp&q=80
+  const result = await transform.serve(req.params.key, req.query);
+  res.status(result.status).set(result.headers).send(result.body);
 });
 ```
 
----
+Supported params: `w` (width), `h` (height), `q` (quality 1-100), `format` (webp/avif/jpeg/png/auto), `fit` (cover/contain/fill/inside/outside), `download` (force download).
 
-## 📚 API Reference
+## Using Schema or Repository Directly
 
-### Core Methods
+```ts
+import { createMediaSchema, createMediaRepository } from '@classytic/media-kit';
 
-| Method | Description |
-|--------|-------------|
-| `upload(input, context?)` | Upload single file |
-| `uploadMany(inputs, context?)` | Upload multiple files |
-| `delete(id, context?)` | Delete single file |
-| `deleteMany(ids, context?)` | Delete multiple files |
-| `move(ids, folder, context?)` | Move files to folder |
+// Schema only
+const schema = createMediaSchema({ multiTenancy: { enabled: true } });
+const Media = mongoose.model('Media', schema);
 
-### Folder Methods
-
-| Method | Description |
-|--------|-------------|
-| `getFolderTree(context?)` | Get folder tree for UI |
-| `getFolderStats(folder, context?)` | Get folder statistics |
-| `getBreadcrumb(folder)` | Get breadcrumb path |
-| `deleteFolder(folder, context?)` | Delete all files in folder |
-
-### Utilities
-
-| Method | Description |
-|--------|-------------|
-| `validateFile(buffer, filename, mimeType)` | Validate file against config |
-| `getContentType(folder)` | Get content type for folder |
-
----
-
-## 🔧 Using with Repository
-
-The package exports a repository class for direct database operations:
-
-```typescript
-import { createMediaRepository } from '@classytic/media-kit';
-
-const repo = createMediaRepository(MediaModel, {
-  multiTenancy: { enabled: true },
-});
-
-// Use repository methods
-const files = await repo.getAll({ 
-  filters: { folder: 'products' },
-  sort: '-createdAt',
-  limit: 20,
-  page: 1,
-});
-
+// Repository only (extends mongokit Repository)
+const repo = createMediaRepository(Media, { multiTenancy: { enabled: true } });
 const tree = await repo.getFolderTree(context);
 ```
 
----
+## Exports
 
-## 🎨 Using Schema Directly
+```ts
+// Main entry
+import { createMedia, createMediaSchema, createMediaRepository, PROCESSING_PRESETS } from '@classytic/media-kit';
 
-You can use the schema factory independently:
-
-```typescript
-import { createMediaSchema } from '@classytic/media-kit';
-
-// Create with custom options
-const schema = createMediaSchema({
-  baseFolders: ['products', 'users'],
-  multiTenancy: { enabled: true },
-  additionalFields: {
-    customField: { type: String },
-  },
-});
-
-// Add your own methods
-schema.methods.getPublicUrl = function() {
-  return `https://cdn.example.com/${this.key}`;
-};
-
-const Media = mongoose.model('Media', schema);
-```
-
----
-
-## 🔌 Framework Integration
-
-### Fastify
-
-```typescript
-import fp from 'fastify-plugin';
-import { createMedia } from '@classytic/media-kit';
+// Storage providers
 import { S3Provider } from '@classytic/media-kit/providers/s3';
+import { GCSProvider } from '@classytic/media-kit/providers/gcs';
+import { LocalProvider } from '@classytic/media-kit/providers/local';
+import { StorageRouter } from '@classytic/media-kit/providers/router';
 
-async function mediaPlugin(fastify) {
-  const media = createMedia({
-    provider: new S3Provider({ ... }),
-    logger: fastify.log,
-  });
+// Asset transforms
+import { AssetTransform } from '@classytic/media-kit/transforms';
 
-  const Media = mongoose.model('Media', media.schema);
-  media.init(Media);
-
-  fastify.decorate('media', media);
-}
-
-export default fp(mediaPlugin, { name: 'media' });
+// Types
+import type {
+  StorageDriver, ProcessingConfig, ProcessingPresetName,
+  OriginalHandling, RawAdapter, VideoAdapter, ImageAdapter,
+  SharpOptions, SizeVariant, FocalPoint, IMedia,
+} from '@classytic/media-kit';
 ```
 
-### Express
+## Peer Dependencies
 
-```typescript
-import { createMedia } from '@classytic/media-kit';
-import { S3Provider } from '@classytic/media-kit/providers/s3';
-import multer from 'multer';
+All peer deps use floor versions (`>=`) — media-kit works with any compatible version:
 
-const media = createMedia({ provider: new S3Provider({ ... }) });
-const Media = mongoose.model('Media', media.schema);
-media.init(Media);
+| Package | Required | Version |
+|---------|----------|---------|
+| `@classytic/mongokit` | yes | >= 3.2.0 |
+| `mongoose` | yes | >= 8.0.0 |
+| `sharp` | optional | >= 0.33.0 |
+| `@aws-sdk/client-s3` | optional | >= 3.0.0 |
+| `@aws-sdk/s3-request-presigner` | optional | >= 3.0.0 |
+| `@google-cloud/storage` | optional | >= 7.0.0 |
+| `mime-types` | optional | >= 2.1.0 |
 
-const upload = multer({ storage: multer.memoryStorage() });
+## License
 
-app.post('/upload', upload.single('file'), async (req, res) => {
-  const uploaded = await media.upload({
-    buffer: req.file.buffer,
-    filename: req.file.originalname,
-    mimeType: req.file.mimetype,
-    folder: req.body.folder,
-  });
-  res.json(uploaded);
-});
-```
-
----
-
-## 📄 License
-
-MIT © [Classytic](https://github.com/classytic)
+MIT

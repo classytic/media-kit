@@ -212,7 +212,7 @@ import { createMedia } from '@classytic/media-kit';
 import { S3Provider } from '@classytic/media-kit/providers/s3';
 
 const media = createMedia({
-  provider: new S3Provider({
+  driver: new S3Provider({
     bucket: process.env.S3_BUCKET,
     region: 'us-east-1',
     credentials: {

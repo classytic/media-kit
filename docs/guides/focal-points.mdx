@@ -1,0 +1,351 @@
+# Focal Points
+
+Ensure the subject of an image stays visible across any crop or aspect ratio.
+
+## Overview
+
+When you crop an image to a different aspect ratio, the default behavior is to center
+the crop. This works fine when the subject is in the middle of the frame, but fails
+for off-center subjects -- a person standing to the left gets cut off, a product in
+the upper third disappears.
+
+Focal points solve this. You mark the important region of an image with a normalized
+coordinate, and every crop operation -- whether from pre-generated variants or on-the-fly
+asset transforms -- positions the crop window around that point.
+
+This follows the Payload CMS focal point pattern: store a single `{ x, y }` coordinate
+per image, then use it everywhere crops happen.
+
+## The Coordinate System
+
+Focal points use normalized coordinates from `0.0` to `1.0`:
+
+```
+(0, 0) -------- (1, 0)
+  |                |
+  |   (0.5, 0.5)  |    <-- center (default)
+  |                |
+(0, 1) -------- (1, 1)
+```
+
+| Coordinate      | Position       |
+| --------------- | -------------- |
+| `{ x: 0, y: 0 }` | Top-left       |
+| `{ x: 1, y: 0 }` | Top-right      |
+| `{ x: 0, y: 1 }` | Bottom-left    |
+| `{ x: 1, y: 1 }` | Bottom-right   |
+| `{ x: 0.5, y: 0.5 }` | Center (default) |
+
+The `x` axis runs left to right. The `y` axis runs top to bottom. Both are clamped
+to the `[0, 1]` range.
+
+## Setting a Focal Point
+
+Use `media.setFocalPoint()` to store a focal point on an existing file:
+
+```typescript
+// Mark the subject at 30% from left, 20% from top
+await media.setFocalPoint(fileId, { x: 0.3, y: 0.2 });
+```
+
+This updates the `focalPoint` field on the media document. The focal point persists
+across all future operations -- variant generation, asset transforms, and file
+replacement all read it from the stored document.
+
+### Setting at upload time
+
+You can also set the focal point during upload:
+
+```typescript
+const file = await media.upload({
+  buffer: imageBuffer,
+  filename: 'headshot.jpg',
+  mimeType: 'image/jpeg',
+  focalPoint: { x: 0.5, y: 0.3 }, // Face is in upper-center
+});
+```
+
+### Updating the focal point
+
+Call `setFocalPoint()` again to change it. If you use asset transform caching,
+remember to invalidate the cache after changing the focal point so that new
+transforms pick up the updated position:
+
+```typescript
+await media.setFocalPoint(fileId, { x: 0.6, y: 0.4 });
+
+// Invalidate cached transforms so they regenerate with the new focal point
+await transformCache.invalidate(fileId);
+```
+
+## How It Works with Variants
+
+When generating size variants at upload time (configured via `processing.sizes`),
+the focal point influences how each variant is cropped.
+
+The algorithm follows the **extract-then-resize** pattern (from Payload CMS):
+
+1. **Calculate the crop region**: Find the largest rectangle within the original image
+   that matches the target aspect ratio and is centered on the focal point.
+2. **Extract**: Crop the original to that region using `sharp().extract()`.
+3. **Resize**: Scale the extracted region down to the target dimensions using `sharp().resize()`.
+
+This two-step approach preserves maximum quality because the resize operates on the
+largest possible source region.
+
+```typescript
+const media = createMedia({
+  driver: myDriver,
+  processing: {
+    enabled: true,
+    sizes: [
+      { name: 'square', width: 400, height: 400, aspectRatio: { aspectRatio: 1, fit: 'cover' } },
+      { name: 'banner', width: 1200, height: 400, aspectRatio: { aspectRatio: 3, fit: 'cover' } },
+    ],
+  },
+});
+
+// Upload with focal point
+const file = await media.upload({
+  buffer: landscapePhoto,
+  filename: 'team-photo.jpg',
+  mimeType: 'image/jpeg',
+  focalPoint: { x: 0.3, y: 0.4 }, // Subject is left-of-center
+});
+
+// Both the square and banner variants will be cropped around (0.3, 0.4)
+```
+
+## How It Works with Asset Transforms
+
+When using [asset transforms](/docs/guides/asset-transforms), the focal point is
+automatically applied when:
+
+1. `fit=cover` is requested
+2. Both `w` and `h` are specified
+3. The file has a stored `focalPoint`
+
+```
+GET /assets/abc123?w=400&h=400&fit=cover
+```
+
+The transform service reads the file's `focalPoint` from the database and calls
+`calculateFocalPointCrop()` to determine the extract region before resizing.
+
+Without a focal point (or when `fit` is not `cover`), Sharp's default behavior applies.
+
+## The calculateFocalPointCrop Utility
+
+The core algorithm is exposed as a standalone utility:
+
+```typescript
+import { calculateFocalPointCrop } from '@classytic/media-kit/processing';
+```
+
+### Signature
+
+```typescript
+function calculateFocalPointCrop(params: FocalPointCropParams): CropRegion;
+```
+
+### Parameters
+
+```typescript
+interface FocalPointCropParams {
+  originalWidth: number;   // Original image width in pixels
+  originalHeight: number;  // Original image height in pixels
+  targetWidth: number;     // Desired output width
+  targetHeight: number;    // Desired output height
+  focalX: number;          // Focal point X (0.0 - 1.0)
+  focalY: number;          // Focal point Y (0.0 - 1.0)
+}
+```
+
+### Return value
+
+```typescript
+interface CropRegion {
+  left: number;    // X offset for sharp().extract()
+  top: number;     // Y offset for sharp().extract()
+  width: number;   // Crop width
+  height: number;  // Crop height
+}
+```
+
+### Algorithm
+
+1. Compute the target aspect ratio (`targetWidth / targetHeight`).
+2. Find the **largest crop region** that fits inside the original image at that aspect ratio:
+   - If the original is wider than the target ratio: crop height = original height, crop width = height * target aspect ratio.
+   - If the original is taller than the target ratio: crop width = original width, crop height = width / target aspect ratio.
+3. Convert the focal point from normalized `(0-1)` to pixel coordinates.
+4. Position the crop region so the focal point is centered within it.
+5. Clamp the crop to the image boundaries so it never exceeds the original dimensions.
+
+### Example
+
+```typescript
+import { calculateFocalPointCrop } from '@classytic/media-kit/processing';
+
+const crop = calculateFocalPointCrop({
+  originalWidth: 2000,
+  originalHeight: 1500,
+  targetWidth: 400,
+  targetHeight: 400,
+  focalX: 0.3,
+  focalY: 0.4,
+});
+// Result: { left: 83, top: 0, width: 1500, height: 1500 }
+
+// Use with Sharp:
+import sharp from 'sharp';
+
+const output = await sharp(buffer)
+  .extract(crop)
+  .resize(400, 400, { fit: 'fill' })
+  .toBuffer();
+```
+
+## Validation Utilities
+
+### isValidFocalPoint
+
+Check whether a value is a valid focal point (both `x` and `y` are numbers in the
+`0-1` range):
+
+```typescript
+import { isValidFocalPoint } from '@classytic/media-kit/processing';
+
+isValidFocalPoint({ x: 0.5, y: 0.5 }); // true
+isValidFocalPoint({ x: 1.5, y: 0.5 }); // false (x out of range)
+isValidFocalPoint({ x: 'a', y: 0.5 }); // false (x is not a number)
+isValidFocalPoint(null);                 // false
+```
+
+### DEFAULT_FOCAL_POINT
+
+The default focal point is center:
+
+```typescript
+import { DEFAULT_FOCAL_POINT } from '@classytic/media-kit/processing';
+
+console.log(DEFAULT_FOCAL_POINT); // { x: 0.5, y: 0.5 }
+```
+
+## Schema Storage
+
+The focal point is stored on the media document as an embedded object:
+
+```typescript
+interface FocalPoint {
+  /** X position: 0.0 (left) to 1.0 (right). Default 0.5 */
+  x: number;
+  /** Y position: 0.0 (top) to 1.0 (bottom). Default 0.5 */
+  y: number;
+}
+```
+
+In MongoDB, this is stored as:
+
+```json
+{
+  "_id": "abc123",
+  "filename": "team-photo.webp",
+  "focalPoint": { "x": 0.3, "y": 0.4 },
+  ...
+}
+```
+
+The field is optional. Files without a focal point use Sharp's default center-crop.
+
+## Use Case Examples
+
+### Profile photos (face centered)
+
+Users upload arbitrary photos as avatars. The face is rarely dead-center. Set the
+focal point on the face so that square and circular crops always show the person:
+
+```typescript
+// After face detection or user-placed crosshair
+await media.setFocalPoint(avatarId, { x: 0.48, y: 0.25 });
+
+// Now any crop (1:1 avatar, 16:9 banner, 3:4 card) keeps the face visible
+```
+
+### Product images (product centered)
+
+E-commerce product photos often have the product off-center due to styling or
+composition. Pin the focal point to the product:
+
+```typescript
+await media.setFocalPoint(productImageId, { x: 0.6, y: 0.5 });
+
+// Square thumbnail for grid, wide banner for promo -- product stays in frame
+```
+
+### Hero banners (key element preserved)
+
+Marketing banners viewed on desktop (21:9) and mobile (9:16) need to preserve the
+key visual. Placing the focal point on the headline or key graphic ensures it
+survives both extreme crops:
+
+```typescript
+await media.setFocalPoint(bannerId, { x: 0.35, y: 0.4 });
+
+// Desktop: /assets/banner?w=2100&h=900&fit=cover  -- subject visible
+// Mobile:  /assets/banner?w=900&h=1600&fit=cover   -- subject still visible
+```
+
+### Building a focal point picker UI
+
+A common pattern is to render the image in the browser and let the user click to
+place the focal point. The click coordinates map directly to the normalized system:
+
+```typescript
+// In your frontend component
+function handleImageClick(event: React.MouseEvent<HTMLImageElement>) {
+  const rect = event.currentTarget.getBoundingClientRect();
+  const x = (event.clientX - rect.left) / rect.width;  // 0-1
+  const y = (event.clientY - rect.top) / rect.height;   // 0-1
+
+  // Send to API
+  await fetch(`/api/media/${fileId}/focal-point`, {
+    method: 'PATCH',
+    body: JSON.stringify({ x: parseFloat(x.toFixed(4)), y: parseFloat(y.toFixed(4)) }),
+  });
+}
+```
+
+The backend handler calls `media.setFocalPoint(id, { x, y })`.
+
+## TypeScript Types
+
+```typescript
+import type { FocalPoint } from '@classytic/media-kit';
+
+// FocalPoint
+interface FocalPoint {
+  x: number; // 0.0 (left) to 1.0 (right)
+  y: number; // 0.0 (top) to 1.0 (bottom)
+}
+```
+
+```typescript
+import type { FocalPointCropParams, CropRegion } from '@classytic/media-kit/processing';
+
+interface FocalPointCropParams {
+  originalWidth: number;
+  originalHeight: number;
+  targetWidth: number;
+  targetHeight: number;
+  focalX: number;
+  focalY: number;
+}
+
+interface CropRegion {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+```

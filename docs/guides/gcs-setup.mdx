@@ -1,0 +1,706 @@
+# Google Cloud Storage Setup
+
+Complete guide to setting up Google Cloud Storage with `@classytic/media-kit`.
+
+## Prerequisites
+
+- A Google Cloud account with billing enabled
+- The `gcloud` CLI installed ([install guide](https://cloud.google.com/sdk/docs/install))
+- Node.js 18+
+
+Install the GCS dependency:
+
+```bash
+npm install @google-cloud/storage
+```
+
+---
+
+## 1. Create a GCS Bucket
+
+### Using the Console
+
+1. Go to [Cloud Storage](https://console.cloud.google.com/storage/browser) in the Google Cloud Console
+2. Click **Create bucket**
+3. Enter a globally unique bucket name (e.g., `myapp-media-prod`)
+4. Choose a location type:
+   - **Region** for single-region (cheapest, lowest latency to that region)
+   - **Multi-region** for high availability across regions
+5. Select **Standard** storage class for frequently accessed media
+6. Under **Access control**, choose **Fine-grained** (recommended for mixed public/private files)
+7. **Uncheck** "Enforce public access prevention" — media-kit uses `makePublic: true` to make uploaded files publicly readable (required for social media platforms to fetch URLs). If this is enforced, `makePublic` calls will fail with 403.
+8. Click **Create**
+
+### Using the `gcloud` CLI
+
+```bash
+# Set your project
+gcloud config set project YOUR_PROJECT_ID
+
+# Create a regional bucket (fine-grained access, public access allowed)
+gcloud storage buckets create gs://myapp-media-prod \
+  --location=us-central1 \
+  --default-storage-class=STANDARD \
+  --no-public-access-prevention
+
+# Or create a multi-region bucket
+gcloud storage buckets create gs://myapp-media-prod \
+  --location=US \
+  --default-storage-class=STANDARD \
+  --no-public-access-prevention
+```
+
+### Verify the Bucket
+
+```bash
+gcloud storage ls gs://myapp-media-prod
+```
+
+---
+
+## 2. Authentication Methods
+
+GCSProvider supports four authentication methods. Choose the one that fits your environment.
+
+### Method A: Service Account Key File
+
+Best for local development and traditional server deployments.
+
+1. Go to [IAM & Admin > Service Accounts](https://console.cloud.google.com/iam-admin/service-accounts)
+2. Click **Create Service Account**
+3. Name it (e.g., `media-storage`) and grant the **Storage Object Admin** role
+4. Click the service account, go to **Keys** tab, and click **Add Key > Create new key > JSON**
+5. Save the downloaded file (e.g., `gcs-service-account.json`)
+
+```typescript
+import { GCSProvider } from '@classytic/media-kit/providers/gcs';
+
+const provider = new GCSProvider({
+  bucket: 'myapp-media-prod',
+  keyFilename: './gcs-service-account.json',
+});
+```
+
+**Important:** Add `gcs-service-account.json` to your `.gitignore`. Never commit key files.
+
+### Method B: Credentials Object
+
+Best for deployments where you inject secrets via environment variables.
+
+```typescript
+const provider = new GCSProvider({
+  bucket: 'myapp-media-prod',
+  projectId: process.env.GCS_PROJECT_ID,
+  credentials: {
+    client_email: process.env.GCS_CLIENT_EMAIL,
+    private_key: process.env.GCS_PRIVATE_KEY,
+  },
+});
+```
+
+When storing the private key in an environment variable, preserve the newlines:
+
+```bash
+# .env
+GCS_PROJECT_ID=my-project-123456
+GCS_CLIENT_EMAIL=media-storage@my-project-123456.iam.gserviceaccount.com
+GCS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEv...your-key-here...\n-----END PRIVATE KEY-----\n"
+```
+
+In your code, parse the escaped newlines:
+
+```typescript
+const provider = new GCSProvider({
+  bucket: process.env.GCS_BUCKET,
+  projectId: process.env.GCS_PROJECT_ID,
+  credentials: {
+    client_email: process.env.GCS_CLIENT_EMAIL,
+    private_key: process.env.GCS_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  },
+});
+```
+
+### Method C: Application Default Credentials (ADC)
+
+Best for Google Cloud-hosted environments (Cloud Run, GKE, Compute Engine, Cloud Functions).
+
+When running on Google Cloud infrastructure, credentials are automatically discovered. No configuration needed:
+
+```typescript
+const provider = new GCSProvider({
+  bucket: 'myapp-media-prod',
+  // No credentials needed -- ADC handles it
+});
+```
+
+For local development with ADC:
+
+```bash
+gcloud auth application-default login
+```
+
+This stores credentials at `~/.config/gcloud/application_default_credentials.json` which the SDK picks up automatically.
+
+### Method D: Environment Variable Key File
+
+Set the `GOOGLE_APPLICATION_CREDENTIALS` environment variable to point to your key file:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/gcs-service-account.json"
+```
+
+Then initialize without explicit credentials:
+
+```typescript
+const provider = new GCSProvider({
+  bucket: 'myapp-media-prod',
+  // SDK reads GOOGLE_APPLICATION_CREDENTIALS automatically
+});
+```
+
+---
+
+## 3. IAM Permissions
+
+The service account needs appropriate Cloud Storage roles. Assign roles based on your use case.
+
+### Recommended Roles
+
+| Role | Description | When to Use |
+|------|-------------|-------------|
+| `roles/storage.objectAdmin` | Full control over objects (create, read, delete) | Default for most apps |
+| `roles/storage.objectCreator` | Create objects only (no read or delete) | Write-only ingest pipelines |
+| `roles/storage.objectViewer` | Read objects only | Read-only access |
+
+### Assign Roles via CLI
+
+```bash
+# Full object access (recommended for media-kit)
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+  --member="serviceAccount:media-storage@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/storage.objectAdmin"
+```
+
+### Bucket-Level Permissions
+
+For tighter security, grant permissions on a specific bucket instead of project-wide:
+
+```bash
+gcloud storage buckets add-iam-policy-binding gs://myapp-media-prod \
+  --member="serviceAccount:media-storage@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/storage.objectAdmin"
+```
+
+### Minimum Permissions for Signed URLs
+
+Signed URL generation requires the `iam.serviceAccounts.signBlob` permission. The service account needs one of:
+
+- `roles/iam.serviceAccountTokenCreator` on itself
+- `roles/storage.objectAdmin` (includes sign capability when using key file auth)
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding \
+  media-storage@YOUR_PROJECT_ID.iam.gserviceaccount.com \
+  --member="serviceAccount:media-storage@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountTokenCreator"
+```
+
+---
+
+## 4. CORS Configuration
+
+CORS is required if you use presigned URLs for direct browser uploads.
+
+### Create a CORS Configuration File
+
+Save as `cors.json`:
+
+```json
+[
+  {
+    "origin": ["http://localhost:3000", "https://yourdomain.com"],
+    "method": ["GET", "PUT", "POST", "DELETE", "HEAD"],
+    "responseHeader": [
+      "Content-Type",
+      "Content-Length",
+      "Content-Disposition",
+      "x-goog-resumable",
+      "x-goog-meta-*"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]
+```
+
+### Apply CORS to Your Bucket
+
+```bash
+gcloud storage buckets update gs://myapp-media-prod --cors-file=cors.json
+```
+
+### Verify CORS
+
+```bash
+gcloud storage buckets describe gs://myapp-media-prod --format="json(cors_config)"
+```
+
+### Remove CORS (if needed)
+
+Create an empty `cors-reset.json`:
+
+```json
+[]
+```
+
+```bash
+gcloud storage buckets update gs://myapp-media-prod --cors-file=cors-reset.json
+```
+
+---
+
+## 5. Provider Configuration
+
+### All Options
+
+```typescript
+import { GCSProvider } from '@classytic/media-kit/providers/gcs';
+
+const provider = new GCSProvider({
+  // Required
+  bucket: 'myapp-media-prod',
+
+  // Authentication (pick one)
+  keyFilename: './gcs-service-account.json',
+  // -- or --
+  projectId: 'my-project-123456',
+  credentials: {
+    client_email: 'sa@project.iam.gserviceaccount.com',
+    private_key: '-----BEGIN PRIVATE KEY-----\n...',
+  },
+  // -- or --
+  // Omit both for ADC
+
+  // Public access
+  makePublic: true,        // Default: true. Makes uploaded files publicly readable.
+
+  // CDN override
+  publicUrl: 'https://cdn.example.com',  // Replaces default GCS URL in results
+
+  // Retry for transient failures
+  retry: {
+    maxRetries: 3,         // Default: 3
+    baseDelay: 100,        // Default: 100ms
+    maxDelay: 5000,        // Default: 5000ms
+    backoffMultiplier: 2,  // Default: 2
+  },
+});
+```
+
+### Minimal Configuration
+
+```typescript
+const provider = new GCSProvider({
+  bucket: 'myapp-media-prod',
+  keyFilename: './gcs-service-account.json',
+});
+```
+
+### Production Configuration
+
+```typescript
+const provider = new GCSProvider({
+  bucket: process.env.GCS_BUCKET,
+  projectId: process.env.GCS_PROJECT_ID,
+  credentials: {
+    client_email: process.env.GCS_CLIENT_EMAIL,
+    private_key: process.env.GCS_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  },
+  publicUrl: process.env.CDN_URL,
+  makePublic: true,
+  retry: {
+    maxRetries: 5,
+    baseDelay: 200,
+    maxDelay: 10000,
+    backoffMultiplier: 2,
+  },
+});
+```
+
+### Private Bucket Configuration
+
+For files that should not be publicly accessible (use signed URLs instead):
+
+```typescript
+const provider = new GCSProvider({
+  bucket: 'myapp-private-media',
+  keyFilename: './gcs-service-account.json',
+  makePublic: false,
+});
+
+// Upload returns a storage key, not a public URL
+const file = await media.upload({
+  buffer: fileBuffer,
+  filename: 'confidential.pdf',
+  mimeType: 'application/pdf',
+});
+
+// Generate a temporary signed URL for access
+const signedUrl = await provider.getSignedUrl(file.key, 3600); // 1 hour
+```
+
+### Using with createMedia
+
+```typescript
+import { createMedia } from '@classytic/media-kit';
+import { GCSProvider } from '@classytic/media-kit/providers/gcs';
+
+const media = createMedia({
+  driver: new GCSProvider({
+    bucket: process.env.GCS_BUCKET,
+    keyFilename: './gcs-service-account.json',
+    publicUrl: 'https://cdn.example.com',
+  }),
+
+  processing: {
+    enabled: true,
+    format: 'webp',
+    quality: 85,
+    sizes: [
+      { name: 'thumb', width: 200 },
+      { name: 'medium', width: 800 },
+      { name: 'large', width: 1600 },
+    ],
+  },
+});
+```
+
+---
+
+## 6. Environment Variables
+
+### `.env` Template
+
+```bash
+# Google Cloud Storage
+GCS_BUCKET=myapp-media-prod
+GCS_PROJECT_ID=my-project-123456
+
+# Authentication (credentials object method)
+GCS_CLIENT_EMAIL=media-storage@my-project-123456.iam.gserviceaccount.com
+GCS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEv...\n-----END PRIVATE KEY-----\n"
+
+# Authentication (key file method -- use this OR the credentials above, not both)
+# GOOGLE_APPLICATION_CREDENTIALS=/path/to/gcs-service-account.json
+
+# CDN (optional)
+CDN_URL=https://cdn.example.com
+```
+
+### Loading Environment Variables
+
+```typescript
+import 'dotenv/config';
+import { GCSProvider } from '@classytic/media-kit/providers/gcs';
+
+const provider = new GCSProvider({
+  bucket: process.env.GCS_BUCKET!,
+  projectId: process.env.GCS_PROJECT_ID,
+  credentials: {
+    client_email: process.env.GCS_CLIENT_EMAIL!,
+    private_key: process.env.GCS_PRIVATE_KEY!.replace(/\\n/g, '\n'),
+  },
+  publicUrl: process.env.CDN_URL,
+});
+```
+
+---
+
+## 7. CDN Setup
+
+### Google Cloud CDN
+
+Cloud CDN caches content at Google's edge locations. Setup requires a load balancer with a GCS backend bucket.
+
+#### 1. Create a Backend Bucket
+
+```bash
+gcloud compute backend-buckets create media-backend \
+  --gcs-bucket-name=myapp-media-prod \
+  --enable-cdn
+```
+
+#### 2. Create a URL Map
+
+```bash
+gcloud compute url-maps create media-lb \
+  --default-backend-bucket=media-backend
+```
+
+#### 3. Create an HTTPS Proxy and Forwarding Rule
+
+```bash
+# Create SSL certificate (managed)
+gcloud compute ssl-certificates create media-cert \
+  --domains=cdn.example.com
+
+# Create target HTTPS proxy
+gcloud compute target-https-proxies create media-https-proxy \
+  --url-map=media-lb \
+  --ssl-certificates=media-cert
+
+# Create forwarding rule
+gcloud compute forwarding-rules create media-https-rule \
+  --global \
+  --target-https-proxy=media-https-proxy \
+  --ports=443
+```
+
+#### 4. DNS Configuration
+
+Point your CDN domain to the forwarding rule IP:
+
+```bash
+# Get the IP address
+gcloud compute forwarding-rules describe media-https-rule --global \
+  --format="get(IPAddress)"
+```
+
+Create an A record in your DNS provider:
+
+```
+cdn.example.com  A  34.120.x.x
+```
+
+#### 5. Configure the Provider
+
+```typescript
+const provider = new GCSProvider({
+  bucket: 'myapp-media-prod',
+  keyFilename: './gcs-service-account.json',
+  publicUrl: 'https://cdn.example.com',
+});
+
+// Uploaded file URLs now use your CDN:
+// https://cdn.example.com/uploads/1234567890-abc123-photo.jpg
+```
+
+### Direct GCS Public URLs (No CDN)
+
+Without `publicUrl`, the provider returns standard GCS URLs:
+
+```
+https://storage.googleapis.com/myapp-media-prod/uploads/photo.jpg
+```
+
+These work fine for development or low-traffic applications.
+
+---
+
+## 8. Verification Script
+
+Create a file called `verify-gcs.ts` to test your setup:
+
+```typescript
+import { GCSProvider } from '@classytic/media-kit/providers/gcs';
+import 'dotenv/config';
+
+async function verify() {
+  const provider = new GCSProvider({
+    bucket: process.env.GCS_BUCKET!,
+    projectId: process.env.GCS_PROJECT_ID,
+    credentials: {
+      client_email: process.env.GCS_CLIENT_EMAIL!,
+      private_key: process.env.GCS_PRIVATE_KEY!.replace(/\\n/g, '\n'),
+    },
+  });
+
+  const testBuffer = Buffer.from('media-kit GCS verification test');
+  const testFile = 'verify-test.txt';
+
+  try {
+    // 1. Upload
+    console.log('1. Uploading test file...');
+    const result = await provider.upload(testBuffer, testFile, {
+      folder: '_verify',
+    });
+    console.log('   OK:', result.url);
+
+    // 2. Check existence
+    console.log('2. Checking file exists...');
+    const exists = await provider.exists(result.key);
+    console.log('   OK:', exists);
+
+    // 3. Get metadata
+    console.log('3. Reading metadata...');
+    const metadata = await provider.getMetadata(result.key);
+    console.log('   OK:', {
+      contentType: metadata.contentType,
+      size: metadata.size,
+    });
+
+    // 4. Generate signed URL
+    console.log('4. Generating signed URL...');
+    const signedUrl = await provider.getSignedUrl(result.key, 60);
+    console.log('   OK:', signedUrl.substring(0, 80) + '...');
+
+    // 5. Delete
+    console.log('5. Deleting test file...');
+    const deleted = await provider.delete(result.key);
+    console.log('   OK:', deleted);
+
+    // 6. Confirm deletion
+    console.log('6. Confirming deletion...');
+    const stillExists = await provider.exists(result.key);
+    console.log('   OK: file gone =', !stillExists);
+
+    console.log('\nAll checks passed. GCS is configured correctly.');
+  } catch (err) {
+    console.error('\nVerification failed:', err.message);
+    process.exit(1);
+  }
+}
+
+verify();
+```
+
+Run it:
+
+```bash
+npx tsx verify-gcs.ts
+```
+
+Expected output:
+
+```
+1. Uploading test file...
+   OK: https://storage.googleapis.com/myapp-media-prod/_verify/1234567890-abc123-verify-test.txt
+2. Checking file exists...
+   OK: true
+3. Reading metadata...
+   OK: { contentType: 'text/plain', size: 31 }
+4. Generating signed URL...
+   OK: https://storage.googleapis.com/myapp-media-prod/_verify/1234567890-abc12...
+5. Deleting test file...
+   OK: true
+6. Confirming deletion...
+   OK: file gone = true
+
+All checks passed. GCS is configured correctly.
+```
+
+---
+
+## 9. Troubleshooting
+
+### 403 Forbidden
+
+**Symptom:** `ApiError: Caller does not have storage.objects.create access to the Google Cloud Storage object.`
+
+**Causes and fixes:**
+
+- **Missing IAM role.** Grant `roles/storage.objectAdmin` to your service account:
+  ```bash
+  gcloud storage buckets add-iam-policy-binding gs://myapp-media-prod \
+    --member="serviceAccount:YOUR_SA@YOUR_PROJECT.iam.gserviceaccount.com" \
+    --role="roles/storage.objectAdmin"
+  ```
+- **Wrong project.** Verify `projectId` matches the project that owns the bucket.
+- **Key file mismatch.** Confirm the key file corresponds to the correct service account:
+  ```bash
+  cat gcs-service-account.json | grep client_email
+  ```
+
+### CORS Errors
+
+**Symptom:** Browser console shows `Access to XMLHttpRequest has been blocked by CORS policy` when using presigned upload URLs.
+
+**Fixes:**
+
+- Verify CORS is applied to your bucket:
+  ```bash
+  gcloud storage buckets describe gs://myapp-media-prod --format="json(cors_config)"
+  ```
+- Ensure your origin (including port) is listed in `cors.json`. `http://localhost:3000` and `http://localhost:4005` are different origins.
+- Confirm the HTTP method matches. Presigned uploads use `PUT`, not `POST`.
+- CORS changes can take a few minutes to propagate. Wait and retry.
+
+### Signed URL Errors
+
+**Symptom:** `SigningError: Cannot sign data without client_email and private_key` or signed URLs return 403 after generation.
+
+**Fixes:**
+
+- **ADC without key file.** Signed URL generation requires either a key file or explicit `credentials` with `private_key`. ADC alone (e.g., metadata server on GKE) cannot sign URLs unless you also grant `roles/iam.serviceAccountTokenCreator`.
+- **Expired URL.** Default expiry is 1 hour. Pass a longer `expiresIn` value (in seconds):
+  ```typescript
+  const url = await provider.getSignedUrl(key, 7200); // 2 hours
+  ```
+- **Maximum expiry.** GCS v4 signed URLs have a maximum lifetime of 7 days (604800 seconds).
+
+### `makePublic` Fails
+
+**Symptom:** `ApiError: ... does not have storage.objects.setIamPolicy access`
+
+**Fixes:**
+
+- Grant `roles/storage.objectAdmin` (not just `objectCreator`). The `makePublic` call modifies IAM on the object.
+- If using Uniform Bucket-Level Access, `makePublic` on individual objects is not supported. Instead, make the entire bucket public:
+  ```bash
+  gcloud storage buckets add-iam-policy-binding gs://myapp-media-prod \
+    --member="allUsers" \
+    --role="roles/storage.objectViewer"
+  ```
+  Then set `makePublic: false` in the provider config since objects are already public via bucket policy.
+
+### Private Key Newline Issues
+
+**Symptom:** `Error: error:1E08010C:DECODER routines::unsupported` or `Invalid PEM formatted message`.
+
+**Fix:** Environment variables often lose newline characters. Replace escaped newlines at runtime:
+
+```typescript
+credentials: {
+  client_email: process.env.GCS_CLIENT_EMAIL,
+  private_key: process.env.GCS_PRIVATE_KEY.replace(/\\n/g, '\n'),
+}
+```
+
+When setting the env var, wrap the entire key in double quotes and use literal `\n`:
+
+```bash
+GCS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEv...\n-----END PRIVATE KEY-----\n"
+```
+
+### Module Not Found
+
+**Symptom:** `Error: @google-cloud/storage is required for GCSProvider`
+
+**Fix:** Install the peer dependency:
+
+```bash
+npm install @google-cloud/storage
+```
+
+The GCS SDK is a peer dependency of `@classytic/media-kit` -- it is not bundled to keep the package size small.
+
+### Bucket Not Found
+
+**Symptom:** `ApiError: The specified bucket does not exist.`
+
+**Fixes:**
+
+- Verify the bucket name is correct (bucket names are globally unique):
+  ```bash
+  gcloud storage ls gs://myapp-media-prod
+  ```
+- Confirm the service account has access to the project that owns the bucket.
+- Bucket names cannot contain uppercase letters, spaces, or underscores.
+
+---
+
+## Next Steps
+
+- [Storage Providers](./storage-providers.mdx) -- Overview of all providers
+- [CDN Integration](./cdn-integration.mdx) -- Detailed CDN setup for all providers
+- [Uploading Files](./uploading-files.mdx) -- Upload patterns and examples
+- [API Reference](../api/providers.mdx) -- Full provider API

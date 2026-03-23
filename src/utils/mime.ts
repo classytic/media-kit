@@ -4,7 +4,31 @@
  * Validation and helpers for file type handling.
  */
 
-import mimeTypes from 'mime-types';
+/**
+ * Built-in MIME mappings for common media types.
+ * Used as fallback when `mime-types` peer dependency is not installed.
+ */
+const BUILTIN_EXT_TO_MIME: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp',
+  gif: 'image/gif', svg: 'image/svg+xml', avif: 'image/avif', ico: 'image/x-icon',
+  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', avi: 'video/x-msvideo',
+  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', aac: 'audio/aac',
+  pdf: 'application/pdf', json: 'application/json', txt: 'text/plain', csv: 'text/csv',
+  doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+};
+
+const BUILTIN_MIME_TO_EXT: Record<string, string> = Object.fromEntries(
+  Object.entries(BUILTIN_EXT_TO_MIME).map(([ext, mime]) => [mime, ext]),
+);
+
+let mimeTypes: typeof import('mime-types') | null = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  mimeTypes = require('mime-types') as typeof import('mime-types');
+} catch {
+  // mime-types not installed — built-in fallback will be used
+}
 
 /**
  * Common file type presets
@@ -75,35 +99,75 @@ export const FILE_TYPE_PRESETS = {
     'image/webp',
     'image/gif',
     'image/svg+xml',
+    'image/avif',
+    'image/bmp',
+    'image/tiff',
+    'image/x-icon',
+    'image/heic',
+    'image/heif',
     // Documents
     'application/pdf',
     'application/msword',
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     'application/vnd.ms-excel',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.ms-powerpoint',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     'text/plain',
     'text/csv',
+    'text/html',
+    'text/xml',
+    'application/json',
+    'application/xml',
+    'application/rtf',
+    // Archives
+    'application/zip',
+    'application/gzip',
+    'application/x-tar',
+    'application/x-7z-compressed',
+    'application/x-rar-compressed',
     // Videos
     'video/mp4',
     'video/webm',
+    'video/quicktime',
+    'video/x-msvideo',
+    'video/x-flv',
+    'video/x-matroska',
+    'video/3gpp',
     // Audio
     'audio/mpeg',
     'audio/wav',
+    'audio/ogg',
+    'audio/webm',
+    'audio/aac',
+    'audio/flac',
+    'audio/x-m4a',
+    // Binary / generic
+    'application/octet-stream',
   ],
 } as const;
 
 /**
- * Get MIME type from filename
+ * Get MIME type from filename.
+ * Uses `mime-types` if installed, otherwise falls back to built-in map.
  */
 export function getMimeType(filename: string): string {
-  return mimeTypes.lookup(filename) || 'application/octet-stream';
+  if (mimeTypes) {
+    return mimeTypes.lookup(filename) || 'application/octet-stream';
+  }
+  const ext = filename.split('.').pop()?.toLowerCase();
+  return (ext && BUILTIN_EXT_TO_MIME[ext]) || 'application/octet-stream';
 }
 
 /**
- * Get file extension from MIME type
+ * Get file extension from MIME type.
+ * Uses `mime-types` if installed, otherwise falls back to built-in map.
  */
 export function getExtension(mimeType: string): string {
-  return mimeTypes.extension(mimeType) || 'bin';
+  if (mimeTypes) {
+    return mimeTypes.extension(mimeType) || 'bin';
+  }
+  return BUILTIN_MIME_TO_EXT[mimeType] || 'bin';
 }
 
 /**
@@ -130,6 +194,31 @@ export function isAllowedMimeType(mimeType: string, allowedTypes: string[]): boo
   }
   
   return false;
+}
+
+/**
+ * Camera RAW MIME types (not natively supported by Sharp).
+ * Require a RawAdapter for processing.
+ */
+export const RAW_MIME_TYPES = [
+  'image/x-canon-cr2',
+  'image/x-canon-cr3',
+  'image/x-nikon-nef',
+  'image/x-sony-arw',
+  'image/x-adobe-dng',
+  'image/x-panasonic-rw2',
+  'image/x-fuji-raf',
+  'image/x-olympus-orf',
+  'image/x-pentax-pef',
+  'image/x-samsung-srw',
+] as const;
+
+/**
+ * Check if MIME type is a camera RAW format.
+ * These require a RawAdapter for conversion before Sharp can process them.
+ */
+export function isRawImage(mimeType: string): boolean {
+  return (RAW_MIME_TYPES as readonly string[]).includes(mimeType.toLowerCase());
 }
 
 /**
@@ -184,7 +273,7 @@ export function formatFileSize(bytes: number): string {
     unitIndex++;
   }
 
-  return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+  return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]!}`;
 }
 
 /**

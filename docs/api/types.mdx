@@ -1,85 +1,542 @@
 # TypeScript Types
 
-Full type reference for Media Kit.
+Full type reference for `@classytic/media-kit`.
 
-## Core Types
+All types can be imported from the package root:
+
+```typescript
+import type { MediaKitConfig, IMediaDocument, StorageDriver, ... } from '@classytic/media-kit';
+```
+
+## Configuration Types
 
 ### MediaKitConfig
 
-Main configuration object:
+Main configuration object passed to `createMedia()`.
 
 ```typescript
 interface MediaKitConfig {
-  provider: StorageProvider;
+  driver: StorageDriver;
+  fileTypes?: FileTypesConfig;
   folders?: FolderConfig;
-  fileTypes?: FileTypeConfig;
   processing?: ProcessingConfig;
-  multitenancy?: MultitenancyConfig;
+  multiTenancy?: MultiTenancyConfig;
+  deduplication?: DeduplicationConfig;
+  softDelete?: SoftDeleteConfig;
+  concurrency?: ConcurrencyConfig;
+  logger?: MediaKitLogger;
   suppressWarnings?: boolean;
+  plugins?: PluginType[];
+  pagination?: PaginationConfig;
 }
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `driver` | `StorageDriver` | Storage driver instance (required) |
+| `fileTypes` | `FileTypesConfig` | File type restrictions |
+| `folders` | `FolderConfig` | Folder configuration |
+| `processing` | `ProcessingConfig` | Image processing config |
+| `multiTenancy` | `MultiTenancyConfig` | Multi-tenancy config |
+| `deduplication` | `DeduplicationConfig` | File deduplication config |
+| `softDelete` | `SoftDeleteConfig` | Soft delete config |
+| `concurrency` | `ConcurrencyConfig` | Concurrency control |
+| `logger` | `MediaKitLogger` | Logger instance |
+| `suppressWarnings` | `boolean` | Suppress warnings about missing optional dependencies |
+| `plugins` | `PluginType[]` | Mongokit plugins (e.g., `cachePlugin`) |
+| `pagination` | `PaginationConfig` | Mongokit pagination config |
+
+---
+
+### FileTypesConfig
+
+```typescript
+interface FileTypesConfig {
+  allowed: string[];
+  maxSize?: number;
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `allowed` | `string[]` | Allowed MIME types (e.g., `['image/*', 'application/pdf']`) |
+| `maxSize` | `number` | Maximum file size in bytes |
+
+---
 
 ### FolderConfig
 
 ```typescript
 interface FolderConfig {
-  baseFolders?: string[];
   defaultFolder?: string;
+  contentTypeMap?: Record<string, string[]>;
   enableSubfolders?: boolean;
 }
 ```
 
-### FileTypeConfig
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `defaultFolder` | `string` | `'general'` | Default folder when none specified |
+| `contentTypeMap` | `Record<string, string[]>` | `{}` | Maps content types to folder pattern arrays |
+| `enableSubfolders` | `boolean` | `true` | Enable unlimited subfolder nesting |
 
-```typescript
-interface FileTypeConfig {
-  allowed?: string[];
-  maxSize?: number;
-}
-```
+---
 
 ### ProcessingConfig
 
 ```typescript
 interface ProcessingConfig {
   enabled?: boolean;
+  maxWidth?: number;
   quality?: number;
   format?: 'webp' | 'jpeg' | 'png' | 'avif' | 'original';
-  maxWidth?: number;
-  generateAlt?: boolean;
+  aspectRatios?: Record<string, AspectRatioPreset>;
   sizes?: SizeVariant[];
+  generateAlt?: boolean | AltGenerationConfig;
+  sharpOptions?: SharpOptions;
 }
 ```
 
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `boolean` | `true` | Enable image processing |
+| `maxWidth` | `number` | -- | Maximum width for images |
+| `quality` | `number` | -- | Output quality (1-100) |
+| `format` | `string` | -- | Output format. `'original'` preserves source format |
+| `aspectRatios` | `Record<string, AspectRatioPreset>` | -- | Aspect ratio presets keyed by content type |
+| `sizes` | `SizeVariant[]` | -- | Size variants to generate |
+| `generateAlt` | `boolean \| AltGenerationConfig` | -- | Auto-generate alt text |
+| `sharpOptions` | `SharpOptions` | -- | Sharp memory optimization options |
+
+---
+
+### MultiTenancyConfig
+
+```typescript
+interface MultiTenancyConfig {
+  enabled: boolean;
+  field?: string;
+  required?: boolean;
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `boolean` | -- | Enable multi-tenancy |
+| `field` | `string` | `'organizationId'` | Field name for the organization ID |
+| `required` | `boolean` | -- | Require organization ID on all operations |
+
+---
+
+### DeduplicationConfig
+
+```typescript
+interface DeduplicationConfig {
+  enabled: boolean;
+  returnExisting?: boolean;
+  algorithm?: 'md5' | 'sha256';
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `boolean` | -- | Enable file deduplication by content hash |
+| `returnExisting` | `boolean` | `true` | Return the existing file instead of uploading a duplicate |
+| `algorithm` | `string` | `'sha256'` | Hash algorithm: `'md5'` (fast) or `'sha256'` (secure) |
+
+---
+
+### SoftDeleteConfig
+
+```typescript
+interface SoftDeleteConfig {
+  enabled: boolean;
+  ttlDays?: number;
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `boolean` | -- | Enable soft deletes |
+| `ttlDays` | `number` | `30` | Auto-purge TTL in days. Set `0` to disable auto-purge |
+
+---
+
+### ConcurrencyConfig
+
+```typescript
+interface ConcurrencyConfig {
+  maxConcurrent?: number;
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `maxConcurrent` | `number` | `5` | Maximum concurrent upload operations |
+
+---
+
+### MediaKitLogger
+
+```typescript
+interface MediaKitLogger {
+  info(message: string, meta?: Record<string, unknown>): void;
+  warn(message: string, meta?: Record<string, unknown>): void;
+  error(message: string, meta?: Record<string, unknown>): void;
+  debug?(message: string, meta?: Record<string, unknown>): void;
+}
+```
+
+Compatible with `console`, `pino`, `winston`, and similar loggers.
+
+## Storage Driver Types
+
+### StorageDriver
+
+The core interface for storage backends. Implement this to create custom drivers.
+
+```typescript
+interface StorageDriver {
+  readonly name: string;
+
+  // Core (required)
+  write(key: string, data: Buffer | NodeJS.ReadableStream, contentType: string): Promise<WriteResult>;
+  read(key: string, range?: { start: number; end: number }): Promise<NodeJS.ReadableStream>;
+  delete(key: string): Promise<boolean>;
+  exists(key: string): Promise<boolean>;
+  stat(key: string): Promise<FileStat>;
+
+  // Navigation (optional)
+  list?(prefix: string): AsyncIterable<string>;
+  copy?(source: string, destination: string): Promise<WriteResult>;
+  move?(source: string, destination: string): Promise<WriteResult>;
+
+  // URLs
+  getPublicUrl(key: string): string;
+  getSignedUrl?(key: string, expiresIn?: number): Promise<string>;
+  getSignedUploadUrl?(key: string, contentType: string, expiresIn?: number): Promise<PresignedUploadResult>;
+}
+```
+
+---
+
+### WriteResult
+
+Returned from `StorageDriver.write()`, `copy()`, and `move()`.
+
+```typescript
+interface WriteResult {
+  key: string;
+  url: string;
+  size: number;
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `key` | `string` | Storage key/path |
+| `url` | `string` | Public URL to access the file |
+| `size` | `number` | Final file size in bytes |
+
+---
+
+### FileStat
+
+Returned from `StorageDriver.stat()`.
+
+```typescript
+interface FileStat {
+  size: number;
+  contentType: string;
+  lastModified?: Date;
+  etag?: string;
+  metadata?: Record<string, string>;
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `size` | `number` | File size in bytes |
+| `contentType` | `string` | MIME type |
+| `lastModified` | `Date` | Last modified timestamp |
+| `etag` | `string` | Entity tag for cache validation |
+| `metadata` | `Record<string, string>` | Custom metadata key-value pairs |
+
+---
+
+### PresignedUploadResult
+
+Returned from `StorageDriver.getSignedUploadUrl()` and `media.getSignedUploadUrl()`.
+
+```typescript
+interface PresignedUploadResult {
+  uploadUrl: string;
+  key: string;
+  publicUrl: string;
+  expiresIn: number;
+  headers?: Record<string, string>;
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `uploadUrl` | `string` | The presigned URL to PUT the file to |
+| `key` | `string` | Storage key assigned to the file |
+| `publicUrl` | `string` | Public URL where the file will be accessible after upload |
+| `expiresIn` | `number` | Time in seconds until the presigned URL expires |
+| `headers` | `Record<string, string>` | Optional headers the client must include with the PUT request |
+
+## Document Types
+
+### IMedia
+
+Base interface for media documents.
+
+```typescript
+interface IMedia {
+  // Identity (Directus triple-name pattern)
+  filename: string;
+  originalFilename: string;
+  title: string;
+
+  // Storage
+  key: string;
+  url: string;
+  mimeType: string;
+  size: number;
+  hash: string;
+
+  // Status lifecycle
+  status: MediaStatus;
+  errorMessage?: string;
+
+  // Organization
+  folder: string;
+  tags: string[];
+  alt?: string;
+  description?: string;
+
+  // Image metadata
+  width?: number;
+  height?: number;
+  aspectRatio?: number;
+  focalPoint?: FocalPoint;
+
+  // Variants
+  variants: GeneratedVariant[];
+
+  // Video/Audio
+  duration?: number;
+
+  // Extensible
+  metadata: Record<string, unknown>;
+  exif?: ExifMetadata;
+
+  // Soft delete
+  deletedAt?: Date | null;
+
+  // Audit
+  uploadedBy?: Types.ObjectId;
+  organizationId?: Types.ObjectId | string;
+
+  // Timestamps
+  createdAt: Date;
+  updatedAt: Date;
+}
+```
+
+---
+
+### IMediaDocument
+
+Mongoose document extending `IMedia`.
+
+```typescript
+interface IMediaDocument extends IMedia, Document {}
+```
+
+---
+
+### MediaModel
+
+Mongoose model type for media documents.
+
+```typescript
+type MediaModel = Model<IMediaDocument>;
+```
+
+---
+
+### MediaStatus
+
+File status lifecycle.
+
+```typescript
+type MediaStatus = 'pending' | 'processing' | 'ready' | 'error';
+```
+
+The lifecycle is: `pending` (record created) -> `processing` (being processed/uploaded) -> `ready` (success) or `error` (failure).
+
+---
+
+### FocalPoint
+
+Focal point for smart cropping. Inspired by Payload CMS.
+
+```typescript
+interface FocalPoint {
+  x: number;
+  y: number;
+}
+```
+
+| Field | Type | Range | Description |
+|-------|------|-------|-------------|
+| `x` | `number` | `0.0` - `1.0` | Horizontal position. `0.0` = left, `1.0` = right |
+| `y` | `number` | `0.0` - `1.0` | Vertical position. `0.0` = top, `1.0` = bottom |
+
+---
+
+### ExifMetadata
+
+EXIF metadata extracted from images.
+
+```typescript
+interface ExifMetadata {
+  make?: string;
+  model?: string;
+  iso?: number;
+  aperture?: number;
+  shutterSpeed?: string;
+  focalLength?: number;
+  dateTimeOriginal?: Date;
+  latitude?: number;
+  longitude?: number;
+  orientation?: number;
+}
+```
+
+## Processing Types
+
 ### SizeVariant
+
+Configuration for a size variant to generate during upload.
 
 ```typescript
 interface SizeVariant {
   name: string;
   width?: number;
   height?: number;
+  aspectRatio?: AspectRatioPreset;
   quality?: number;
   format?: 'webp' | 'jpeg' | 'png' | 'avif' | 'original';
-  aspectRatio?: {
-    aspectRatio: number;
-    fit: 'cover' | 'contain' | 'fill';
-  };
+  condition?: (original: { width: number; height: number; mimeType: string }) => boolean;
 }
 ```
 
-### MultitenancyConfig
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `string` | Variant name (e.g., `'thumbnail'`, `'medium'`, `'large'`) |
+| `width` | `number` | Maximum width in pixels |
+| `height` | `number` | Maximum height in pixels |
+| `aspectRatio` | `AspectRatioPreset` | Aspect ratio preset |
+| `quality` | `number` | Output quality (1-100) |
+| `format` | `string` | Output format (defaults to processing config format) |
+| `condition` | `function` | Skip variant if returns `false` (Payload pattern) |
+
+The `condition` function allows conditional variant generation based on original image properties.
+
+---
+
+### GeneratedVariant
+
+Stored per-variant in the media document. Each variant has independent `mimeType` and `filename`.
 
 ```typescript
-interface MultitenancyConfig {
-  enabled?: boolean;
-  organizationField?: string;
-  enforceIsolation?: boolean;
+interface GeneratedVariant {
+  name: string;
+  key: string;
+  url: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  width?: number;
+  height?: number;
 }
 ```
 
-## Upload Types
+Variants store their own `mimeType` and `filename` (Payload pattern). A JPEG original can have WebP thumbnails.
+
+---
+
+### AspectRatioPreset
+
+```typescript
+interface AspectRatioPreset {
+  aspectRatio?: number;
+  fit?: 'cover' | 'contain' | 'fill' | 'inside' | 'outside';
+  preserveRatio?: boolean;
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `aspectRatio` | `number` | Aspect ratio as width/height (e.g., `0.75` for 3:4) |
+| `fit` | `string` | Sharp fit mode |
+| `preserveRatio` | `boolean` | Preserve original ratio (overrides `aspectRatio`) |
+
+---
+
+### ProcessingOptions
+
+Internal processing options passed to the image processor.
+
+```typescript
+interface ProcessingOptions {
+  maxWidth?: number;
+  quality?: number;
+  format?: 'webp' | 'jpeg' | 'png' | 'avif';
+  aspectRatio?: AspectRatioPreset;
+  focalPoint?: FocalPoint;
+}
+```
+
+---
+
+### SharpOptions
+
+Sharp memory optimization options.
+
+```typescript
+interface SharpOptions {
+  concurrency?: number;
+  cache?: boolean;
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `concurrency` | `number` | `2` | Maximum number of images to process concurrently |
+| `cache` | `boolean` | `false` | Enable Sharp's internal cache |
+
+---
+
+### AltGenerationConfig
+
+```typescript
+interface AltGenerationConfig {
+  enabled: boolean;
+  strategy?: 'filename' | 'ai';
+  fallback?: string;
+  generator?: (filename: string, buffer?: Buffer) => Promise<string> | string;
+}
+```
+
+## Operation Types
 
 ### UploadInput
+
+Input for `media.upload()` and `media.replace()`.
 
 ```typescript
 interface UploadInput {
@@ -87,102 +544,146 @@ interface UploadInput {
   filename: string;
   mimeType: string;
   folder?: string;
-  title?: string;
   alt?: string;
-  caption?: string;
+  title?: string;
   description?: string;
-  organizationId?: string;
-  metadata?: Record<string, any>;
+  tags?: string[];
+  focalPoint?: FocalPoint;
+  contentType?: string;
+  skipProcessing?: boolean;
 }
 ```
 
-### UploadResult
+---
+
+### ConfirmUploadInput
+
+Input for confirming a presigned upload.
 
 ```typescript
-interface UploadResult {
-  url: string;
+interface ConfirmUploadInput {
   key: string;
-  size: number;
-  mimeType: string;
-}
-```
-
-## Document Types
-
-### IMediaDocument
-
-Mongoose document for uploaded files:
-
-```typescript
-interface IMediaDocument extends Document {
   filename: string;
   mimeType: string;
   size: number;
-  url: string;
-  key: string;
-  folder: string;
-
-  title?: string;
-  alt?: string;
-  caption?: string;
-  description?: string;
-
-  width?: number;
-  height?: number;
-  aspectRatio?: number;
-
-  variants?: GeneratedVariant[];
-
-  organizationId?: string;
-  metadata?: Record<string, any>;
-
-  uploadedAt: Date;
-  createdAt: Date;
-  updatedAt: Date;
-}
-```
-
-### GeneratedVariant
-
-```typescript
-interface GeneratedVariant {
-  name: string;
-  url: string;
-  key: string;
-  size: number;
-  width?: number;
-  height?: number;
-}
-```
-
-## Provider Types
-
-### StorageProvider
-
-```typescript
-interface StorageProvider {
-  readonly name: string;
-
-  upload(
-    buffer: Buffer,
-    filename: string,
-    options?: UploadOptions
-  ): Promise<UploadResult>;
-
-  delete(key: string): Promise<boolean>;
-
-  exists(key: string): Promise<boolean>;
-}
-```
-
-### UploadOptions
-
-```typescript
-interface UploadOptions {
   folder?: string;
-  contentType?: string;
-  metadata?: Record<string, any>;
-  organizationId?: string;
+  alt?: string;
+  title?: string;
+  url?: string;
+}
+```
+
+---
+
+### OperationContext
+
+Context for operations (multi-tenancy, soft delete queries, etc.).
+
+```typescript
+interface OperationContext {
+  userId?: Types.ObjectId | string;
+  organizationId?: Types.ObjectId | string;
+  includeTrashed?: boolean;
+  [key: string]: unknown;
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `userId` | `ObjectId \| string` | Current user ID |
+| `organizationId` | `ObjectId \| string` | Organization ID for multi-tenancy |
+| `includeTrashed` | `boolean` | Include soft-deleted files in queries |
+
+---
+
+### ImportOptions
+
+Options for `media.importFromUrl()`.
+
+```typescript
+interface ImportOptions {
+  folder?: string;
+  filename?: string;
+  alt?: string;
+  title?: string;
+  tags?: string[];
+  maxSize?: number;
+  timeout?: number;
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `folder` | `string` | -- | Target folder |
+| `filename` | `string` | -- | Override the filename detected from the URL |
+| `alt` | `string` | -- | Alt text |
+| `title` | `string` | -- | Display title |
+| `tags` | `string[]` | -- | Tags to apply |
+| `maxSize` | `number` | `fileTypes.maxSize` | Maximum file size in bytes |
+| `timeout` | `number` | `30000` | Request timeout in milliseconds |
+
+---
+
+### BulkResult
+
+Result from bulk operations (`deleteMany`, `deleteFolder`).
+
+```typescript
+interface BulkResult<T = string> {
+  success: T[];
+  failed: Array<{ id: T; reason: string }>;
+}
+```
+
+## Folder Types
+
+### FolderTree
+
+```typescript
+interface FolderTree {
+  folders: FolderNode[];
+  meta: { totalFiles: number; totalSize: number };
+}
+```
+
+---
+
+### FolderNode
+
+```typescript
+interface FolderNode {
+  id: string;
+  name: string;
+  path: string;
+  stats: { count: number; size: number };
+  children: FolderNode[];
+  latestUpload?: Date;
+}
+```
+
+---
+
+### FolderStats
+
+```typescript
+interface FolderStats {
+  totalFiles: number;
+  totalSize: number;
+  avgSize: number;
+  mimeTypes: string[];
+  oldestFile: Date | null;
+  newestFile: Date | null;
+}
+```
+
+---
+
+### BreadcrumbItem
+
+```typescript
+interface BreadcrumbItem {
+  name: string;
+  path: string;
 }
 ```
 
@@ -190,53 +691,309 @@ interface UploadOptions {
 
 ### MediaEventName
 
+All event names supported by the event system. Events follow the pattern `phase:operation`.
+
 ```typescript
 type MediaEventName =
-  | 'before:upload'
-  | 'after:upload'
-  | 'error:upload'
-  | 'before:delete'
-  | 'after:delete'
-  | 'error:delete'
-  | 'before:list'
-  | 'after:list';
+  // Upload
+  | 'before:upload' | 'after:upload' | 'error:upload'
+  | 'before:uploadMany' | 'after:uploadMany' | 'error:uploadMany'
+  // Delete
+  | 'before:delete' | 'after:delete' | 'error:delete'
+  | 'before:deleteMany' | 'after:deleteMany' | 'error:deleteMany'
+  // Move
+  | 'before:move' | 'after:move' | 'error:move'
+  // Replace
+  | 'before:replace' | 'after:replace' | 'error:replace'
+  // Soft delete
+  | 'before:softDelete' | 'after:softDelete'
+  // Restore
+  | 'before:restore' | 'after:restore'
+  // Import from URL
+  | 'before:import' | 'after:import' | 'error:import'
+  // Presigned uploads
+  | 'before:presignedUpload' | 'after:presignedUpload'
+  | 'before:confirmUpload' | 'after:confirmUpload'
+  // Folder operations
+  | 'before:rename' | 'after:rename'
+  // Processing
+  | 'before:validate' | 'after:process';
 ```
 
+---
+
 ### EventListener
+
+Event listener function. Can be synchronous or async -- async listeners are awaited.
 
 ```typescript
 type EventListener<T = unknown> = (payload: T) => void | Promise<void>;
 ```
 
-## Context Types
+Listeners can return `Promise<void>` and will be awaited.
 
-### OperationContext
+---
+
+### Unsubscribe
+
+Returned by `on()`. Call to remove the listener.
 
 ```typescript
-interface OperationContext {
-  userId?: string;
-  organizationId?: string;
-  [key: string]: any;
+type Unsubscribe = () => void;
+```
+
+`on()` returns an unsubscribe function instead of `void`.
+
+---
+
+### EventContext
+
+Payload for `before:*` events.
+
+```typescript
+interface EventContext<T = unknown> {
+  data: T;
+  context?: OperationContext;
+  timestamp: Date;
 }
+```
+
+---
+
+### EventResult
+
+Payload for `after:*` events.
+
+```typescript
+interface EventResult<T = unknown, R = unknown> {
+  context: EventContext<T>;
+  result: R;
+  timestamp: Date;
+}
+```
+
+---
+
+### EventError
+
+Payload for `error:*` events.
+
+```typescript
+interface EventError<T = unknown> {
+  context: EventContext<T>;
+  error: Error;
+  timestamp: Date;
+}
+```
+
+## Transform Types
+
+Framework-agnostic asset transform types for on-the-fly image transformation endpoints.
+
+### TransformParams
+
+Query parameters for transform requests.
+
+```typescript
+interface TransformParams {
+  w?: number;
+  h?: number;
+  fit?: 'cover' | 'contain' | 'fill' | 'inside' | 'outside';
+  format?: 'webp' | 'avif' | 'jpeg' | 'png' | 'auto';
+  q?: number;
+  download?: boolean;
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `w` | `number` | Target width |
+| `h` | `number` | Target height |
+| `fit` | `string` | Fit mode |
+| `format` | `string` | Output format (`'auto'` resolves from Accept header) |
+| `q` | `number` | Quality (1-100) |
+| `download` | `boolean` | Force download (`Content-Disposition: attachment`) |
+
+---
+
+### TransformRequest
+
+```typescript
+interface TransformRequest {
+  fileId: string;
+  params: TransformParams;
+  accept?: string;
+  range?: string;
+}
+```
+
+---
+
+### TransformResponse
+
+```typescript
+interface TransformResponse {
+  stream: NodeJS.ReadableStream;
+  contentType: string;
+  contentLength?: number;
+  status: number;
+  headers: Record<string, string>;
+}
+```
+
+---
+
+### TransformCache
+
+Pluggable cache interface for transform results.
+
+```typescript
+interface TransformCache {
+  get(cacheKey: string): Promise<{ stream: NodeJS.ReadableStream; contentType: string } | null>;
+  set(cacheKey: string, data: Buffer, contentType: string): Promise<void>;
+  invalidate(fileId: string): Promise<void>;
+}
+```
+
+## MediaKit Instance Type
+
+### MediaKit
+
+The main instance interface returned by `createMedia()`.
+
+```typescript
+interface MediaKit {
+  readonly config: MediaKitConfig;
+  readonly driver: StorageDriver;
+  readonly schema: Schema<IMediaDocument>;
+  readonly repository: MediaRepository;
+
+  init(model: MediaModel): this;
+
+  // Events
+  on<T = unknown>(event: MediaEventName, listener: EventListener<T>): Unsubscribe;
+  emit<T = unknown>(event: MediaEventName, payload: T): Promise<void>;
+
+  // Core operations
+  upload(input: UploadInput, context?: OperationContext): Promise<IMediaDocument>;
+  uploadMany(inputs: UploadInput[], context?: OperationContext): Promise<IMediaDocument[]>;
+  delete(id: string, context?: OperationContext): Promise<boolean>;
+  deleteMany(ids: string[], context?: OperationContext): Promise<BulkResult>;
+  move(ids: string[], targetFolder: string, context?: OperationContext): Promise<{ modifiedCount: number }>;
+
+  // File replacement
+  replace(id: string, input: UploadInput, context?: OperationContext): Promise<IMediaDocument>;
+
+  // Soft deletes
+  softDelete(id: string, context?: OperationContext): Promise<IMediaDocument>;
+  restore(id: string, context?: OperationContext): Promise<IMediaDocument>;
+  purgeDeleted(olderThan?: Date, context?: OperationContext): Promise<number>;
+
+  // URL import
+  importFromUrl(url: string, options?: ImportOptions, context?: OperationContext): Promise<IMediaDocument>;
+
+  // Tags
+  addTags(id: string, tags: string[], context?: OperationContext): Promise<IMediaDocument>;
+  removeTags(id: string, tags: string[], context?: OperationContext): Promise<IMediaDocument>;
+
+  // Focal point
+  setFocalPoint(id: string, focalPoint: FocalPoint, context?: OperationContext): Promise<IMediaDocument>;
+
+  // Queries
+  getById(id: string, context?: OperationContext): Promise<IMediaDocument | null>;
+  getAll(params?: { ... }, context?: OperationContext): Promise<OffsetPaginationResult | KeysetPaginationResult>;
+  search(query: string, params?: { ... }, context?: OperationContext): Promise<OffsetPaginationResult | KeysetPaginationResult>;
+
+  // Presigned uploads
+  getSignedUploadUrl(filename: string, contentType: string, options?: { ... }): Promise<PresignedUploadResult>;
+  confirmUpload(input: ConfirmUploadInput, context?: OperationContext): Promise<IMediaDocument>;
+
+  // Folder operations
+  getFolderTree(context?: OperationContext): Promise<FolderTree>;
+  getFolderStats(folder: string, context?: OperationContext): Promise<FolderStats>;
+  getBreadcrumb(folder: string): BreadcrumbItem[];
+  deleteFolder(folder: string, context?: OperationContext): Promise<BulkResult>;
+  renameFolder(oldPath: string, newPath: string, context?: OperationContext): Promise<{ modifiedCount: number }>;
+  getSubfolders(parentPath: string, context?: OperationContext): Promise<FolderNode[]>;
+
+  // Utilities
+  validateFile(buffer: Buffer, filename: string, mimeType: string): void;
+  getContentType(folder: string): string;
+}
+```
+
+## Re-exported Mongokit Types
+
+The following types are re-exported from `@classytic/mongokit` for convenience:
+
+```typescript
+export type {
+  // Pagination
+  PaginationConfig,
+  OffsetPaginationResult,
+  KeysetPaginationResult,
+  AggregatePaginationResult,
+  PaginationResult,
+  SortSpec,
+  SortDirection,
+  PopulateSpec,
+  SelectSpec,
+
+  // Repository
+  RepositoryContext,
+  RepositoryEvent,
+  EventPayload,
+
+  // Plugins
+  Plugin,
+  PluginFunction,
+  PluginType,
+
+  // Cache
+  CacheAdapter,
+  CacheOptions,
+  CacheOperationOptions,
+
+  // Operations
+  OperationOptions,
+  CreateOptions,
+  UpdateOptions,
+  DeleteResult,
+
+  // Error
+  HttpError,
+} from '@classytic/mongokit';
 ```
 
 ## Usage Example
 
 ```typescript
+import { createMedia } from '@classytic/media-kit';
+import { S3Provider } from '@classytic/media-kit/providers/s3';
 import type {
   MediaKitConfig,
-  MediaKit,
   IMediaDocument,
   UploadInput,
-  StorageProvider,
-  UploadResult,
+  OperationContext,
+  StorageDriver,
+  FocalPoint,
 } from '@classytic/media-kit';
 
 const config: MediaKitConfig = {
-  provider: myProvider,
+  driver: new S3Provider({
+    bucket: 'my-uploads',
+    region: 'us-east-1',
+  }),
   folders: {
-    baseFolders: ['images', 'documents'],
-    defaultFolder: 'images',
+    defaultFolder: 'general',
+  },
+  deduplication: {
+    enabled: true,
+    algorithm: 'sha256',
+  },
+  softDelete: {
+    enabled: true,
+    ttlDays: 30,
   },
 };
 
@@ -246,12 +1003,20 @@ const input: UploadInput = {
   buffer: fileBuffer,
   filename: 'photo.jpg',
   mimeType: 'image/jpeg',
+  tags: ['product', 'hero'],
+  description: 'Main hero image',
+  focalPoint: { x: 0.5, y: 0.3 },
 };
 
-const file: IMediaDocument = await media.upload(input);
+const ctx: OperationContext = {
+  userId: 'user_123',
+  organizationId: 'org_456',
+};
+
+const file: IMediaDocument = await media.upload(input, ctx);
 ```
 
 ## Next Steps
 
-- [MediaKit API](./media-kit.mdx) - Core API reference
-- [Providers API](./providers.mdx) - Storage providers
+- [MediaKit API](./media-kit.mdx) -- Core API reference
+- [Drivers Reference](./providers.mdx) -- Storage driver implementations

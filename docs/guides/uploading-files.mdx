@@ -1,6 +1,6 @@
 # Uploading Files
 
-Learn different ways to upload files.
+Learn different ways to upload files with Media Kit.
 
 ## Single File Upload
 
@@ -12,14 +12,16 @@ const file = await media.upload({
   folder: 'images',
 });
 
-console.log(file.url);   // CDN URL
-console.log(file.key);   // Storage key
-console.log(file.size);  // File size in bytes
+console.log(file.url);       // CDN URL
+console.log(file.key);       // Storage key
+console.log(file.size);      // File size in bytes
+console.log(file.status);    // 'ready'
+console.log(file.hash);      // SHA-256 content hash
 ```
 
 ## With Metadata
 
-Add custom metadata:
+Add tags, description, and focal point:
 
 ```typescript
 const file = await media.upload({
@@ -27,14 +29,17 @@ const file = await media.upload({
   filename: 'product.jpg',
   mimeType: 'image/jpeg',
 
-  // Custom fields
+  // Display fields
   title: 'Red Running Shoes',
   alt: 'Red sneakers on white background',
-  caption: 'New arrival - 2024 collection',
+  description: 'New arrival - 2024 collection',
 
   // Organization
   folder: 'products',
-  organizationId: 'org_123',
+  tags: ['shoes', 'new-arrival', 'red'],
+
+  // Smart cropping anchor
+  focalPoint: { x: 0.5, y: 0.3 },
 });
 ```
 
@@ -64,9 +69,15 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     buffer: req.file.buffer,
     filename: req.file.originalname,
     mimeType: req.file.mimetype,
+    tags: req.body.tags?.split(',') || [],
+    description: req.body.description,
   });
 
-  res.json({ url: file.url });
+  res.json({
+    id: file._id,
+    url: file.url,
+    status: file.status,
+  });
 });
 ```
 
@@ -79,6 +90,7 @@ import { NextRequest, NextResponse } from 'next/server';
 export async function POST(req: NextRequest) {
   const formData = await req.formData();
   const file = formData.get('file') as File;
+  const tags = formData.get('tags') as string;
 
   const buffer = Buffer.from(await file.arrayBuffer());
 
@@ -86,29 +98,125 @@ export async function POST(req: NextRequest) {
     buffer,
     filename: file.name,
     mimeType: file.type,
+    tags: tags?.split(',') || [],
   });
 
-  return NextResponse.json({ url: uploaded.url });
+  return NextResponse.json({
+    url: uploaded.url,
+    status: uploaded.status,
+  });
 }
 ```
 
-## With File Validation
+## File Replacement
+
+Replace the content of an existing file while keeping the same ID and URL:
 
 ```typescript
-// Validate before upload
-if (file.size > 5 * 1024 * 1024) {
-  throw new Error('File too large (max 5MB)');
-}
-
-if (!file.mimetype.startsWith('image/')) {
-  throw new Error('Only images allowed');
-}
-
-const uploaded = await media.upload({
-  buffer: file.buffer,
-  filename: file.originalname,
-  mimeType: file.mimetype,
+const updated = await media.replace(existingFileId, {
+  buffer: newBuffer,
+  filename: 'product-v2.jpg',
+  mimeType: 'image/jpeg',
 });
+
+// Same _id, updated content
+console.log(updated._id);    // Same as before
+console.log(updated.hash);   // New hash
+console.log(updated.status); // 'ready'
+```
+
+## Import from URL
+
+Import a file directly from a URL:
+
+```typescript
+const file = await media.importFromUrl(
+  'https://example.com/image.jpg',
+  {
+    folder: 'imports',
+    title: 'Imported Image',
+    tags: ['imported', 'external'],
+  }
+);
+
+console.log(file.url);              // Your CDN URL
+console.log(file.originalFilename); // 'image.jpg'
+```
+
+## Soft Delete and Restore
+
+When soft deletes are enabled, files are marked as deleted rather than permanently removed:
+
+```typescript
+// Soft delete (marks deletedAt, excluded from queries)
+const trashed = await media.softDelete(fileId);
+console.log(trashed.deletedAt); // Date
+
+// Restore from trash
+const restored = await media.restore(fileId);
+console.log(restored.deletedAt); // null
+
+// Permanently remove expired soft-deleted files
+const purgedCount = await media.purgeDeleted();
+```
+
+## Tags
+
+Manage tags on existing files:
+
+```typescript
+// Add tags
+await media.addTags(fileId, ['featured', 'hero']);
+
+// Remove tags
+await media.removeTags(fileId, ['draft']);
+```
+
+## Focal Point
+
+Set a focal point for smart cropping:
+
+```typescript
+await media.setFocalPoint(fileId, { x: 0.3, y: 0.2 });
+```
+
+The focal point is used when generating cropped variants to keep the subject in frame. Values range from `0.0` to `1.0` (normalized coordinates).
+
+## With Context
+
+Pass request context (user, organization):
+
+```typescript
+const file = await media.upload(
+  {
+    buffer: fileBuffer,
+    filename: 'document.pdf',
+    mimeType: 'application/pdf',
+  },
+  {
+    userId: req.user.id,
+    organizationId: req.user.organizationId,
+  }
+);
+```
+
+## Multi-Tenant Upload
+
+Upload files scoped to an organization:
+
+```typescript
+const file = await media.upload(
+  {
+    buffer: fileBuffer,
+    filename: 'logo.png',
+    mimeType: 'image/png',
+  },
+  {
+    organizationId: req.user.organizationId,
+  }
+);
+
+// File is isolated to this organization
 ```
 
 ## Auto Alt Text
@@ -136,39 +244,6 @@ const file = await media.upload({
 });
 ```
 
-## Multi-Tenant Upload
-
-Upload files scoped to an organization:
-
-```typescript
-const file = await media.upload({
-  buffer: fileBuffer,
-  filename: 'logo.png',
-  mimeType: 'image/png',
-  organizationId: req.user.organizationId,
-});
-
-// File is isolated to this organization
-```
-
-## With Context
-
-Pass request context (user, permissions):
-
-```typescript
-const file = await media.upload(
-  {
-    buffer: fileBuffer,
-    filename: 'document.pdf',
-    mimeType: 'application/pdf',
-  },
-  {
-    userId: req.user.id,
-    organizationId: req.user.organizationId,
-  }
-);
-```
-
 ## Error Handling
 
 ```typescript
@@ -186,6 +261,36 @@ try {
   } else {
     // Handle other errors
   }
+}
+```
+
+## Upload Result
+
+A successful upload returns an `IMediaDocument` with these fields:
+
+```typescript
+{
+  _id: ObjectId,
+  filename: string,          // Sanitized storage filename
+  originalFilename: string,  // Original name as uploaded
+  title: string,             // Display title
+  key: string,               // Storage key/path
+  url: string,               // Public URL
+  mimeType: string,
+  size: number,              // Bytes
+  hash: string,              // SHA-256 content hash
+  status: 'ready',           // Status lifecycle
+  folder: string,
+  tags: string[],
+  alt?: string,
+  description?: string,
+  width?: number,            // Image only
+  height?: number,           // Image only
+  focalPoint?: { x, y },
+  variants: [],              // Generated size variants
+  deletedAt: null,
+  createdAt: Date,
+  updatedAt: Date,
 }
 ```
 

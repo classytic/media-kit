@@ -1,21 +1,17 @@
 # Installation
 
-## Basic Install (Local Storage)
-
-For local file storage only:
+## Basic Install
 
 ```bash
-npm install @classytic/media-kit mongoose mime-types
+npm install @classytic/media-kit @classytic/mongokit mongoose
 ```
-
-That's it! The library works without any optional dependencies.
 
 ## With Image Processing
 
-For automatic resizing and thumbnails:
+For automatic resizing, thumbnails, and format conversion:
 
 ```bash
-npm install @classytic/media-kit mongoose mime-types sharp
+npm install @classytic/media-kit @classytic/mongokit mongoose sharp
 ```
 
 ## With Cloud Storage
@@ -23,26 +19,36 @@ npm install @classytic/media-kit mongoose mime-types sharp
 ### AWS S3
 
 ```bash
-npm install @classytic/media-kit mongoose mime-types @aws-sdk/client-s3
+npm install @classytic/media-kit @classytic/mongokit mongoose @aws-sdk/client-s3 @aws-sdk/s3-request-presigner
 ```
 
 ### Google Cloud Storage
 
 ```bash
-npm install @classytic/media-kit mongoose mime-types @google-cloud/storage
+npm install @classytic/media-kit @classytic/mongokit mongoose @google-cloud/storage
 ```
 
-### With Everything
+### Everything
 
 ```bash
-npm install @classytic/media-kit mongoose mime-types sharp @aws-sdk/client-s3 @google-cloud/storage
+npm install @classytic/media-kit @classytic/mongokit mongoose sharp @aws-sdk/client-s3 @aws-sdk/s3-request-presigner @google-cloud/storage
 ```
 
 ## Requirements
 
 - **Node.js**: 18.0.0 or higher
 - **Mongoose**: 8.x or 9.x
+- **@classytic/mongokit**: 3.2.0 or higher
 - **MongoDB**: Any version supported by Mongoose
+
+## Optional Peer Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `sharp` | Image processing (resize, optimize, format conversion) |
+| `@aws-sdk/client-s3` | AWS S3 storage |
+| `@aws-sdk/s3-request-presigner` | S3 presigned URLs |
+| `@google-cloud/storage` | Google Cloud Storage |
 
 ## Verify Installation
 

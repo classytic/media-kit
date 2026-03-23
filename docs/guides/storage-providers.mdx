@@ -1,50 +1,10 @@
-# Storage Providers
+# Storage Drivers
 
-Choose where your files are stored.
-
-## Local Storage
-
-Store files on your server's filesystem.
-
-### Basic Setup
-
-```typescript
-import { LocalStorageProvider } from '@classytic/media-kit';
-
-const provider = new LocalStorageProvider({
-  uploadDir: './public/uploads',
-  publicUrl: 'http://localhost:3000/uploads',
-});
-```
-
-### With Static File Serving
-
-```typescript
-import express from 'express';
-
-const app = express();
-
-// Serve uploaded files
-app.use('/uploads', express.static('./public/uploads'));
-
-const provider = new LocalStorageProvider({
-  uploadDir: './public/uploads',
-  publicUrl: 'http://localhost:3000/uploads',
-});
-```
-
-### Production CDN
-
-```typescript
-const provider = new LocalStorageProvider({
-  uploadDir: '/var/www/uploads',
-  publicUrl: 'https://cdn.example.com',
-});
-```
+Choose where your files are stored. Storage backends implement the `StorageDriver` interface.
 
 ## AWS S3
 
-Store files in Amazon S3.
+Store files in Amazon S3 or any S3-compatible service (MinIO, Cloudflare R2, DigitalOcean Spaces).
 
 ### Setup
 
@@ -57,7 +17,7 @@ npm install @aws-sdk/client-s3
 ```typescript
 import { S3Provider } from '@classytic/media-kit/providers/s3';
 
-const provider = new S3Provider({
+const driver = new S3Provider({
   bucket: 'my-bucket',
   region: 'us-east-1',
   credentials: {
@@ -69,18 +29,20 @@ const provider = new S3Provider({
 
 ### With IAM Roles
 
+On EC2, ECS, or Lambda, credentials are automatically loaded from the IAM role:
+
 ```typescript
-const provider = new S3Provider({
+const driver = new S3Provider({
   bucket: 'my-bucket',
   region: 'us-east-1',
-  // Credentials auto-loaded from IAM role
+  // No credentials needed — auto-loaded from IAM role
 });
 ```
 
-### With CloudFront
+### With CloudFront CDN
 
 ```typescript
-const provider = new S3Provider({
+const driver = new S3Provider({
   bucket: 'my-bucket',
   region: 'us-east-1',
   publicUrl: 'https://d111111abcdef8.cloudfront.net',
@@ -89,10 +51,10 @@ const provider = new S3Provider({
 
 ### Custom S3 Endpoint
 
-For S3-compatible services (MinIO, DigitalOcean Spaces):
+For S3-compatible services (MinIO, DigitalOcean Spaces, Cloudflare R2):
 
 ```typescript
-const provider = new S3Provider({
+const driver = new S3Provider({
   bucket: 'my-bucket',
   region: 'nyc3',
   endpoint: 'https://nyc3.digitaloceanspaces.com',
@@ -103,6 +65,18 @@ const provider = new S3Provider({
   },
 });
 ```
+
+### S3 Config Reference
+
+| Option | Type | Description |
+|---|---|---|
+| `bucket` | `string` | S3 bucket name (required) |
+| `region` | `string` | AWS region (required) |
+| `credentials` | `object` | `{ accessKeyId, secretAccessKey }` |
+| `endpoint` | `string` | Custom endpoint URL (S3-compatible services) |
+| `publicUrl` | `string` | CDN URL override |
+| `acl` | `string` | `'private'`, `'public-read'`, or `'authenticated-read'` |
+| `forcePathStyle` | `boolean` | Use path-style URLs (required for some S3-compatible services) |
 
 ## Google Cloud Storage
 
@@ -119,7 +93,7 @@ npm install @google-cloud/storage
 ```typescript
 import { GCSProvider } from '@classytic/media-kit/providers/gcs';
 
-const provider = new GCSProvider({
+const driver = new GCSProvider({
   bucket: 'my-bucket',
   projectId: 'my-project',
   credentials: {
@@ -129,10 +103,10 @@ const provider = new GCSProvider({
 });
 ```
 
-### With Service Account
+### With Service Account File
 
 ```typescript
-const provider = new GCSProvider({
+const driver = new GCSProvider({
   bucket: 'my-bucket',
   keyFilename: './service-account.json',
 });
@@ -141,99 +115,201 @@ const provider = new GCSProvider({
 ### With CDN
 
 ```typescript
-const provider = new GCSProvider({
+const driver = new GCSProvider({
   bucket: 'my-bucket',
   publicUrl: 'https://cdn.example.com',
 });
 ```
 
-## Custom Provider
-
-Create your own storage provider:
+### With Retry Configuration
 
 ```typescript
-import { StorageProvider, UploadResult } from '@classytic/media-kit';
+const driver = new GCSProvider({
+  bucket: 'my-bucket',
+  keyFilename: './service-account.json',
+  retry: {
+    maxRetries: 5,
+    baseDelay: 200,
+    maxDelay: 10000,
+    backoffMultiplier: 2,
+  },
+});
+```
 
-class CustomProvider implements StorageProvider {
+### GCS Config Reference
+
+| Option | Type | Description |
+|---|---|---|
+| `bucket` | `string` | GCS bucket name (required) |
+| `projectId` | `string` | Google Cloud project ID |
+| `keyFilename` | `string` | Path to service account JSON file |
+| `credentials` | `object` | `{ client_email, private_key }` |
+| `publicUrl` | `string` | CDN URL override |
+| `makePublic` | `boolean` | Make uploaded files publicly accessible (default: `true`) |
+| `retry` | `RetryOptions` | Retry configuration for transient failures |
+
+## Driver Methods
+
+Both S3 and GCS drivers implement the full `StorageDriver` interface.
+
+### Core Methods (required)
+
+Every storage driver must implement these:
+
+```typescript
+interface StorageDriver {
+  readonly name: string;
+
+  // Write a file to storage (Buffer or ReadableStream)
+  write(key: string, data: Buffer | NodeJS.ReadableStream, contentType: string): Promise<WriteResult>;
+
+  // Read a file as a stream (with optional byte-range)
+  read(key: string, range?: { start: number; end: number }): Promise<NodeJS.ReadableStream>;
+
+  // Get file metadata without downloading
+  stat(key: string): Promise<FileStat>;
+
+  // Check if a file exists
+  exists(key: string): Promise<boolean>;
+
+  // Delete a file
+  delete(key: string): Promise<boolean>;
+
+  // Build public URL for a key
+  getPublicUrl(key: string): string;
+}
+```
+
+### Optional Methods
+
+Drivers can optionally implement these for advanced features:
+
+```typescript
+interface StorageDriver {
+  // List files under a prefix (async generator)
+  list?(prefix: string): AsyncIterable<string>;
+
+  // Copy a file within the same bucket
+  copy?(source: string, destination: string): Promise<WriteResult>;
+
+  // Move a file (copy + delete)
+  move?(source: string, destination: string): Promise<WriteResult>;
+
+  // Get signed URL for private file reads
+  getSignedUrl?(key: string, expiresIn?: number): Promise<string>;
+
+  // Get presigned URL for direct browser uploads
+  getSignedUploadUrl?(key: string, contentType: string, expiresIn?: number): Promise<PresignedUploadResult>;
+}
+```
+
+### Return Types
+
+```typescript
+interface WriteResult {
+  key: string;   // Storage key/path
+  url: string;   // Public URL
+  size: number;  // File size in bytes
+}
+
+interface FileStat {
+  size: number;
+  contentType: string;
+  lastModified?: Date;
+  etag?: string;
+  metadata?: Record<string, string>;
+}
+```
+
+## Custom Driver
+
+Create your own storage driver by implementing the `StorageDriver` interface:
+
+```typescript
+import type { StorageDriver, WriteResult, FileStat } from '@classytic/media-kit';
+
+class CustomDriver implements StorageDriver {
   readonly name = 'custom';
 
-  async upload(
-    buffer: Buffer,
-    filename: string,
-    options?: any
-  ): Promise<UploadResult> {
-    // Your upload logic
-    const key = `${options.folder}/${filename}`;
-    const url = `https://my-cdn.com/${key}`;
-
-    // Upload buffer to your storage...
+  async write(
+    key: string,
+    data: Buffer | NodeJS.ReadableStream,
+    contentType: string
+  ): Promise<WriteResult> {
+    // Write data to your storage backend...
+    const size = Buffer.isBuffer(data) ? data.length : 0;
 
     return {
-      url,
       key,
-      size: buffer.length,
-      mimeType: options.mimeType,
+      url: this.getPublicUrl(key),
+      size,
     };
   }
 
-  async delete(key: string): Promise<boolean> {
-    // Your delete logic
-    return true;
+  async read(key: string): Promise<NodeJS.ReadableStream> {
+    // Return a readable stream for the file...
+  }
+
+  async stat(key: string): Promise<FileStat> {
+    // Return file metadata...
+    return {
+      size: 0,
+      contentType: 'application/octet-stream',
+    };
   }
 
   async exists(key: string): Promise<boolean> {
-    // Your exists check
+    // Check if file exists...
     return true;
+  }
+
+  async delete(key: string): Promise<boolean> {
+    // Delete the file...
+    return true;
+  }
+
+  getPublicUrl(key: string): string {
+    return `https://my-cdn.com/${key}`;
   }
 }
 
-const provider = new CustomProvider();
-```
-
-## Switching Providers
-
-Easily switch between providers:
-
-```typescript
-// Development - Local
-const provider = new LocalStorageProvider({
-  uploadDir: './uploads',
-  publicUrl: 'http://localhost:3000/uploads',
+// Use it
+const media = createMedia({
+  driver: new CustomDriver(),
 });
-
-// Production - S3
-const provider = new S3Provider({
-  bucket: process.env.S3_BUCKET,
-  region: process.env.S3_REGION,
-});
-
-// Everything else stays the same
-const media = createMedia({ provider });
 ```
 
 ## Environment-Based Selection
 
-```typescript
-function getProvider() {
-  if (process.env.NODE_ENV === 'production') {
-    return new S3Provider({
-      bucket: process.env.S3_BUCKET,
-      region: process.env.S3_REGION,
-    });
-  }
+Select a driver based on your environment:
 
-  return new LocalStorageProvider({
-    uploadDir: './uploads',
-    publicUrl: 'http://localhost:3000/uploads',
-  });
+```typescript
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+import { GCSProvider } from '@classytic/media-kit/providers/gcs';
+
+function getDriver() {
+  switch (process.env.STORAGE_DRIVER) {
+    case 'gcs':
+      return new GCSProvider({
+        bucket: process.env.GCS_BUCKET,
+        keyFilename: process.env.GCS_KEY_FILE,
+      });
+    case 's3':
+    default:
+      return new S3Provider({
+        bucket: process.env.S3_BUCKET,
+        region: process.env.S3_REGION,
+      });
+  }
 }
 
 const media = createMedia({
-  provider: getProvider(),
+  driver: getDriver(),
 });
 ```
 
 ## Next Steps
 
 - [Events](./events.mdx) - Hook into storage operations
-- [API Reference](../api/providers.mdx) - Full provider API
+- [Uploading Files](./uploading-files.mdx) - Upload methods
+- [API Reference](../api/providers.mdx) - Full driver API

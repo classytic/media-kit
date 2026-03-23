@@ -6,10 +6,10 @@ Customize Media Kit to fit your needs.
 
 ```typescript
 const media = createMedia({
-  provider: myProvider,
+  driver: myDriver,
   folders: {
-    baseFolders: ['images', 'documents', 'videos'],
-    defaultFolder: 'images',
+    defaultFolder: 'uploads',
+    enableSubfolders: true,
   },
   fileTypes: {
     allowed: ['image/*', 'application/pdf'],
@@ -20,23 +20,28 @@ const media = createMedia({
 
 ## Options Reference
 
-### `provider` (required)
+### `driver` (required)
 
-Storage provider instance (S3, GCS, or Local).
+Storage driver instance. S3 and GCS are included; you can also implement a custom driver.
 
 ```typescript
-provider: new S3Provider({ bucket: 'my-bucket' })
+driver: new S3Provider({ bucket: 'my-bucket', region: 'us-east-1' })
 ```
+
+See [Storage Drivers](../guides/storage-providers.mdx) for all options.
 
 ### `folders`
 
-Organize files into folders.
+Organize files into folders. Folders are free-form -- there is no `baseFolders` restriction.
 
 ```typescript
 folders: {
-  baseFolders: ['images', 'docs'],  // Allowed folders
-  defaultFolder: 'images',           // Default if not specified
-  enableSubfolders: true,            // Allow nested folders
+  defaultFolder: 'general',     // Default folder if not specified
+  enableSubfolders: true,        // Allow nested folder paths (default: true)
+  contentTypeMap: {              // Map folder patterns to content types
+    'products/*': ['image/*'],
+    'documents': ['application/pdf'],
+  },
 }
 ```
 
@@ -47,7 +52,7 @@ Control what files can be uploaded.
 ```typescript
 fileTypes: {
   allowed: ['image/*', 'video/*'],   // MIME patterns
-  maxSize: 5 * 1024 * 1024,          // 5MB max
+  maxSize: 50 * 1024 * 1024,         // 50MB max (default: 100MB)
 }
 ```
 
@@ -57,34 +62,71 @@ Image processing options (requires `sharp`).
 
 ```typescript
 processing: {
-  enabled: true,
-  quality: 80,
-  format: 'webp',
-  maxWidth: 2000,
-  generateAlt: true,  // Auto-generate alt text
-  sizes: [            // Generate multiple sizes
+  enabled: true,                  // Enable processing (default: true)
+  quality: 80,                    // Output quality 1-100 (default: 80)
+  format: 'webp',                 // Output format (default: 'webp')
+  maxWidth: 2048,                 // Max width in pixels (default: 2048)
+  generateAlt: true,              // Auto-generate alt text from filename
+  sizes: [                        // Generate multiple size variants
     { name: 'thumbnail', width: 150, height: 150 },
     { name: 'medium', width: 800 },
-    { name: 'large', width: 1200 },
+    { name: 'large', width: 1600 },
+    {
+      name: 'hero',
+      width: 1920,
+      // Conditional variant -- only generated when source is wide enough
+      condition: (original) => original.width >= 1920,
+    },
   ],
+  sharpOptions: {                 // Sharp performance tuning
+    concurrency: 2,               // Concurrent processing threads
+    cache: false,                  // Disable Sharp internal cache
+  },
 }
 ```
 
-### `multitenancy`
+### `multiTenancy`
 
-Isolate files by organization/tenant.
+Isolate files by organization or tenant.
 
 ```typescript
-multitenancy: {
+multiTenancy: {
   enabled: true,
-  organizationField: 'organizationId',  // Field name
-  enforceIsolation: true,                // Strict isolation
+  field: 'organizationId',    // Field name on the document (default)
+  required: false,             // Require org ID on all operations
 }
 ```
+
+### `deduplication`
+
+Prevent duplicate file uploads using content hashing.
+
+```typescript
+deduplication: {
+  enabled: true,               // Enable dedup (default: false)
+  returnExisting: true,        // Return existing file instead of re-uploading (default: true)
+  algorithm: 'sha256',         // Hash algorithm: 'md5' or 'sha256' (default)
+}
+```
+
+When enabled, if a file with the same hash already exists, the existing document is returned instead of uploading a duplicate.
+
+### `softDelete`
+
+Enable soft deletes instead of permanent removal.
+
+```typescript
+softDelete: {
+  enabled: true,               // Enable soft deletes (default: false)
+  ttlDays: 30,                 // Auto-purge after N days (default: 30, 0 = never)
+}
+```
+
+Soft-deleted files are marked with a `deletedAt` timestamp and excluded from queries by default. Use `media.restore(id)` to recover them, or `media.purgeDeleted()` to permanently remove expired files.
 
 ### `suppressWarnings`
 
-Hide warnings about missing optional dependencies.
+Hide warnings about missing optional dependencies (like `sharp`).
 
 ```typescript
 suppressWarnings: true  // Useful in production
@@ -97,30 +139,22 @@ import { createMedia } from '@classytic/media-kit';
 import { S3Provider } from '@classytic/media-kit/providers/s3';
 
 const media = createMedia({
-  // Storage
-  provider: new S3Provider({
+  // Storage driver
+  driver: new S3Provider({
     bucket: process.env.S3_BUCKET,
     region: 'us-east-1',
   }),
 
-  // Organization
+  // Folder organization (free-form, no baseFolders)
   folders: {
-    baseFolders: ['images', 'documents', 'videos', 'audio'],
-    defaultFolder: 'images',
+    defaultFolder: 'uploads',
     enableSubfolders: true,
   },
 
-  // Security
+  // File restrictions
   fileTypes: {
     allowed: ['image/*', 'application/pdf', 'video/*'],
     maxSize: 50 * 1024 * 1024, // 50MB
-  },
-
-  // Multi-tenant
-  multitenancy: {
-    enabled: true,
-    organizationField: 'organizationId',
-    enforceIsolation: true,
   },
 
   // Image processing
@@ -128,13 +162,37 @@ const media = createMedia({
     enabled: true,
     quality: 85,
     format: 'webp',
-    maxWidth: 2000,
+    maxWidth: 2048,
     generateAlt: true,
     sizes: [
       { name: 'thumb', width: 200, height: 200 },
       { name: 'medium', width: 800 },
       { name: 'large', width: 1600 },
+      {
+        name: 'hero',
+        width: 1920,
+        condition: (original) => original.width >= 1920,
+      },
     ],
+  },
+
+  // Multi-tenancy
+  multiTenancy: {
+    enabled: true,
+    field: 'organizationId',
+    required: true,
+  },
+
+  // Deduplication
+  deduplication: {
+    enabled: true,
+    algorithm: 'sha256',
+  },
+
+  // Soft deletes
+  softDelete: {
+    enabled: true,
+    ttlDays: 30,
   },
 
   // Production mode
@@ -164,7 +222,7 @@ Load in your app:
 import 'dotenv/config';
 
 const media = createMedia({
-  provider: new S3Provider({
+  driver: new S3Provider({
     bucket: process.env.S3_BUCKET,
     region: process.env.S3_REGION,
   }),

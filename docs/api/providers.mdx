@@ -1,30 +1,126 @@
-# Providers API
+# Storage Drivers
 
-Storage provider reference.
+Storage driver reference for `@classytic/media-kit`.
 
-## StorageProvider Interface
+## StorageDriver Interface
 
-All providers implement this interface:
+All drivers implement this interface. Core methods are required; optional methods enable advanced features like presigned uploads, file listing, and copy/move.
 
 ```typescript
-interface StorageProvider {
+interface StorageDriver {
   readonly name: string;
 
-  upload(
-    buffer: Buffer,
-    filename: string,
-    options?: UploadOptions
-  ): Promise<UploadResult>;
+  // --- Core (required) ---
 
+  /** Write data to storage. Accepts Buffer or ReadableStream. */
+  write(key: string, data: Buffer | NodeJS.ReadableStream, contentType: string): Promise<WriteResult>;
+
+  /** Read a file as a stream. Supports optional byte-range for partial reads. */
+  read(key: string, range?: { start: number; end: number }): Promise<NodeJS.ReadableStream>;
+
+  /** Delete a file by key. */
   delete(key: string): Promise<boolean>;
 
+  /** Check if a file exists. */
   exists(key: string): Promise<boolean>;
+
+  /** Get file metadata without downloading. */
+  stat(key: string): Promise<FileStat>;
+
+  // --- Navigation (optional) ---
+
+  /** List files under a prefix (async generator for memory efficiency). */
+  list?(prefix: string): AsyncIterable<string>;
+
+  /** Copy a file to a new location within the same bucket. */
+  copy?(source: string, destination: string): Promise<WriteResult>;
+
+  /** Move a file to a new location (copy + delete). */
+  move?(source: string, destination: string): Promise<WriteResult>;
+
+  // --- URLs ---
+
+  /** Build the public URL for a given storage key. */
+  getPublicUrl(key: string): string;
+
+  /** Get a temporary signed URL for reading a private file. */
+  getSignedUrl?(key: string, expiresIn?: number): Promise<string>;
+
+  /** Get a presigned URL for direct client-side uploads. */
+  getSignedUploadUrl?(key: string, contentType: string, expiresIn?: number): Promise<PresignedUploadResult>;
+}
+```
+
+### Required Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `write` | `(key, data, contentType) => Promise<WriteResult>` | Write data to storage. The `key` is provided by MediaKit (drivers no longer generate keys). |
+| `read` | `(key, range?) => Promise<ReadableStream>` | Read a file as a stream. The optional `range` parameter enables byte-range reads for video streaming. |
+| `delete` | `(key) => Promise<boolean>` | Delete a file. Returns `true` on success. |
+| `exists` | `(key) => Promise<boolean>` | Check if a file exists at the given key. |
+| `stat` | `(key) => Promise<FileStat>` | Get file metadata (size, content type, last modified, etc.) without downloading. |
+| `getPublicUrl` | `(key) => string` | Build the public URL for a storage key. Synchronous. |
+
+### Optional Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `list` | `(prefix) => AsyncIterable<string>` | List file keys under a prefix. Yields keys as an async iterable for memory efficiency. |
+| `copy` | `(source, destination) => Promise<WriteResult>` | Copy a file within the same bucket. |
+| `move` | `(source, destination) => Promise<WriteResult>` | Move a file (copy + delete). |
+| `getSignedUrl` | `(key, expiresIn?) => Promise<string>` | Generate a temporary signed URL for reading a private file. |
+| `getSignedUploadUrl` | `(key, contentType, expiresIn?) => Promise<PresignedUploadResult>` | Generate a presigned URL for direct client-to-cloud uploads. |
+
+> Both `S3Provider` and `GCSProvider` implement all optional methods.
+
+## Return Types
+
+### WriteResult
+
+Returned from `write()`, `copy()`, and `move()`.
+
+```typescript
+interface WriteResult {
+  key: string;   // Storage key/path
+  url: string;   // Public URL
+  size: number;  // File size in bytes
+}
+```
+
+### FileStat
+
+Returned from `stat()`.
+
+```typescript
+interface FileStat {
+  size: number;                       // File size in bytes
+  contentType: string;                // MIME type
+  lastModified?: Date;                // Last modified timestamp
+  etag?: string;                      // Entity tag (cache validation)
+  metadata?: Record<string, string>;  // Custom metadata key-value pairs
+}
+```
+
+### PresignedUploadResult
+
+Returned from `getSignedUploadUrl()`.
+
+```typescript
+interface PresignedUploadResult {
+  uploadUrl: string;                  // Presigned URL to PUT the file to
+  key: string;                        // Storage key assigned to the file
+  publicUrl: string;                  // Public URL after upload completes
+  expiresIn: number;                  // Seconds until the URL expires
+  headers?: Record<string, string>;   // Headers the client must include with PUT
 }
 ```
 
 ## S3Provider
 
-AWS S3 storage provider.
+AWS S3 storage driver. Also works with S3-compatible services (MinIO, Cloudflare R2, DigitalOcean Spaces, Backblaze B2).
+
+Requires `@aws-sdk/client-s3` and `@aws-sdk/s3-request-presigner` as peer dependencies. The SDK is lazy-loaded on first use.
 
 ### Import
 
@@ -35,41 +131,109 @@ import { S3Provider } from '@classytic/media-kit/providers/s3';
 ### Constructor
 
 ```typescript
-new S3Provider(config: S3Config)
+new S3Provider(config: S3ProviderConfig)
 ```
 
 ### Config
 
 ```typescript
-{
-  bucket: string,              // S3 bucket name
-  region: string,              // AWS region
+interface S3ProviderConfig {
+  /** S3 bucket name (required) */
+  bucket: string;
+  /** AWS region (required) */
+  region: string;
+  /** AWS credentials */
   credentials?: {
-    accessKeyId: string,
-    secretAccessKey: string,
-  },
-  endpoint?: string,           // Custom endpoint (for S3-compatible)
-  forcePathStyle?: boolean,    // Path-style URLs
-  publicUrl?: string,          // Custom CDN URL
+    accessKeyId: string;
+    secretAccessKey: string;
+  };
+  /** Custom endpoint for S3-compatible services (MinIO, R2, etc.) */
+  endpoint?: string;
+  /** Custom public URL (CDN) */
+  publicUrl?: string;
+  /** Canned ACL for uploaded files */
+  acl?: 'private' | 'public-read' | 'authenticated-read';
+  /** Force path-style URLs (required for some S3-compatible services) */
+  forcePathStyle?: boolean;
 }
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `bucket` | `string` | Yes | S3 bucket name |
+| `region` | `string` | Yes | AWS region |
+| `credentials` | `object` | No | AWS access key credentials. Falls back to default AWS credential chain if omitted. |
+| `endpoint` | `string` | No | Custom endpoint for S3-compatible services |
+| `publicUrl` | `string` | No | Custom CDN URL prefix for public URLs |
+| `acl` | `string` | No | Canned ACL applied to uploaded files |
+| `forcePathStyle` | `boolean` | No | Use path-style URLs (`endpoint/bucket/key` instead of `bucket.endpoint/key`) |
+
+### Features
+
+- Automatic retry with exponential backoff on transient failures
+- Lazy SDK initialization (fails gracefully with clear error message)
+- Accepts both Buffer and ReadableStream in `write()`
+- Byte-range reads for video streaming support
+- Automatic URL extraction from full URLs or plain keys
+- Async generator `list()` with S3 pagination
 
 ### Example
 
 ```typescript
-const provider = new S3Provider({
+import { createMedia } from '@classytic/media-kit';
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+
+// AWS S3
+const s3 = new S3Provider({
   bucket: 'my-uploads',
   region: 'us-east-1',
   credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
   },
 });
+
+// Cloudflare R2
+const r2 = new S3Provider({
+  bucket: 'my-bucket',
+  region: 'auto',
+  endpoint: 'https://<account-id>.r2.cloudflarestorage.com',
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+  },
+  forcePathStyle: true,
+  publicUrl: 'https://cdn.example.com',
+});
+
+// MinIO (self-hosted)
+const minio = new S3Provider({
+  bucket: 'media',
+  region: 'us-east-1',
+  endpoint: 'http://localhost:9000',
+  credentials: {
+    accessKeyId: 'minioadmin',
+    secretAccessKey: 'minioadmin',
+  },
+  forcePathStyle: true,
+});
+
+const media = createMedia({ driver: s3 });
 ```
+
+### Public URL Resolution
+
+The `getPublicUrl()` method resolves URLs in this order:
+
+1. `publicUrl` config (if set): `${publicUrl}/${key}`
+2. `endpoint` config (if set): `${endpoint}/${bucket}/${key}`
+3. Default: `https://${bucket}.s3.${region}.amazonaws.com/${key}`
 
 ## GCSProvider
 
-Google Cloud Storage provider.
+Google Cloud Storage driver with full feature parity with S3Provider.
+
+Requires `@google-cloud/storage` as a peer dependency. The SDK is lazy-loaded on first use.
 
 ### Import
 
@@ -80,130 +244,175 @@ import { GCSProvider } from '@classytic/media-kit/providers/gcs';
 ### Constructor
 
 ```typescript
-new GCSProvider(config: GCSConfig)
+new GCSProvider(config: GCSProviderConfig)
 ```
 
 ### Config
 
 ```typescript
-{
-  bucket: string,              // GCS bucket name
-  projectId?: string,          // Google Cloud project ID
-  keyFilename?: string,        // Path to service account key
+interface GCSProviderConfig {
+  /** GCS bucket name (required) */
+  bucket: string;
+  /** Google Cloud project ID */
+  projectId?: string;
+  /** Path to service account key file */
+  keyFilename?: string;
+  /** Service account credentials object */
   credentials?: {
-    client_email: string,
-    private_key: string,
-  },
-  publicUrl?: string,          // Custom CDN URL
+    client_email: string;
+    private_key: string;
+  };
+  /** Custom public URL (CDN) */
+  publicUrl?: string;
+  /** Make files publicly accessible (default: true) */
+  makePublic?: boolean;
+  /** Retry configuration */
+  retry?: RetryOptions;
 }
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `bucket` | `string` | Yes | GCS bucket name |
+| `projectId` | `string` | No | Google Cloud project ID |
+| `keyFilename` | `string` | No | Path to service account JSON key file |
+| `credentials` | `object` | No | Inline service account credentials |
+| `publicUrl` | `string` | No | Custom CDN URL prefix |
+| `makePublic` | `boolean` | No | Make uploaded files publicly accessible (default: `true`) |
+| `retry` | `RetryOptions` | No | Override retry behavior for transient failures |
+
+### Features
+
+- Automatic retry with exponential backoff on transient failures
+- Lazy SDK initialization
+- Accepts both Buffer and ReadableStream in `write()`
+- Stream pipeline for ReadableStream writes
+- Byte-range reads for partial content
+- Async generator `list()` for memory-efficient file listing
+- Automatic `makePublic()` on uploaded files (configurable)
 
 ### Example
 
 ```typescript
-const provider = new GCSProvider({
+import { createMedia } from '@classytic/media-kit';
+import { GCSProvider } from '@classytic/media-kit/providers/gcs';
+
+// Using service account key file
+const gcs = new GCSProvider({
   bucket: 'my-uploads',
+  projectId: 'my-project',
   keyFilename: './service-account.json',
 });
-```
 
-## LocalStorageProvider
-
-Filesystem storage provider.
-
-### Import
-
-```typescript
-import { LocalStorageProvider } from '@classytic/media-kit';
-```
-
-### Constructor
-
-```typescript
-new LocalStorageProvider(config: LocalStorageConfig)
-```
-
-### Config
-
-```typescript
-{
-  uploadDir: string,           // Directory path for uploads
-  publicUrl: string,           // Public URL prefix
-}
-```
-
-### Example
-
-```typescript
-const provider = new LocalStorageProvider({
-  uploadDir: './public/uploads',
-  publicUrl: 'http://localhost:3000/uploads',
+// Using inline credentials
+const gcs = new GCSProvider({
+  bucket: 'my-uploads',
+  credentials: {
+    client_email: process.env.GCS_CLIENT_EMAIL!,
+    private_key: process.env.GCS_PRIVATE_KEY!,
+  },
+  publicUrl: 'https://cdn.example.com',
 });
+
+const media = createMedia({ driver: gcs });
 ```
 
-## Custom Provider
+### Public URL Resolution
 
-Create your own provider:
+1. `publicUrl` config (if set): `${publicUrl}/${key}`
+2. Default: `https://storage.googleapis.com/${bucket}/${key}`
+
+## Custom Driver
+
+Implement the `StorageDriver` interface to create a custom storage backend. Only the core methods and `getPublicUrl` are required.
 
 ```typescript
-import { StorageProvider, UploadResult, UploadOptions } from '@classytic/media-kit';
+import type { StorageDriver, WriteResult, FileStat, PresignedUploadResult } from '@classytic/media-kit';
 
-class CustomProvider implements StorageProvider {
-  readonly name = 'custom';
+class CloudinaryDriver implements StorageDriver {
+  readonly name = 'cloudinary';
 
-  async upload(
-    buffer: Buffer,
-    filename: string,
-    options?: UploadOptions
-  ): Promise<UploadResult> {
-    // Upload logic
+  private cloudinary: any;
+
+  constructor(config: { cloudName: string; apiKey: string; apiSecret: string }) {
+    // Initialize your SDK
+  }
+
+  async write(key: string, data: Buffer | NodeJS.ReadableStream, contentType: string): Promise<WriteResult> {
+    // Upload to Cloudinary
+    const result = await this.cloudinary.uploader.upload(data, { public_id: key });
+
     return {
-      url: 'https://cdn.example.com/file.jpg',
-      key: 'uploads/file.jpg',
-      size: buffer.length,
-      mimeType: options?.mimeType || 'application/octet-stream',
+      key,
+      url: result.secure_url,
+      size: result.bytes,
     };
   }
 
+  async read(key: string, range?: { start: number; end: number }): Promise<NodeJS.ReadableStream> {
+    // Return a readable stream for the file
+    const url = this.getPublicUrl(key);
+    const response = await fetch(url, {
+      headers: range ? { Range: `bytes=${range.start}-${range.end}` } : {},
+    });
+    return response.body as unknown as NodeJS.ReadableStream;
+  }
+
   async delete(key: string): Promise<boolean> {
-    // Delete logic
+    await this.cloudinary.uploader.destroy(key);
     return true;
   }
 
   async exists(key: string): Promise<boolean> {
-    // Exists check
-    return true;
+    try {
+      await this.cloudinary.api.resource(key);
+      return true;
+    } catch {
+      return false;
+    }
   }
+
+  async stat(key: string): Promise<FileStat> {
+    const resource = await this.cloudinary.api.resource(key);
+    return {
+      size: resource.bytes,
+      contentType: `${resource.resource_type}/${resource.format}`,
+      lastModified: new Date(resource.created_at),
+    };
+  }
+
+  getPublicUrl(key: string): string {
+    return `https://res.cloudinary.com/${this.config.cloudName}/image/upload/${key}`;
+  }
+
+  // Optional: implement list, copy, move, getSignedUrl, getSignedUploadUrl
+  // for full feature support
 }
 ```
 
-## UploadOptions
-
-Options passed to provider upload method:
+### Using a custom driver
 
 ```typescript
-{
-  folder?: string,
-  contentType?: string,
-  metadata?: Record<string, any>,
-  organizationId?: string,
-}
+import { createMedia } from '@classytic/media-kit';
+
+const media = createMedia({
+  driver: new CloudinaryDriver({
+    cloudName: 'my-cloud',
+    apiKey: process.env.CLOUDINARY_API_KEY!,
+    apiSecret: process.env.CLOUDINARY_API_SECRET!,
+  }),
+});
 ```
 
-## UploadResult
+### Notes on custom drivers
 
-Result returned from provider upload:
-
-```typescript
-{
-  url: string,                 // Public URL
-  key: string,                 // Storage key/path
-  size: number,                // File size in bytes
-  mimeType: string,            // MIME type
-}
-```
+- **Key generation is handled by MediaKit.** The driver's `write()` method receives the final storage key -- it does not need to generate one.
+- **`getPublicUrl` must be synchronous.** It is called frequently during upload to build URLs for the database record.
+- **Implement `getSignedUploadUrl` to enable presigned uploads.** Without it, `media.getSignedUploadUrl()` will throw.
+- **`list` should be an async generator** for memory-efficient iteration over large prefixes.
+- **`read` should support byte-range** for video streaming (HTTP 206 partial content).
 
 ## Next Steps
 
-- [MediaKit API](./media-kit.mdx) - Core API reference
-- [Types](./types.mdx) - Full TypeScript types
+- [MediaKit API](./media-kit.mdx) -- Core API reference
+- [Types Reference](./types.mdx) -- Full TypeScript type definitions

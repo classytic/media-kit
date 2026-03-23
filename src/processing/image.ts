@@ -1,12 +1,14 @@
 /**
  * Image Processor
- * 
+ *
  * Sharp-based image processing with:
  * - Format conversion (WebP, AVIF, etc.)
  * - Aspect ratio enforcement
+ * - Focal-point-aware cropping (Payload CMS pattern)
+ * - Conditional variant generation (skip if original is smaller)
  * - Quality optimization
  * - Size limits
- * 
+ *
  * @example
  * ```ts
  * const processor = createImageProcessor();
@@ -14,7 +16,7 @@
  *   maxWidth: 1200,
  *   format: 'webp',
  *   quality: 80,
- *   aspectRatio: { aspectRatio: 3/4, fit: 'cover' }
+ *   focalPoint: { x: 0.3, y: 0.4 },
  * });
  * ```
  */
@@ -24,8 +26,12 @@ import type {
   ProcessingOptions,
   ProcessedImage,
   AspectRatioPreset,
-  SizeVariant
+  SizeVariant,
+  FocalPoint,
+  QualityMap,
+  SharpOptions,
 } from '../types';
+import { calculateFocalPointCrop } from './focal-point';
 
 // MIME types that can be processed
 const PROCESSABLE_TYPES = [
@@ -46,27 +52,44 @@ const FORMAT_MIME_MAP: Record<string, string> = {
   avif: 'image/avif',
 };
 
+const DEFAULT_QUALITY_MAP: Record<string, number> = {
+  jpeg: 82, webp: 82, avif: 50, png: 100,
+};
+
+function resolveQuality(quality: unknown, format: string): number {
+  if (typeof quality === 'number') return quality;
+  if (typeof quality === 'object' && quality !== null) {
+    return (quality as Record<string, number>)[format] ?? DEFAULT_QUALITY_MAP[format] ?? 82;
+  }
+  return DEFAULT_QUALITY_MAP[format] ?? 82;
+}
+
 /**
  * Image Processor Implementation
  */
 export class ImageProcessor implements IImageProcessor {
   private sharp: any;
   private available = false;
+  private initPromise: Promise<void>;
+  private sharpOptions: SharpOptions;
 
-  constructor(options?: { concurrency?: number; cache?: boolean }) {
-    this.initSharp(options);
+  constructor(options?: SharpOptions) {
+    this.sharpOptions = {
+      mozjpeg: true,
+      webpSmartSubsample: true,
+      avifEffort: 6,
+      avifChromaSubsampling: '4:2:0',
+      ...options,
+    };
+    this.initPromise = this.initSharp(options);
   }
 
-  private async initSharp(options?: { concurrency?: number; cache?: boolean }): Promise<void> {
+  private async initSharp(options?: SharpOptions): Promise<void> {
     try {
       this.sharp = (await import('sharp')).default;
 
-      // Configure Sharp for optimal memory usage
       if (this.sharp) {
-        // Disable cache by default to reduce memory usage
         this.sharp.cache(options?.cache ?? false);
-
-        // Limit concurrency to prevent memory spikes
         this.sharp.concurrency(options?.concurrency ?? 2);
       }
 
@@ -77,9 +100,7 @@ export class ImageProcessor implements IImageProcessor {
   }
 
   private async getSharp() {
-    if (!this.sharp) {
-      await this.initSharp();
-    }
+    await this.initPromise;
     if (!this.available) {
       throw new Error(
         'sharp is required for image processing. Install it with: npm install sharp'
@@ -96,6 +117,14 @@ export class ImageProcessor implements IImageProcessor {
   }
 
   /**
+   * Wait for lazy sharp initialization to complete.
+   */
+  async waitUntilReady(): Promise<boolean> {
+    await this.initPromise;
+    return this.available;
+  }
+
+  /**
    * Check if buffer is a processable image
    */
   isProcessable(_buffer: Buffer, mimeType: string): boolean {
@@ -103,61 +132,110 @@ export class ImageProcessor implements IImageProcessor {
   }
 
   /**
-   * Process image with given options
+   * Process image with given options.
+   * Supports focal-point-aware cropping when focalPoint is provided.
    */
   async process(buffer: Buffer, options: ProcessingOptions): Promise<ProcessedImage> {
     const sharp = await this.getSharp();
-    
+
     const {
       maxWidth = 2048,
+      maxHeight,
       quality = 80,
       format = 'webp',
       aspectRatio,
+      focalPoint,
     } = options;
 
-    // Get original metadata
     const metadata = await sharp(buffer).metadata();
-    
+
     if (!metadata.width || !metadata.height) {
       throw new Error('Unable to read image dimensions');
     }
 
     let instance = sharp(buffer);
 
-    // Apply aspect ratio transformation
-    if (aspectRatio && !aspectRatio.preserveRatio && aspectRatio.aspectRatio) {
+    // Auto-orient from EXIF (correct rotation, strip orientation tag)
+    if (options.autoOrient !== false) {
+      instance = instance.rotate(); // No-arg rotate = auto-orient from EXIF
+    }
+
+    // Metadata handling
+    if (options.stripMetadata !== false) {
+      instance = instance.keepIccProfile();
+    } else {
+      instance = instance.keepMetadata();
+    }
+
+    // Apply focal-point-aware crop when aspect ratio is being changed
+    if (aspectRatio && !aspectRatio.preserveRatio && aspectRatio.aspectRatio && focalPoint) {
       const targetWidth = Math.min(metadata.width, maxWidth);
       const targetHeight = Math.round(targetWidth / aspectRatio.aspectRatio);
-      
+
+      const crop = calculateFocalPointCrop({
+        originalWidth: metadata.width,
+        originalHeight: metadata.height,
+        targetWidth,
+        targetHeight,
+        focalX: focalPoint.x,
+        focalY: focalPoint.y,
+      });
+
+      // Extract-then-resize (Payload CMS pattern)
+      instance = instance
+        .extract(crop)
+        .resize(targetWidth, targetHeight, { fit: 'fill' });
+    } else if (aspectRatio && !aspectRatio.preserveRatio && aspectRatio.aspectRatio) {
+      // Standard aspect ratio crop (center-based)
+      const targetWidth = Math.min(metadata.width, maxWidth);
+      const targetHeight = Math.round(targetWidth / aspectRatio.aspectRatio);
+
       instance = instance.resize(targetWidth, targetHeight, {
         fit: aspectRatio.fit || 'cover',
         position: 'center',
       });
-    } else if (metadata.width > maxWidth) {
-      // Just resize to max width, preserve ratio
-      instance = instance.resize(maxWidth, null, {
-        fit: 'inside',
-        withoutEnlargement: true,
-      });
+    } else if (metadata.width > maxWidth || (maxHeight && metadata.height > maxHeight)) {
+      // Resize to fit within both maxWidth and maxHeight constraints
+      instance = instance.resize(
+        metadata.width > maxWidth ? maxWidth : null,
+        maxHeight && metadata.height > maxHeight ? maxHeight : null,
+        {
+          fit: 'inside',
+          withoutEnlargement: true,
+        },
+      );
     }
 
     // Convert format
+    const q = resolveQuality(options.quality, format);
+
     switch (format) {
       case 'webp':
-        instance = instance.webp({ quality });
+        instance = instance.webp({
+          quality: q,
+          smartSubsample: this.sharpOptions.webpSmartSubsample ?? true,
+        });
         break;
       case 'jpeg':
-        instance = instance.jpeg({ quality });
+        instance = instance.jpeg({
+          quality: q,
+          mozjpeg: this.sharpOptions.mozjpeg ?? true,
+        });
         break;
-      case 'png':
-        instance = instance.png({ quality });
+      case 'png': {
+        const compressionLevel = Math.round(9 - (q / 100) * 9);
+        instance = instance.png({ compressionLevel, palette: q < 100 });
         break;
+      }
       case 'avif':
-        instance = instance.avif({ quality });
+        instance = instance.avif({
+          quality: q,
+          effort: this.sharpOptions.avifEffort ?? 6,
+          chromaSubsampling: this.sharpOptions.avifChromaSubsampling ?? '4:2:0',
+        });
         break;
     }
 
-    // Process and get result
     const outputBuffer = await instance.toBuffer();
     const outputMetadata = await sharp(outputBuffer).metadata();
 
@@ -183,26 +261,45 @@ export class ImageProcessor implements IImageProcessor {
   }
 
   /**
-   * Generate multiple size variants from a single image
-   * @example
-   * ```ts
-   * const variants = await processor.generateVariants(buffer, [
-   *   { name: 'thumbnail', width: 150, height: 150 },
-   *   { name: 'medium', width: 800 },
-   *   { name: 'large', width: 1920 }
-   * ]);
-   * ```
+   * Generate multiple size variants from a single image.
+   *
+   * - Conditional generation: skips variant if `condition` returns false
+   * - Never upscales: skips variant if original is smaller than target
+   * - Focal-point-aware: uses extract-then-resize when focalPoint is provided
+   *
+   * @returns Array of processed images (only for variants that passed conditions)
    */
   async generateVariants(
     buffer: Buffer,
     variants: SizeVariant[],
     baseOptions: Omit<ProcessingOptions, 'maxWidth'> = {}
-  ): Promise<ProcessedImage[]> {
-    await this.getSharp(); // Ensure sharp is loaded
-    const results: ProcessedImage[] = [];
+  ): Promise<Array<ProcessedImage & { variantName: string }>> {
+    const sharp = await this.getSharp();
+    const metadata = await sharp(buffer).metadata();
+    const origWidth = metadata.width || 0;
+    const origHeight = metadata.height || 0;
+    const origMimeType = `image/${metadata.format || 'jpeg'}`;
+
+    const results: Array<ProcessedImage & { variantName: string }> = [];
 
     for (const variant of variants) {
-      // Filter out 'original' format, default to base or webp
+      // Conditional variant generation (Payload pattern)
+      if (variant.condition) {
+        const shouldGenerate = variant.condition({
+          width: origWidth,
+          height: origHeight,
+          mimeType: origMimeType,
+        });
+        if (!shouldGenerate) continue;
+      }
+
+      // Never upscale: skip if original is smaller than target
+      if (variant.width && variant.height) {
+        if (origWidth < variant.width && origHeight < variant.height) continue;
+      } else if (variant.width && origWidth < variant.width) {
+        continue;
+      }
+
       const variantFormat = variant.format && variant.format !== 'original'
         ? variant.format
         : undefined;
@@ -224,10 +321,62 @@ export class ImageProcessor implements IImageProcessor {
       }
 
       const processed = await this.process(buffer, variantOptions);
-      results.push(processed);
+      results.push({ ...processed, variantName: variant.name });
     }
 
     return results;
+  }
+
+  /**
+   * Get the raw Sharp constructor (for sharing with other services).
+   * Throws if Sharp is not available.
+   */
+  async getSharpInstance(): Promise<any> {
+    return this.getSharp();
+  }
+
+  /**
+   * Detect if an image is already well-optimized.
+   * Uses bits-per-pixel heuristic: if below format threshold, re-compression
+   * will likely increase size or cause generation loss.
+   */
+  async isOptimized(buffer: Buffer, mimeType: string): Promise<boolean> {
+    try {
+      const sharp = await this.getSharp();
+      const metadata = await sharp(buffer).metadata();
+      if (!metadata.width || !metadata.height) return false;
+
+      const pixels = metadata.width * metadata.height;
+      const bitsPerPixel = (buffer.length * 8) / pixels;
+
+      const thresholds: Record<string, number> = {
+        'image/jpeg': 1.5,
+        'image/webp': 1.0,
+        'image/avif': 0.8,
+        'image/png': 4.0,
+      };
+
+      return bitsPerPixel < (thresholds[mimeType] || 2.0);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Extract dominant color from image using Sharp's stats().
+   * Returns hex string like '#3b82f6'.
+   */
+  async extractDominantColor(buffer: Buffer): Promise<string | null> {
+    try {
+      const sharp = await this.getSharp();
+      const { dominant } = await sharp(buffer).stats();
+      const r = Math.round(dominant.r).toString(16).padStart(2, '0');
+      const g = Math.round(dominant.g).toString(16).padStart(2, '0');
+      const b = Math.round(dominant.b).toString(16).padStart(2, '0');
+      return `#${r}${g}${b}`;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -237,19 +386,18 @@ export class ImageProcessor implements IImageProcessor {
     const sharp = await this.getSharp();
     const metadata = await sharp(buffer).metadata();
 
-    const exif: Record<string, any> = {};
-
-    if (metadata.exif) {
-      // Sharp provides raw EXIF buffer, you'd need exif-parser or similar
-      // For simplicity, we'll extract what's available from metadata
-      if (metadata.orientation) exif.orientation = metadata.orientation;
-    }
-
-    if (metadata.density) exif.density = metadata.density;
-    if (metadata.hasAlpha !== undefined) exif.hasAlpha = metadata.hasAlpha;
-    if (metadata.space) exif.colorSpace = metadata.space;
-
-    return exif;
+    return {
+      format: metadata.format,
+      space: metadata.space,
+      channels: metadata.channels,
+      hasAlpha: metadata.hasAlpha,
+      orientation: metadata.orientation,
+      density: metadata.density,
+      isProgressive: metadata.isProgressive,
+      chromaSubsampling: metadata.chromaSubsampling,
+      ...(metadata.exif ? { hasExif: true } : {}),
+      ...(metadata.icc ? { hasIcc: true } : {}),
+    };
   }
 }
 

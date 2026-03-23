@@ -5,7 +5,7 @@ Generate multiple image sizes automatically.
 ## Setup
 
 ```bash
-npm install @classytic/media-kit mongoose sharp @aws-sdk/client-s3
+npm install @classytic/media-kit @classytic/mongokit mongoose sharp @aws-sdk/client-s3
 ```
 
 ## Code
@@ -19,7 +19,7 @@ await mongoose.connect('mongodb://localhost:27017/myapp');
 
 // Configure with multi-size generation
 const media = createMedia({
-  provider: new S3Provider({
+  driver: new S3Provider({
     bucket: 'my-uploads',
     region: 'us-east-1',
   }),
@@ -53,6 +53,8 @@ const media = createMedia({
         name: 'large',
         width: 1600,
         quality: 90,
+        // Skip if original is smaller than target (conditional generation)
+        condition: (original) => original.width >= 1600,
       },
     ],
   },
@@ -67,9 +69,11 @@ const file = await media.upload({
   filename: 'product-photo.jpg',
   mimeType: 'image/jpeg',
   title: 'Product Photo',
+  tags: ['product'],
 });
 
 console.log('Original:', file.url);
+console.log('Status:', file.status); // 'ready'
 console.log('Variants:', file.variants);
 
 // Access specific sizes
@@ -77,9 +81,22 @@ const thumbnail = file.variants.find(v => v.name === 'thumbnail');
 const medium = file.variants.find(v => v.name === 'medium');
 const large = file.variants.find(v => v.name === 'large');
 
-console.log('Thumbnail:', thumbnail.url);
-console.log('Medium:', medium.url);
-console.log('Large:', large.url);
+console.log('Thumbnail:', thumbnail?.url);
+console.log('Medium:', medium?.url);
+console.log('Large:', large?.url); // undefined if original < 1600px
+```
+
+## Variants with Independent Metadata
+
+Each variant stores its own mimeType and filename:
+
+```typescript
+file.variants.forEach(v => {
+  console.log(`${v.name}: ${v.mimeType} (${v.width}x${v.height}, ${v.size} bytes)`);
+  // thumbnail: image/webp (200x200, 4500 bytes)
+  // small: image/webp (480x640, 12000 bytes)
+  // medium: image/webp (800x1067, 32000 bytes)
+});
 ```
 
 ## React Component
@@ -100,7 +117,7 @@ export function ProductImage({ file }: ProductImageProps) {
     <picture>
       <source
         media="(min-width: 1024px)"
-        srcSet={large?.url}
+        srcSet={large?.url || medium?.url}
       />
       <source
         media="(min-width: 768px)"
@@ -133,9 +150,11 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   res.json({
     id: file._id,
     url: file.url,
+    status: file.status,
     variants: file.variants.map(v => ({
       name: v.name,
       url: v.url,
+      mimeType: v.mimeType,
       width: v.width,
       height: v.height,
     })),
@@ -145,5 +164,6 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
 ## Next Steps
 
-- [Custom Provider](./custom-provider.mdx) - Create your own storage
+- [Custom Driver](./custom-provider.mdx) - Create your own storage driver
 - [Image Processing Guide](../guides/image-processing.mdx) - More details
+- [Focal Points](../guides/focal-points.mdx) - Smart cropping

@@ -1,0 +1,439 @@
+# Asset Transforms
+
+On-the-fly image resizing and format conversion via URL query parameters.
+
+## Overview
+
+Asset transforms let you serve optimized images directly from your storage without
+pre-generating every size. Instead of creating variants at upload time, you append
+query parameters to the asset URL and the transform service produces the result
+on the fly -- with automatic caching so each combination is only computed once.
+
+This is ideal for responsive images, `<picture>` elements, and CDN edge delivery
+where the final dimensions or format depend on the client.
+
+## Setup
+
+Install Sharp (required for image transforms):
+
+```bash
+npm install sharp
+```
+
+Create the transform service:
+
+```typescript
+import { createMedia } from '@classytic/media-kit';
+import { createAssetTransform, StorageTransformCache } from '@classytic/media-kit/transforms';
+
+const media = createMedia({ driver: myDriver, /* ... */ });
+
+// Optional: cache transforms in the same storage driver
+const cache = new StorageTransformCache(myDriver, { prefix: '__transforms' });
+
+const transform = createAssetTransform({
+  media,
+  cache,
+  maxWidth: 4096,   // Security limit (default)
+  maxHeight: 4096,  // Security limit (default)
+});
+```
+
+### Configuration options
+
+| Option            | Type             | Default | Description                                 |
+| ----------------- | ---------------- | ------- | ------------------------------------------- |
+| `media`           | `MediaKit`       | --      | Initialized MediaKit instance (required)    |
+| `cache`           | `TransformCache` | --      | Optional cache for transformed images       |
+| `maxWidth`        | `number`         | `4096`  | Maximum allowed output width in pixels      |
+| `maxHeight`       | `number`         | `4096`  | Maximum allowed output height in pixels     |
+| `allowedFormats`  | `string[]`       | --      | Restrict which output formats are permitted |
+
+## Framework Integration
+
+The transform service is **framework-agnostic**: it accepts a plain `TransformRequest`
+object and returns a plain `TransformResponse` object. You wire it into your framework
+of choice with a thin adapter.
+
+### Express
+
+```typescript
+import express from 'express';
+
+const app = express();
+
+app.get('/assets/:id', async (req, res) => {
+  try {
+    const result = await transform.handle({
+      fileId: req.params.id,
+      params: req.query,
+      accept: req.headers.accept,
+      range: req.headers.range,
+    });
+
+    res.status(result.status);
+    for (const [key, value] of Object.entries(result.headers)) {
+      res.set(key, value);
+    }
+    result.stream.pipe(res);
+  } catch (err) {
+    res.status(err.message.includes('not found') ? 404 : 500).json({ error: err.message });
+  }
+});
+```
+
+### Fastify
+
+```typescript
+import Fastify from 'fastify';
+
+const fastify = Fastify();
+
+fastify.get('/assets/:id', async (request, reply) => {
+  const result = await transform.handle({
+    fileId: request.params.id,
+    params: request.query,
+    accept: request.headers.accept,
+    range: request.headers.range,
+  });
+
+  reply
+    .status(result.status)
+    .headers(result.headers)
+    .send(result.stream);
+});
+```
+
+### Hono
+
+```typescript
+import { Hono } from 'hono';
+import { stream } from 'hono/streaming';
+
+const app = new Hono();
+
+app.get('/assets/:id', async (c) => {
+  const result = await transform.handle({
+    fileId: c.req.param('id'),
+    params: Object.fromEntries(new URL(c.req.url).searchParams),
+    accept: c.req.header('accept'),
+    range: c.req.header('range'),
+  });
+
+  return new Response(result.stream as any, {
+    status: result.status,
+    headers: result.headers,
+  });
+});
+```
+
+## Query Parameters
+
+Append these to your asset URL to control the transformation.
+
+| Parameter  | Type     | Values                                           | Description                                |
+| ---------- | -------- | ------------------------------------------------ | ------------------------------------------ |
+| `w`        | `number` | `1` - `maxWidth`                                 | Target width in pixels                     |
+| `h`        | `number` | `1` - `maxHeight`                                | Target height in pixels                    |
+| `fit`      | `string` | `cover`, `contain`, `fill`, `inside`, `outside`  | Resize fit mode (Sharp fit modes)          |
+| `format`   | `string` | `webp`, `avif`, `jpeg`, `png`, `auto`            | Output format                              |
+| `q`        | `number` | `1` - `100`                                      | Output quality (default: `80`)             |
+| `download` | --       | (presence triggers)                               | Force `Content-Disposition: attachment`     |
+
+### Examples
+
+```
+/assets/abc123?w=400&h=300&fit=cover&format=webp&q=85
+/assets/abc123?w=150&format=auto
+/assets/abc123?download
+```
+
+## Content Negotiation
+
+When `format=auto`, the service inspects the request's `Accept` header and picks the
+best modern format the client supports, using this priority:
+
+1. `image/avif` -- best compression, returned if the client advertises AVIF support
+2. `image/webp` -- wide browser support, returned if client advertises WebP
+3. `image/jpeg` -- universal fallback
+
+The response includes a `Vary: Accept` header so CDNs and proxies cache each
+variant separately.
+
+```
+GET /assets/abc123?w=800&format=auto
+Accept: image/avif, image/webp, image/jpeg, */*
+
+# Response: image/avif (best match)
+```
+
+This makes `format=auto` the recommended default for `<img>` tags and CSS backgrounds --
+modern browsers automatically receive smaller payloads.
+
+## Focal-Point-Aware Cropping
+
+When all three conditions are met:
+
+1. `fit=cover` is requested
+2. Both `w` and `h` are specified
+3. The file has a `focalPoint` stored in its document
+
+...the transform service uses `calculateFocalPointCrop()` to extract the optimal
+region around the focal point before resizing. This ensures the subject stays visible
+even at extreme aspect ratios.
+
+```
+# Portrait crop of a landscape image, keeping the subject in frame
+/assets/abc123?w=400&h=600&fit=cover
+```
+
+Without a focal point, Sharp's default center-crop behavior applies. See the
+[Focal Points guide](/docs/guides/focal-points) for details on setting focal points.
+
+## Transform Caching
+
+Without caching, every request re-reads the original file and re-processes it through
+Sharp. The `StorageTransformCache` stores transformed results alongside your originals
+in the same storage driver, under a configurable prefix (default: `__transforms/`).
+
+```typescript
+import { StorageTransformCache } from '@classytic/media-kit/transforms';
+
+const cache = new StorageTransformCache(myDriver, {
+  prefix: '__transforms', // default
+});
+
+const transform = createAssetTransform({ media, cache });
+```
+
+### How it works
+
+1. A cache key is computed from the file ID, transform params, and resolved format
+   (e.g., `abc123-w400-h300-fcover-q85-webp`).
+2. On request, the cache checks if `__transforms/<cacheKey>` exists in the driver.
+3. **Cache hit**: the cached stream is returned directly -- no Sharp processing.
+4. **Cache miss**: the image is transformed, the result is streamed to the client,
+   and a fire-and-forget write stores the buffer in the cache for next time.
+
+### Cache invalidation
+
+When a file is replaced or deleted, call `cache.invalidate(fileId)` to remove all
+cached transforms for that file. The invalidation uses `driver.list()` to find all
+keys with the file ID prefix and deletes them.
+
+```typescript
+media.on('after:replace', async ({ result }) => {
+  await cache.invalidate(result._id.toString());
+});
+
+media.on('after:delete', async ({ result }) => {
+  await cache.invalidate(result._id?.toString());
+});
+```
+
+### Custom cache implementations
+
+The `TransformCache` interface is pluggable. Implement it to use Redis, a local
+filesystem, or any other backend:
+
+```typescript
+interface TransformCache {
+  get(cacheKey: string): Promise<{ stream: NodeJS.ReadableStream; contentType: string } | null>;
+  set(cacheKey: string, data: Buffer, contentType: string): Promise<void>;
+  invalidate(fileId: string): Promise<void>;
+}
+```
+
+## Range Requests (Video/Audio Streaming)
+
+For non-image files (or images without transform params), the service proxies the
+raw file from storage. If the client sends a `Range` header, the service returns
+an HTTP 206 Partial Content response with the appropriate `Content-Range` header.
+
+This enables:
+
+- Native `<video>` and `<audio>` seeking in the browser
+- Resumable downloads
+- Efficient streaming without loading entire files into memory
+
+```
+GET /assets/video123
+Range: bytes=0-1048575
+
+HTTP/1.1 206 Partial Content
+Content-Range: bytes 0-1048575/52428800
+Content-Length: 1048576
+Accept-Ranges: bytes
+```
+
+The range parsing supports `bytes=START-END` format and clamps to file boundaries.
+Invalid ranges are ignored, and the full file is returned instead.
+
+## Security
+
+### Size limits
+
+The `maxWidth` and `maxHeight` options prevent clients from requesting absurdly large
+transforms that could exhaust server memory:
+
+```typescript
+const transform = createAssetTransform({
+  media,
+  maxWidth: 2048,
+  maxHeight: 2048,
+});
+
+// A request for ?w=10000 is silently clamped to w=2048
+```
+
+Values default to `4096` if not specified. Sharp's `withoutEnlargement: true` option
+is also applied, so the output never exceeds the original image dimensions.
+
+### Format allow-list
+
+Only these formats are accepted: `webp`, `avif`, `jpeg`, `png`, `auto`. Unknown
+format values in the query string are ignored.
+
+### Fit mode validation
+
+Only valid Sharp fit modes are accepted: `cover`, `contain`, `fill`, `inside`, `outside`.
+Invalid values are dropped from the params.
+
+## TypeScript Types
+
+All types are importable from the main package:
+
+```typescript
+import type {
+  TransformParams,
+  TransformRequest,
+  TransformResponse,
+  TransformCache,
+} from '@classytic/media-kit';
+```
+
+### TransformParams
+
+```typescript
+interface TransformParams {
+  w?: number;
+  h?: number;
+  fit?: 'cover' | 'contain' | 'fill' | 'inside' | 'outside';
+  format?: 'webp' | 'avif' | 'jpeg' | 'png' | 'auto';
+  q?: number;
+  download?: boolean;
+}
+```
+
+### TransformRequest
+
+```typescript
+interface TransformRequest {
+  fileId: string;
+  params: TransformParams;
+  accept?: string;  // Accept header for content negotiation
+  range?: string;   // Range header for partial content
+}
+```
+
+### TransformResponse
+
+```typescript
+interface TransformResponse {
+  stream: NodeJS.ReadableStream;
+  contentType: string;
+  contentLength?: number;
+  status: number;         // 200 or 206
+  headers: Record<string, string>;
+}
+```
+
+### TransformCache
+
+```typescript
+interface TransformCache {
+  get(cacheKey: string): Promise<{ stream: NodeJS.ReadableStream; contentType: string } | null>;
+  set(cacheKey: string, data: Buffer, contentType: string): Promise<void>;
+  invalidate(fileId: string): Promise<void>;
+}
+```
+
+## Full Example
+
+Putting it all together with Express and S3:
+
+```typescript
+import express from 'express';
+import mongoose from 'mongoose';
+import { createMedia } from '@classytic/media-kit';
+import { S3Driver } from '@classytic/media-kit/drivers/s3';
+import { createAssetTransform, StorageTransformCache } from '@classytic/media-kit/transforms';
+
+// 1. Create media instance
+const driver = new S3Driver({ bucket: 'my-assets', region: 'us-east-1' });
+
+const media = createMedia({
+  driver,
+  processing: { enabled: true, format: 'webp', quality: 80 },
+});
+
+const Media = mongoose.model('Media', media.schema);
+media.init(Media);
+
+// 2. Create transform service with caching
+const cache = new StorageTransformCache(driver);
+const transform = createAssetTransform({
+  media,
+  cache,
+  maxWidth: 2048,
+  maxHeight: 2048,
+});
+
+// 3. Invalidate cache on file changes
+media.on('after:replace', async ({ result }) => {
+  await cache.invalidate(result._id.toString());
+});
+
+// 4. Serve assets
+const app = express();
+
+app.get('/assets/:id', async (req, res) => {
+  try {
+    const result = await transform.handle({
+      fileId: req.params.id,
+      params: req.query,
+      accept: req.headers.accept,
+      range: req.headers.range,
+    });
+
+    res.status(result.status);
+    for (const [k, v] of Object.entries(result.headers)) res.set(k, v);
+    result.stream.pipe(res);
+  } catch (err) {
+    const status = err.message.includes('not found') ? 404 : 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+app.listen(3000);
+```
+
+Usage in HTML:
+
+```html
+<!-- Responsive image with content negotiation -->
+<img src="/assets/abc123?w=800&format=auto" alt="Product photo" />
+
+<!-- Art-directed picture element -->
+<picture>
+  <source media="(min-width: 1200px)" srcset="/assets/abc123?w=1200&format=auto" />
+  <source media="(min-width: 600px)" srcset="/assets/abc123?w=600&format=auto" />
+  <img src="/assets/abc123?w=400&format=auto" alt="Product photo" />
+</picture>
+
+<!-- Video with range-request streaming -->
+<video src="/assets/video456" controls></video>
+
+<!-- Force download -->
+<a href="/assets/abc123?download">Download original</a>
+```

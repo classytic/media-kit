@@ -37,13 +37,13 @@ const media = createMedia({
       { name: 'medium', width: 800 },
     ],
     generateAlt: true,
-    // Sharp memory optimization (v2.0.3)
+    // Sharp memory optimization
     sharpOptions: {
       concurrency: 2, // Process max 2 images at once
       cache: false,   // Disable cache to reduce memory usage
     },
   },
-  // Concurrency control - prevents memory crashes under load (v2.0.3)
+  // Concurrency control - prevents memory crashes under load
   concurrency: {
     maxConcurrent: 5, // Max 5 parallel uploads
   },

@@ -3,33 +3,44 @@
  */
 import type { MediaKitConfig } from './types';
 import { FILE_TYPE_PRESETS } from './utils/mime';
-import { DEFAULT_BASE_FOLDERS } from './schema/media.schema';
+import { resolveProcessingPreset } from './processing/presets';
 
 /**
  * Default configuration values
  */
-export const DEFAULT_CONFIG: Partial<MediaKitConfig> = {
+export const DEFAULT_CONFIG: Omit<MediaKitConfig, 'driver'> = {
   fileTypes: {
     allowed: [...FILE_TYPE_PRESETS.all],
-    maxSize: 100 * 1024 * 1024, // 100MB (increased from 50MB for better UX)
+    maxSize: 100 * 1024 * 1024, // 100MB
   },
   folders: {
-    baseFolders: DEFAULT_BASE_FOLDERS,
     defaultFolder: 'general',
     contentTypeMap: {},
+    enableSubfolders: true,
   },
   processing: {
     enabled: true,
-    maxWidth: 2048,
-    quality: 80,
-    format: 'webp',
+    keepOriginal: true,
+    maxWidth: 4096,
+    maxHeight: 4096,
+    quality: {
+      jpeg: 82,
+      webp: 82,
+      avif: 50,
+      png: 100,
+    },
+    format: 'original',
+    stripMetadata: true,
+    autoOrient: true,
+    thumbhash: true,
+    dominantColor: true,
+    smartSkip: true,
     aspectRatios: {
       default: { preserveRatio: true },
     },
-    // Sharp memory optimization - disable cache to prevent memory leaks under load
     sharpOptions: {
-      concurrency: 2, // Process max 2 images at once
-      cache: false,   // Disable Sharp cache to reduce memory usage
+      concurrency: 2,
+      cache: false,
     },
   },
   multiTenancy: {
@@ -37,30 +48,79 @@ export const DEFAULT_CONFIG: Partial<MediaKitConfig> = {
     field: 'organizationId',
     required: false,
   },
-  // Concurrency control - limit parallel uploads to prevent crashes
+  deduplication: {
+    enabled: false,
+    returnExisting: true,
+    algorithm: 'sha256',
+  },
+  softDelete: {
+    enabled: false,
+    ttlDays: 30,
+  },
   concurrency: {
-    maxConcurrent: 5, // Max 5 uploads at once (can be overridden per instance)
+    maxConcurrent: 5,
   },
 };
 
 /**
- * Merge user config with defaults
+ * Merge quality setting — user value wins entirely if provided.
+ * If user provides a number, it replaces the map. If user provides a partial map, merge with defaults.
+ */
+function mergeQuality(
+  defaultQuality: MediaKitConfig['processing'] extends { quality?: infer Q } ? Q : unknown,
+  userQuality: MediaKitConfig['processing'] extends { quality?: infer Q } ? Q : unknown,
+): typeof defaultQuality {
+  if (userQuality === undefined) return defaultQuality;
+  if (typeof userQuality === 'number') return userQuality;
+  if (typeof userQuality === 'object' && typeof defaultQuality === 'object') {
+    return { ...defaultQuality, ...userQuality };
+  }
+  return userQuality;
+}
+
+/**
+ * Merge user config with defaults.
+ * If a processing preset is specified, it's applied between defaults and user overrides:
+ *   defaults → preset → user overrides (user wins)
  */
 export function mergeConfig(config: MediaKitConfig): MediaKitConfig {
+  // Resolve processing preset if specified
+  const presetConfig = resolveProcessingPreset(config.processing?.preset);
+
+  // Build processing config: defaults → preset → user overrides
+  const processingBase = presetConfig
+    ? { ...DEFAULT_CONFIG.processing, ...presetConfig }
+    : { ...DEFAULT_CONFIG.processing };
+
+  // Determine effective quality: user > preset > default
+  const effectiveQuality = mergeQuality(
+    mergeQuality(DEFAULT_CONFIG.processing?.quality, presetConfig?.quality),
+    config.processing?.quality,
+  );
+
   return {
     ...DEFAULT_CONFIG,
     ...config,
     fileTypes: { ...DEFAULT_CONFIG.fileTypes, ...config.fileTypes },
     folders: { ...DEFAULT_CONFIG.folders, ...config.folders },
     processing: {
-      ...DEFAULT_CONFIG.processing,
+      ...processingBase,
       ...config.processing,
+      quality: effectiveQuality,
+      aspectRatios: {
+        ...DEFAULT_CONFIG.processing?.aspectRatios,
+        ...presetConfig?.aspectRatios,
+        ...config.processing?.aspectRatios,
+      },
       sharpOptions: {
         ...DEFAULT_CONFIG.processing?.sharpOptions,
+        ...presetConfig?.sharpOptions,
         ...config.processing?.sharpOptions,
       },
     },
     multiTenancy: { ...DEFAULT_CONFIG.multiTenancy, ...config.multiTenancy },
+    deduplication: { ...DEFAULT_CONFIG.deduplication, ...config.deduplication },
+    softDelete: { ...DEFAULT_CONFIG.softDelete, ...config.softDelete },
     concurrency: { ...DEFAULT_CONFIG.concurrency, ...config.concurrency },
   } as MediaKitConfig;
 }

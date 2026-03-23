@@ -4,34 +4,42 @@ Production-grade media management for Mongoose applications.
 
 ## What is Media Kit?
 
-A lightweight, powerful library for managing file uploads in Node.js with Mongoose. Think WordPress media library, but cleaner and more flexible.
+A powerful library for managing file uploads in Node.js with Mongoose. Think WordPress media library, but cleaner, more flexible, and built for modern stacks.
 
 ## Key Features
 
-- **Multiple Storage Options** - Local, S3, Google Cloud Storage
-- **Auto Image Processing** - Generate thumbnails, resize, optimize
+- **Cloud Storage** - S3, Google Cloud Storage, or custom drivers
+- **Auto Image Processing** - Generate thumbnails, resize, optimize, focal-point-aware cropping
+- **Asset Transforms** - On-the-fly image resizing via URL params (framework-agnostic)
+- **File Status Lifecycle** - Track uploads from pending through processing to ready
+- **Tags & Search** - Tag files and search via MongoDB text index
+- **Soft Deletes** - Trash and restore with configurable auto-purge
+- **Content Deduplication** - SHA-256 hash-based duplicate detection
 - **Multi-tenant Ready** - Organize by organization/tenant
-- **Alt Text Generation** - Automatic accessibility support
-- **Event System** - Hook into upload, delete, and more
-- **Zero Config** - Works out of the box, customize when needed
+- **Awaitable Events** - Hook into upload, delete, replace, and more
+- **Presigned Uploads** - Direct browser-to-cloud uploads
+- **TypeScript First** - Full type safety
 
 ## Quick Example
 
 ```typescript
 import { createMedia } from '@classytic/media-kit';
+import { S3Provider } from '@classytic/media-kit/providers/s3';
 
 const media = createMedia({
-  provider: new LocalStorageProvider(),
+  driver: new S3Provider({ bucket: 'my-uploads', region: 'us-east-1' }),
 });
 
-// Upload a file
 const file = await media.upload({
   buffer: fileBuffer,
   filename: 'photo.jpg',
   mimeType: 'image/jpeg',
+  tags: ['product', 'hero'],
 });
 
-console.log(file.url); // https://cdn.example.com/uploads/photo.jpg
+console.log(file.url);    // https://my-uploads.s3.amazonaws.com/...
+console.log(file.status); // 'ready'
+console.log(file.hash);   // 'sha256-...'
 ```
 
 ## Documentation
@@ -44,4 +52,3 @@ console.log(file.url); // https://cdn.example.com/uploads/photo.jpg
 ## Need Help?
 
 - [GitHub Issues](https://github.com/classytic/media-kit/issues)
-- [Examples Directory](../examples/)

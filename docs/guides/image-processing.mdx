@@ -1,6 +1,6 @@
 # Image Processing
 
-Auto-resize, optimize, and generate multiple image sizes.
+Auto-resize, optimize, and generate multiple image sizes with focal-point-aware cropping.
 
 ## Setup
 
@@ -14,7 +14,7 @@ Enable processing in config:
 
 ```typescript
 const media = createMedia({
-  provider: myProvider,
+  driver: myDriver,
   processing: {
     enabled: true,
     quality: 80,
@@ -22,6 +22,32 @@ const media = createMedia({
   },
 });
 ```
+
+## Status Lifecycle
+
+Every upload goes through a status lifecycle:
+
+```
+pending -> processing -> ready
+                      -> error
+```
+
+- **pending** -- file received, not yet processed
+- **processing** -- image variants being generated
+- **ready** -- all processing complete, file is available
+- **error** -- processing failed (original file is still stored)
+
+```typescript
+const file = await media.upload({
+  buffer: imageBuffer,
+  filename: 'photo.jpg',
+  mimeType: 'image/jpeg',
+});
+
+console.log(file.status); // 'ready' (processing completes during upload)
+```
+
+If processing fails, the status is set to `error` and the `errorMessage` field contains details. The original unprocessed file is still available at `file.url`.
 
 ## Basic Processing
 
@@ -35,9 +61,10 @@ const file = await media.upload({
 });
 
 // Automatically:
-// - Resized to max width
+// - Resized to max width (default: 2048px)
 // - Converted to WebP
-// - Optimized quality
+// - Quality optimized
+// - SHA-256 hash computed
 ```
 
 ## Generate Multiple Sizes
@@ -46,7 +73,7 @@ Create thumbnail, medium, and large versions:
 
 ```typescript
 const media = createMedia({
-  provider: myProvider,
+  driver: myDriver,
   processing: {
     enabled: true,
     sizes: [
@@ -64,10 +91,75 @@ const file = await media.upload({
 });
 
 // Access variants
-console.log(file.url);              // Original/large
-console.log(file.variants);         // Array of sizes
-console.log(file.variants[0].url);  // Thumbnail URL
+console.log(file.url);                  // Original/processed
+console.log(file.variants);            // Array of generated sizes
+console.log(file.variants[0].url);     // Thumbnail URL
+console.log(file.variants[0].width);   // Thumbnail width
+console.log(file.variants[0].mimeType); // Each variant has its own mimeType
 ```
+
+## Conditional Variants
+
+Skip variant generation when the source image is too small. Use the `condition` function:
+
+```typescript
+processing: {
+  sizes: [
+    // Always generated
+    { name: 'thumbnail', width: 200, height: 200 },
+
+    // Only generated if source is at least 800px wide
+    {
+      name: 'medium',
+      width: 800,
+      condition: (original) => original.width >= 800,
+    },
+
+    // Only generated for landscape images wider than 1600px
+    {
+      name: 'hero',
+      width: 1920,
+      condition: (original) =>
+        original.width >= 1920 && original.width > original.height,
+    },
+
+    // Only generated for JPEG/PNG sources (skip SVGs, GIFs)
+    {
+      name: 'webp-alt',
+      width: 1200,
+      format: 'webp',
+      condition: (original) =>
+        ['image/jpeg', 'image/png'].includes(original.mimeType),
+    },
+  ],
+}
+```
+
+The `condition` function receives `{ width, height, mimeType }` of the original image. If it returns `false`, that variant is skipped.
+
+## Focal Point Cropping
+
+Set a focal point to control where crops are centered. This ensures the subject stays visible across all variant sizes:
+
+```typescript
+// Set focal point during upload
+const file = await media.upload({
+  buffer: imageBuffer,
+  filename: 'portrait.jpg',
+  mimeType: 'image/jpeg',
+  focalPoint: { x: 0.5, y: 0.3 }, // Center-top focus
+});
+
+// Or update it later
+await media.setFocalPoint(file._id, { x: 0.3, y: 0.2 });
+```
+
+Focal point coordinates are normalized from `0.0` to `1.0`:
+- `x: 0.0` = left edge, `x: 1.0` = right edge
+- `y: 0.0` = top edge, `y: 1.0` = bottom edge
+- `{ x: 0.5, y: 0.5 }` = center (default)
+
+When variants with aspect ratio cropping are generated, the focal point is used as the crop anchor instead of the default center.
 
 ## Size Options
 
@@ -99,6 +191,8 @@ console.log(file.variants[0].url);  // Thumbnail URL
 // Force JPEG instead of default WebP
 ```
 
+Supported formats: `'webp'`, `'jpeg'`, `'png'`, `'avif'`, `'original'` (keep source format).
+
 ## Aspect Ratios
 
 Maintain specific aspect ratios:
@@ -110,19 +204,51 @@ processing: {
       name: 'instagram',
       width: 1080,
       aspectRatio: {
-        aspectRatio: 1,  // 1:1 square
-        fit: 'cover',    // How to fit
+        aspectRatio: 1,   // 1:1 square
+        fit: 'cover',
       },
     },
     {
       name: 'banner',
       width: 1200,
       aspectRatio: {
-        aspectRatio: 16/9,
+        aspectRatio: 16 / 9,
         fit: 'contain',
       },
     },
+    {
+      name: 'portrait',
+      width: 800,
+      aspectRatio: {
+        aspectRatio: 3 / 4,
+        fit: 'cover',
+      },
+    },
   ],
+}
+```
+
+Fit modes:
+- `cover` -- fill the area, cropping if needed (respects focal point)
+- `contain` -- fit within the area, adding letterboxing if needed
+- `fill` -- stretch to fill exactly
+- `inside` -- resize to fit inside, never upscaling
+- `outside` -- resize to cover, possibly exceeding dimensions
+
+## Variant Metadata
+
+Each generated variant stores independent metadata (Payload CMS pattern):
+
+```typescript
+interface GeneratedVariant {
+  name: string;     // e.g., 'thumbnail'
+  key: string;      // Storage key
+  url: string;      // Public URL
+  filename: string; // Can differ from original
+  mimeType: string; // Can differ (e.g., WebP thumbnail for JPEG original)
+  size: number;     // Bytes
+  width?: number;
+  height?: number;
 }
 ```
 
@@ -130,15 +256,15 @@ processing: {
 
 ```typescript
 const media = createMedia({
-  provider: new S3Provider({ bucket: 'images' }),
+  driver: new S3Provider({ bucket: 'images', region: 'us-east-1' }),
   processing: {
     enabled: true,
     quality: 85,
     format: 'webp',
-    maxWidth: 2000,
+    maxWidth: 2048,
 
     sizes: [
-      // Thumbnail - square crop
+      // Thumbnail - square crop, always generated
       {
         name: 'thumb',
         width: 200,
@@ -159,23 +285,27 @@ const media = createMedia({
         name: 'medium',
         width: 800,
         quality: 85,
+        condition: (original) => original.width >= 800,
       },
 
-      // Large - for desktop
+      // Large - for desktop, only if source is big enough
       {
         name: 'large',
         width: 1600,
         quality: 90,
+        condition: (original) => original.width >= 1200,
       },
     ],
   },
 });
 
-// Upload
+// Upload with focal point
 const file = await media.upload({
   buffer: imageBuffer,
   filename: 'hero-image.jpg',
   mimeType: 'image/jpeg',
+  focalPoint: { x: 0.5, y: 0.3 },
+  tags: ['hero', 'homepage'],
 });
 
 // Use in HTML
@@ -185,9 +315,9 @@ const medium = variants.find(v => v.name === 'medium');
 const large = variants.find(v => v.name === 'large');
 
 // <picture>
-//   <source media="(min-width: 1200px)" srcset={large.url} />
-//   <source media="(min-width: 768px)" srcset={medium.url} />
-//   <img src={thumb.url} alt={file.alt} />
+//   <source media="(min-width: 1200px)" srcset={large?.url} />
+//   <source media="(min-width: 768px)" srcset={medium?.url} />
+//   <img src={thumb?.url} alt={file.alt} />
 // </picture>
 ```
 
@@ -196,16 +326,9 @@ const large = variants.find(v => v.name === 'large');
 Use variants for responsive images:
 
 ```typescript
-const file = await media.upload({
-  buffer: imageBuffer,
-  filename: 'product.jpg',
-  mimeType: 'image/jpeg',
-});
-
-const { variants } = file;
-
-// React component
 function ProductImage({ file }) {
+  const { variants } = file;
+
   return (
     <picture>
       <source
@@ -217,8 +340,10 @@ function ProductImage({ file }) {
         srcSet={variants.find(v => v.name === 'medium')?.url}
       />
       <img
-        src={variants.find(v => v.name === 'thumbnail')?.url}
+        src={variants.find(v => v.name === 'thumb')?.url}
         alt={file.alt}
+        width={variants.find(v => v.name === 'thumb')?.width}
+        height={variants.find(v => v.name === 'thumb')?.height}
       />
     </picture>
   );
@@ -227,11 +352,11 @@ function ProductImage({ file }) {
 
 ## Without Sharp
 
-If Sharp isn't installed, images upload as-is:
+If Sharp is not installed, images upload as-is without processing:
 
 ```typescript
 const media = createMedia({
-  provider: myProvider,
+  driver: myDriver,
   processing: { enabled: false },  // No processing
   suppressWarnings: true,          // Hide Sharp warning
 });
@@ -240,4 +365,4 @@ const media = createMedia({
 ## Next Steps
 
 - [Events](./events.mdx) - Hook into processing
-- [Storage Providers](./storage-providers.mdx) - Where images are stored
+- [Storage Drivers](./storage-providers.mdx) - Where images are stored

@@ -64,13 +64,13 @@ const mediaWithRedis = createMedia({
   processing: {
     enabled: true,
     format: 'webp',
-    // Sharp memory optimization (v2.0.3)
+    // Sharp memory optimization
     sharpOptions: {
       concurrency: 2,
       cache: false,
     },
   },
-  // Concurrency control (v2.0.3)
+  // Concurrency control
   concurrency: {
     maxConcurrent: 10, // Higher for production with caching
   },

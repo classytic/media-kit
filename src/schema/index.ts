@@ -2,5 +2,5 @@
  * Schema Exports
  */
 
-export { createMediaSchema, MediaSchema, DEFAULT_BASE_FOLDERS } from './media.schema';
+export { createMediaSchema, MediaSchema } from './media.schema';
 export type { MediaSchemaOptions } from './media.schema';

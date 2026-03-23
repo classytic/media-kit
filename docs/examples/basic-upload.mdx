@@ -5,7 +5,7 @@ Simple file upload with Express and Multer.
 ## Setup
 
 ```bash
-npm install express multer @classytic/media-kit mongoose
+npm install express multer @classytic/media-kit @classytic/mongokit mongoose @aws-sdk/client-s3
 ```
 
 ## Code
@@ -14,16 +14,21 @@ npm install express multer @classytic/media-kit mongoose
 import express from 'express';
 import multer from 'multer';
 import mongoose from 'mongoose';
-import { createMedia, LocalStorageProvider } from '@classytic/media-kit';
+import { createMedia } from '@classytic/media-kit';
+import { S3Provider } from '@classytic/media-kit/providers/s3';
 
 // Connect to MongoDB
 await mongoose.connect('mongodb://localhost:27017/myapp');
 
-// Create media kit
+// Create media kit with S3 driver
 const media = createMedia({
-  provider: new LocalStorageProvider({
-    uploadDir: './public/uploads',
-    publicUrl: 'http://localhost:3000/uploads',
+  driver: new S3Provider({
+    bucket: process.env.S3_BUCKET!,
+    region: process.env.S3_REGION!,
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+    },
   }),
 });
 
@@ -34,9 +39,6 @@ media.init(Media);
 const app = express();
 const upload = multer();
 
-// Serve static files
-app.use('/uploads', express.static('./public/uploads'));
-
 // Upload endpoint
 app.post('/upload', upload.single('file'), async (req, res) => {
   try {
@@ -45,6 +47,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       filename: req.file.originalname,
       mimeType: req.file.mimetype,
       folder: 'images',
+      tags: ['upload'],
     });
 
     res.json({
@@ -52,8 +55,9 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       file: {
         id: file._id,
         url: file.url,
-        filename: file.filename,
+        filename: file.originalFilename,
         size: file.size,
+        status: file.status,
       },
     });
   } catch (error) {
@@ -66,17 +70,30 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
 // List files
 app.get('/files', async (req, res) => {
-  const files = await Media.find()
-    .sort({ createdAt: -1 })
-    .limit(20);
+  const files = await media.getAll({
+    sort: { createdAt: -1 },
+    limit: 20,
+  });
 
-  res.json({ files });
+  res.json(files);
 });
 
 // Delete file
 app.delete('/files/:id', async (req, res) => {
   const deleted = await media.delete(req.params.id);
   res.json({ success: deleted });
+});
+
+// Soft delete (trash)
+app.post('/files/:id/trash', async (req, res) => {
+  const file = await media.softDelete(req.params.id);
+  res.json({ success: true, deletedAt: file.deletedAt });
+});
+
+// Restore from trash
+app.post('/files/:id/restore', async (req, res) => {
+  const file = await media.restore(req.params.id);
+  res.json({ success: true, file });
 });
 
 app.listen(3000, () => {
@@ -95,9 +112,15 @@ curl http://localhost:3000/files
 
 # Delete file
 curl -X DELETE http://localhost:3000/files/FILE_ID
+
+# Soft delete
+curl -X POST http://localhost:3000/files/FILE_ID/trash
+
+# Restore
+curl -X POST http://localhost:3000/files/FILE_ID/restore
 ```
 
 ## Next Steps
 
 - [Multi-Size Images](./multi-size-images.mdx) - Generate thumbnails
-- [Custom Provider](./custom-provider.mdx) - Create your own storage
+- [Custom Driver](./custom-provider.mdx) - Create your own storage driver

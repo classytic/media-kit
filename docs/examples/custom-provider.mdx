@@ -1,14 +1,48 @@
-# Custom Provider Example
+# Custom Storage Driver Example
 
-Create your own storage provider.
+Create your own storage driver.
 
-## Example: Cloudflare R2 Provider
+## StorageDriver Interface
+
+All drivers must implement the required methods:
 
 ```typescript
-import { StorageProvider, UploadResult, UploadOptions } from '@classytic/media-kit';
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import type { StorageDriver, WriteResult, FileStat } from '@classytic/media-kit';
 
-export class R2Provider implements StorageProvider {
+interface StorageDriver {
+  readonly name: string;
+
+  // Required
+  write(key: string, data: Buffer | NodeJS.ReadableStream, contentType: string): Promise<WriteResult>;
+  read(key: string, range?: { start: number; end: number }): Promise<NodeJS.ReadableStream>;
+  delete(key: string): Promise<boolean>;
+  exists(key: string): Promise<boolean>;
+  stat(key: string): Promise<FileStat>;
+  getPublicUrl(key: string): string;
+
+  // Optional
+  list?(prefix: string): AsyncIterable<string>;
+  copy?(source: string, destination: string): Promise<WriteResult>;
+  move?(source: string, destination: string): Promise<WriteResult>;
+  getSignedUrl?(key: string, expiresIn?: number): Promise<string>;
+  getSignedUploadUrl?(key: string, contentType: string, expiresIn?: number): Promise<PresignedUploadResult>;
+}
+```
+
+## Example: Cloudflare R2 Driver
+
+```typescript
+import type { StorageDriver, WriteResult, FileStat } from '@classytic/media-kit';
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+  HeadObjectCommand,
+} from '@aws-sdk/client-s3';
+import { Readable } from 'stream';
+
+export class R2Driver implements StorageDriver {
   readonly name = 'r2';
   private client: S3Client;
   private bucket: string;
@@ -34,40 +68,49 @@ export class R2Provider implements StorageProvider {
     });
   }
 
-  async upload(
-    buffer: Buffer,
-    filename: string,
-    options?: UploadOptions
-  ): Promise<UploadResult> {
-    const key = options?.folder
-      ? `${options.folder}/${filename}`
-      : filename;
+  async write(key: string, data: Buffer | NodeJS.ReadableStream, contentType: string): Promise<WriteResult> {
+    let buffer: Buffer;
+    if (Buffer.isBuffer(data)) {
+      buffer = data;
+    } else {
+      const chunks: Buffer[] = [];
+      for await (const chunk of data as AsyncIterable<Buffer>) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      buffer = Buffer.concat(chunks);
+    }
 
-    await this.client.send(
-      new PutObjectCommand({
-        Bucket: this.bucket,
-        Key: key,
-        Body: buffer,
-        ContentType: options?.contentType,
-      })
-    );
+    await this.client.send(new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      Body: buffer,
+      ContentType: contentType,
+    }));
 
     return {
-      url: `${this.publicUrl}/${key}`,
       key,
+      url: this.getPublicUrl(key),
       size: buffer.length,
-      mimeType: options?.contentType || 'application/octet-stream',
     };
+  }
+
+  async read(key: string, range?: { start: number; end: number }): Promise<NodeJS.ReadableStream> {
+    const command = new GetObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      ...(range && { Range: `bytes=${range.start}-${range.end}` }),
+    });
+
+    const response = await this.client.send(command);
+    return response.Body as NodeJS.ReadableStream;
   }
 
   async delete(key: string): Promise<boolean> {
     try {
-      await this.client.send(
-        new DeleteObjectCommand({
-          Bucket: this.bucket,
-          Key: key,
-        })
-      );
+      await this.client.send(new DeleteObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+      }));
       return true;
     } catch {
       return false;
@@ -75,8 +118,33 @@ export class R2Provider implements StorageProvider {
   }
 
   async exists(key: string): Promise<boolean> {
-    // Implementation omitted for brevity
-    return true;
+    try {
+      await this.client.send(new HeadObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+      }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async stat(key: string): Promise<FileStat> {
+    const response = await this.client.send(new HeadObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+    }));
+
+    return {
+      size: response.ContentLength || 0,
+      contentType: response.ContentType || 'application/octet-stream',
+      lastModified: response.LastModified,
+      etag: response.ETag,
+    };
+  }
+
+  getPublicUrl(key: string): string {
+    return `${this.publicUrl}/${key}`;
   }
 }
 ```
@@ -85,13 +153,13 @@ export class R2Provider implements StorageProvider {
 
 ```typescript
 import { createMedia } from '@classytic/media-kit';
-import { R2Provider } from './providers/r2.provider';
+import { R2Driver } from './drivers/r2.driver';
 
 const media = createMedia({
-  provider: new R2Provider({
-    accountId: process.env.R2_ACCOUNT_ID,
-    accessKeyId: process.env.R2_ACCESS_KEY_ID,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  driver: new R2Driver({
+    accountId: process.env.R2_ACCOUNT_ID!,
+    accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
     bucket: 'my-uploads',
     publicUrl: 'https://pub-xxx.r2.dev',
   }),
@@ -103,33 +171,37 @@ const file = await media.upload({
   mimeType: 'image/jpeg',
 });
 
-console.log(file.url);  // https://pub-xxx.r2.dev/photo.jpg
+console.log(file.url);  // https://pub-xxx.r2.dev/...
 ```
 
-## Example: DigitalOcean Spaces Provider
+## S3-Compatible Services
+
+For services like DigitalOcean Spaces or MinIO, use the built-in S3Provider with a custom endpoint:
+
+### DigitalOcean Spaces
 
 ```typescript
 import { S3Provider } from '@classytic/media-kit/providers/s3';
 
-const provider = new S3Provider({
+const driver = new S3Provider({
   bucket: 'my-space',
   region: 'nyc3',
   endpoint: 'https://nyc3.digitaloceanspaces.com',
   forcePathStyle: false,
   credentials: {
-    accessKeyId: process.env.SPACES_KEY,
-    secretAccessKey: process.env.SPACES_SECRET,
+    accessKeyId: process.env.SPACES_KEY!,
+    secretAccessKey: process.env.SPACES_SECRET!,
   },
   publicUrl: 'https://my-space.nyc3.cdn.digitaloceanspaces.com',
 });
 ```
 
-## Example: MinIO Provider
+### MinIO
 
 ```typescript
 import { S3Provider } from '@classytic/media-kit/providers/s3';
 
-const provider = new S3Provider({
+const driver = new S3Provider({
   bucket: 'uploads',
   region: 'us-east-1',
   endpoint: 'http://localhost:9000',
@@ -142,31 +214,7 @@ const provider = new S3Provider({
 });
 ```
 
-## Provider Interface
-
-All providers must implement:
-
-```typescript
-interface StorageProvider {
-  // Provider name
-  readonly name: string;
-
-  // Upload file
-  upload(
-    buffer: Buffer,
-    filename: string,
-    options?: UploadOptions
-  ): Promise<UploadResult>;
-
-  // Delete file
-  delete(key: string): Promise<boolean>;
-
-  // Check if file exists
-  exists(key: string): Promise<boolean>;
-}
-```
-
 ## Next Steps
 
-- [Providers API](../api/providers.mdx) - Full provider reference
+- [Providers API](../api/providers.mdx) - Full driver reference
 - [Storage Providers Guide](../guides/storage-providers.mdx) - More examples

@@ -2,6 +2,7 @@
  * Package Contents Test
  *
  * Verifies that only necessary files are included in npm package
+ * and that exports/config match tsdown output conventions (.mjs / .d.mts).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -14,7 +15,7 @@ describe('Package Contents', () => {
       readFileSync(join(__dirname, '../package.json'), 'utf-8')
     );
 
-    expect(packageJson.files).toEqual(['dist', 'README.md']);
+    expect(packageJson.files).toEqual(['dist', 'README.md', 'LICENSE']);
   });
 
   it('should exclude source files via files whitelist', () => {
@@ -22,7 +23,6 @@ describe('Package Contents', () => {
       readFileSync(join(__dirname, '../package.json'), 'utf-8')
     );
 
-    // Source should NOT be in files array
     expect(packageJson.files).not.toContain('src');
     expect(packageJson.files).not.toContain('tests');
     expect(packageJson.files).not.toContain('examples');
@@ -46,41 +46,39 @@ describe('Package Contents', () => {
     const peerDeps = packageJson.peerDependencies;
     const peerDepsMeta = packageJson.peerDependenciesMeta;
 
-    // sharp, aws-sdk, gcs should be optional
+    // sharp, aws-sdk, gcs, mime-types should be optional
     expect(peerDepsMeta['sharp']).toEqual({ optional: true });
     expect(peerDepsMeta['@aws-sdk/client-s3']).toEqual({ optional: true });
+    expect(peerDepsMeta['@aws-sdk/s3-request-presigner']).toEqual({ optional: true });
     expect(peerDepsMeta['@google-cloud/storage']).toEqual({ optional: true });
+    expect(peerDepsMeta['mime-types']).toEqual({ optional: true });
 
     // mongoose and mongokit should be required (not optional)
     expect(peerDepsMeta['mongoose']).toBeUndefined();
     expect(peerDepsMeta['@classytic/mongokit']).toBeUndefined();
-    
-    // mongokit should be >=3.0.0
-    expect(peerDeps['@classytic/mongokit']).toBe('>=3.0.0');
+
+    // mongokit should be >=3.3.2
+    expect(peerDeps['@classytic/mongokit']).toBe('>=3.3.2');
   });
 
-  it('should only have mime-types as runtime dependency', () => {
+  it('should have no runtime dependencies (all are peer)', () => {
     const packageJson = JSON.parse(
       readFileSync(join(__dirname, '../package.json'), 'utf-8')
     );
 
     const deps = Object.keys(packageJson.dependencies || {});
-
-    expect(deps).toEqual(['mime-types']);
+    expect(deps).toEqual([]);
   });
 
-  it('should be ESM-only with clean exports', () => {
+  it('should be ESM-only with tsdown output conventions', () => {
     const packageJson = JSON.parse(
       readFileSync(join(__dirname, '../package.json'), 'utf-8')
     );
 
-    // ESM-only setup
     expect(packageJson.type).toBe('module');
-    expect(packageJson.main).toBe('./dist/index.js');
-    expect(packageJson.types).toBe('./dist/index.d.ts');
-    
-    // No module field needed for ESM-only
-    expect(packageJson.module).toBeUndefined();
+    expect(packageJson.main).toBe('./dist/index.mjs');
+    expect(packageJson.types).toBe('./dist/index.d.mts');
+    expect(packageJson.module).toBe('./dist/index.mjs');
   });
 
   it('should export main entry points correctly', () => {
@@ -88,21 +86,50 @@ describe('Package Contents', () => {
       readFileSync(join(__dirname, '../package.json'), 'utf-8')
     );
 
-    // Main export - simple ESM-only
+    // Main export
     expect(packageJson.exports['.']).toEqual({
-      types: './dist/index.d.ts',
-      default: './dist/index.js',
+      types: './dist/index.d.mts',
+      import: './dist/index.mjs',
     });
 
     // Provider exports
     expect(packageJson.exports['./providers/s3']).toEqual({
-      types: './dist/providers/s3.provider.d.ts',
-      default: './dist/providers/s3.provider.js',
+      types: './dist/providers/s3.d.mts',
+      import: './dist/providers/s3.mjs',
     });
-    
+
     expect(packageJson.exports['./providers/gcs']).toEqual({
-      types: './dist/providers/gcs.provider.d.ts',
-      default: './dist/providers/gcs.provider.js',
+      types: './dist/providers/gcs.d.mts',
+      import: './dist/providers/gcs.mjs',
     });
+
+    expect(packageJson.exports['./providers/local']).toEqual({
+      types: './dist/providers/local.d.mts',
+      import: './dist/providers/local.mjs',
+    });
+
+    expect(packageJson.exports['./providers/router']).toEqual({
+      types: './dist/providers/router.d.mts',
+      import: './dist/providers/router.mjs',
+    });
+  });
+
+  it('should export transforms entry point', () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(__dirname, '../package.json'), 'utf-8')
+    );
+
+    expect(packageJson.exports['./transforms']).toEqual({
+      types: './dist/transforms.d.mts',
+      import: './dist/transforms.mjs',
+    });
+  });
+
+  it('should have sideEffects: false for tree shaking', () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(__dirname, '../package.json'), 'utf-8')
+    );
+
+    expect(packageJson.sideEffects).toBe(false);
   });
 });

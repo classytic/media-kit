@@ -1,6 +1,6 @@
 # Quick Start
 
-Get up and running in 5 minutes.
+Get up and running with `@classytic/media-kit` in 5 minutes.
 
 ## Step 1: Connect to MongoDB
 
@@ -10,31 +10,40 @@ import mongoose from 'mongoose';
 await mongoose.connect('mongodb://localhost:27017/myapp');
 ```
 
-## Step 2: Create Storage Provider
-
-### Local Storage (Easiest)
-
-```typescript
-import { LocalStorageProvider } from '@classytic/media-kit';
-
-const provider = new LocalStorageProvider({
-  uploadDir: './uploads',
-  publicUrl: 'http://localhost:3000/uploads',
-});
-```
+## Step 2: Create a Storage Driver
 
 ### AWS S3
+
+```bash
+npm install @aws-sdk/client-s3
+```
 
 ```typescript
 import { S3Provider } from '@classytic/media-kit/providers/s3';
 
-const provider = new S3Provider({
+const driver = new S3Provider({
   bucket: 'my-bucket',
   region: 'us-east-1',
   credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY,
-    secretAccessKey: process.env.AWS_SECRET_KEY,
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   },
+});
+```
+
+### Google Cloud Storage
+
+```bash
+npm install @google-cloud/storage
+```
+
+```typescript
+import { GCSProvider } from '@classytic/media-kit/providers/gcs';
+
+const driver = new GCSProvider({
+  bucket: 'my-bucket',
+  projectId: 'my-project',
+  keyFilename: './service-account.json',
 });
 ```
 
@@ -43,12 +52,12 @@ const provider = new S3Provider({
 ```typescript
 import { createMedia } from '@classytic/media-kit';
 
-const media = createMedia({ provider });
+const media = createMedia({ driver });
 
 // Create Mongoose model
 const Media = mongoose.model('Media', media.schema);
 
-// Initialize
+// Initialize with the model
 media.init(Media);
 ```
 
@@ -61,9 +70,14 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     buffer: req.file.buffer,
     filename: req.file.originalname,
     mimeType: req.file.mimetype,
+    tags: ['user-upload'],
+    description: 'Uploaded via API',
   });
 
-  res.json({ url: uploaded.url });
+  res.json({
+    url: uploaded.url,
+    status: uploaded.status, // 'ready'
+  });
 });
 ```
 
@@ -73,15 +87,20 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 import express from 'express';
 import mongoose from 'mongoose';
 import multer from 'multer';
-import { createMedia, LocalStorageProvider } from '@classytic/media-kit';
+import { createMedia } from '@classytic/media-kit';
+import { S3Provider } from '@classytic/media-kit/providers/s3';
 
 // Setup
 await mongoose.connect('mongodb://localhost:27017/myapp');
 
 const media = createMedia({
-  provider: new LocalStorageProvider({
-    uploadDir: './uploads',
-    publicUrl: 'http://localhost:3000/uploads',
+  driver: new S3Provider({
+    bucket: process.env.S3_BUCKET,
+    region: 'us-east-1',
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    },
   }),
 });
 
@@ -98,9 +117,17 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     filename: req.file.originalname,
     mimeType: req.file.mimetype,
     folder: 'images',
+    tags: ['product'],
+    description: 'Product image',
   });
 
-  res.json({ url: file.url });
+  res.json({
+    id: file._id,
+    url: file.url,
+    status: file.status,
+    hash: file.hash,
+    tags: file.tags,
+  });
 });
 
 app.listen(3000);
@@ -110,4 +137,4 @@ app.listen(3000);
 
 - [Configuration](./configuration.mdx) - Customize behavior
 - [Image Processing](../guides/image-processing.mdx) - Auto-resize images
-- [Storage Providers](../guides/storage-providers.mdx) - Switch providers
+- [Storage Drivers](../guides/storage-providers.mdx) - S3, GCS, and custom drivers

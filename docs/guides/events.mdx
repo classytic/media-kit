@@ -1,6 +1,8 @@
 # Events
 
-Hook into file operations with the event system.
+Hook into file operations with the awaitable event system.
+
+All events are **awaitable** -- listeners can be async, and `emit()` awaits all of them via `Promise.allSettled()`. Calling `on()` returns an **unsubscribe function** instead of requiring `off()`.
 
 ## Available Events
 
@@ -16,47 +18,120 @@ Hook into file operations with the event system.
 - `after:delete` - After successful deletion
 - `error:delete` - When deletion fails
 
-### Query Events
+### List Events
 
 - `before:list` - Before listing files
 - `after:list` - After listing files
 
+### Presigned Upload Events
+
+- `before:presignedUpload` - Before generating a presigned URL
+- `after:presignedUpload` - After presigned URL generated
+
+### Confirm Upload Events
+
+- `before:confirmUpload` - Before confirming a presigned upload
+- `after:confirmUpload` - After upload confirmed
+
+### Replace Events
+
+- `before:replace` - Before file content replacement
+- `after:replace` - After successful replacement
+- `error:replace` - When replacement fails
+
+### Soft Delete Events
+
+- `before:softDelete` - Before soft-deleting a file
+- `after:softDelete` - After file is soft-deleted
+
+### Restore Events
+
+- `before:restore` - Before restoring a soft-deleted file
+- `after:restore` - After file is restored
+
+### Import Events
+
+- `before:import` - Before importing a file from URL
+- `after:import` - After successful import
+- `error:import` - When import fails
+
+### Rename Events
+
+- `before:rename` - Before folder rename
+- `after:rename` - After folder renamed
+
 ## Basic Usage
 
 ```typescript
-// Listen to events
-media.on('after:upload', (event) => {
+// on() returns an unsubscribe function
+const unsubscribe = media.on('after:upload', async (event) => {
   console.log('File uploaded:', event.result.url);
 });
 
-// Upload triggers event
+// Upload triggers the event
 const file = await media.upload({
   buffer: fileBuffer,
   filename: 'photo.jpg',
   mimeType: 'image/jpeg',
 });
+
+// Later, stop listening
+unsubscribe();
+```
+
+## Event Payloads
+
+### EventContext (before hooks)
+
+Before hooks receive an `EventContext` with the operation input:
+
+```typescript
+interface EventContext<T> {
+  data: T;                    // Operation input data
+  context?: OperationContext; // User, org, etc.
+  timestamp: Date;
+}
+```
+
+### EventResult (after hooks)
+
+After hooks receive an `EventResult` with both input and result:
+
+```typescript
+interface EventResult<T, R> {
+  context: EventContext<T>;   // Original context
+  result: R;                  // Operation result
+  timestamp: Date;
+}
+```
+
+### EventError (error hooks)
+
+Error hooks receive an `EventError` with the original context and the error:
+
+```typescript
+interface EventError<T> {
+  context: EventContext<T>;   // Original context
+  error: Error;               // Error that occurred
+  timestamp: Date;
+}
 ```
 
 ## Before Upload
 
-Validate or modify uploads before they happen:
+Validate or log uploads before they happen:
 
 ```typescript
-media.on('before:upload', (event) => {
-  const { buffer, filename, mimeType } = event.input;
+media.on('before:upload', async (event) => {
+  const { data, context } = event;
 
-  // Log upload attempt
-  console.log(`Uploading ${filename} (${buffer.length} bytes)`);
-
-  // Validate
-  if (buffer.length > 10 * 1024 * 1024) {
-    throw new Error('File too large');
-  }
+  console.log(`Uploading ${data.filename} (${data.buffer.length} bytes)`);
 
   // Track metrics
-  analytics.track('file_upload_started', {
-    filename,
-    size: buffer.length,
+  await analytics.track('file_upload_started', {
+    filename: data.filename,
+    size: data.buffer.length,
+    userId: context?.userId,
   });
 });
 ```
@@ -79,84 +154,143 @@ media.on('after:upload', async (event) => {
   await searchIndex.add({
     id: file._id,
     title: file.title,
+    tags: file.tags,
     url: file.url,
-  });
-
-  // Log to analytics
-  analytics.track('file_uploaded', {
-    fileId: file._id,
-    size: file.size,
-    mimeType: file.mimeType,
   });
 });
 ```
 
 ## Error Handling
 
-Handle upload failures:
+Handle operation failures:
 
 ```typescript
-media.on('error:upload', (event) => {
-  const { error, input } = event;
+media.on('error:upload', async (event) => {
+  const { error, context } = event;
 
-  // Log error
   logger.error('Upload failed', {
-    filename: input.filename,
+    filename: context.data.filename,
     error: error.message,
   });
 
-  // Send alert
   if (error.message.includes('storage')) {
-    alerting.notify('Storage system error');
+    await alerting.notify('Storage system error');
   }
+});
+```
 
-  // Track failures
-  analytics.track('upload_failed', {
-    filename: input.filename,
-    error: error.message,
+## Soft Delete and Restore Events
+
+Track the soft delete lifecycle:
+
+```typescript
+media.on('after:softDelete', async (event) => {
+  const file = event.result;
+  console.log(`File ${file.filename} moved to trash`);
+
+  // Remove from search index but keep in archive
+  await searchIndex.remove(file._id);
+});
+
+media.on('after:restore', async (event) => {
+  const file = event.result;
+  console.log(`File ${file.filename} restored from trash`);
+
+  // Re-add to search index
+  await searchIndex.add({
+    id: file._id,
+    title: file.title,
+    url: file.url,
   });
 });
 ```
 
-## Delete Events
+## Replace Events
 
-Track file deletions:
+Track file content replacements (same ID, new content):
 
 ```typescript
-media.on('before:delete', (event) => {
-  console.log('Deleting file:', event.id);
+media.on('after:replace', async (event) => {
+  const file = event.result;
+
+  // Invalidate CDN cache for the old version
+  await cdn.invalidate(file.url);
+
+  // Notify subscribers
+  await webhooks.send('file.replaced', {
+    id: file._id,
+    url: file.url,
+    hash: file.hash,
+  });
+});
+```
+
+## Import Events
+
+Track URL imports:
+
+```typescript
+media.on('after:import', async (event) => {
+  const file = event.result;
+  console.log(`Imported ${file.originalFilename} from URL`);
 });
 
-media.on('after:delete', (event) => {
-  console.log('File deleted successfully');
-
-  // Clean up related data
-  await searchIndex.remove(event.id);
-  await cache.invalidate(`file:${event.id}`);
+media.on('error:import', async (event) => {
+  logger.error('Import failed', {
+    error: event.error.message,
+  });
 });
+```
+
+## Unsubscribe Pattern
+
+Every `on()` call returns an unsubscribe function. Use it to clean up listeners:
+
+```typescript
+// Store unsubscribe functions
+const unsubscribers: (() => void)[] = [];
+
+// Register listeners
+unsubscribers.push(
+  media.on('after:upload', async (event) => {
+    await processUpload(event.result);
+  })
+);
+
+unsubscribers.push(
+  media.on('after:delete', async (event) => {
+    await cleanupAfterDelete(event);
+  })
+);
+
+// Clean up all listeners (e.g., on shutdown)
+function cleanup() {
+  unsubscribers.forEach(unsub => unsub());
+}
 ```
 
 ## Multiple Listeners
 
-Add multiple handlers for the same event:
+Multiple handlers for the same event all run concurrently via `Promise.allSettled()`. One failing listener does not block others:
 
 ```typescript
-// Listener 1: Log to console
-media.on('after:upload', (event) => {
-  console.log('Upload:', event.result.filename);
+// Listener 1: Analytics
+media.on('after:upload', async (event) => {
+  await analytics.track('upload', { fileId: event.result._id });
 });
 
-// Listener 2: Send to analytics
-media.on('after:upload', (event) => {
-  analytics.track('upload', { fileId: event.result._id });
+// Listener 2: Search indexing
+media.on('after:upload', async (event) => {
+  await searchIndex.add(event.result);
 });
 
-// Listener 3: Update cache
-media.on('after:upload', (event) => {
-  cache.set(`file:${event.result._id}`, event.result);
+// Listener 3: Webhook
+media.on('after:upload', async (event) => {
+  await webhooks.send('file.uploaded', event.result);
 });
 
-// All three run when file is uploaded
+// All three run concurrently when a file is uploaded.
+// If one throws, the others still complete.
 ```
 
 ## Complete Example
@@ -166,27 +300,61 @@ import { createMedia } from '@classytic/media-kit';
 import { S3Provider } from '@classytic/media-kit/providers/s3';
 
 const media = createMedia({
-  provider: new S3Provider({ bucket: 'uploads' }),
+  driver: new S3Provider({ bucket: 'uploads', region: 'us-east-1' }),
+  softDelete: { enabled: true, ttlDays: 30 },
 });
 
 // Analytics tracking
-media.on('after:upload', (event) => {
-  analytics.track('file_uploaded', {
+media.on('after:upload', async (event) => {
+  await analytics.track('file_uploaded', {
     fileId: event.result._id.toString(),
     size: event.result.size,
     mimeType: event.result.mimeType,
-    organizationId: event.result.organizationId,
+    status: event.result.status,
+    tags: event.result.tags,
   });
 });
 
 // Search indexing
 media.on('after:upload', async (event) => {
+  const file = event.result;
   await searchClient.index('files').addDocuments([{
-    id: event.result._id.toString(),
-    filename: event.result.filename,
-    title: event.result.title,
-    url: event.result.url,
+    id: file._id.toString(),
+    filename: file.filename,
+    title: file.title,
+    tags: file.tags,
+    url: file.url,
   }]);
+});
+
+// Remove from search on soft delete, re-add on restore
+const unsubSoftDelete = media.on('after:softDelete', async (event) => {
+  await searchClient.index('files').deleteDocument(event.result._id.toString());
+});
+
+const unsubRestore = media.on('after:restore', async (event) => {
+  const file = event.result;
+  await searchClient.index('files').addDocuments([{
+    id: file._id.toString(),
+    filename: file.filename,
+    title: file.title,
+    url: file.url,
+  }]);
+});
+
+// CDN cache invalidation on replace
+media.on('after:replace', async (event) => {
+  await cdn.invalidate(event.result.url);
+});
+
+// Error alerting
+media.on('error:upload', async (event) => {
+  if (event.error.message.includes('storage')) {
+    await alerting.critical('File upload storage error', {
+      error: event.error.message,
+      filename: event.context.data.filename,
+    });
+  }
 });
 
 // Webhook notifications
@@ -200,74 +368,11 @@ media.on('after:upload', async (event) => {
         id: event.result._id,
         url: event.result.url,
         filename: event.result.filename,
+        hash: event.result.hash,
       },
     }),
   });
 });
-
-// Cache warming
-media.on('after:upload', (event) => {
-  // Warm CDN cache by requesting the file
-  fetch(event.result.url, { method: 'HEAD' });
-});
-
-// Error alerting
-media.on('error:upload', (event) => {
-  if (event.error.message.includes('storage')) {
-    alerting.critical('File upload storage error', {
-      error: event.error.message,
-      filename: event.input.filename,
-    });
-  }
-});
-```
-
-## TypeScript Types
-
-Events are fully typed:
-
-```typescript
-import type { UploadEvent, DeleteEvent } from '@classytic/media-kit';
-
-media.on<UploadEvent>('after:upload', (event) => {
-  // event.result is typed as IMediaDocument
-  const fileId = event.result._id;
-  const url = event.result.url;
-});
-
-media.on<DeleteEvent>('after:delete', (event) => {
-  // event.id is typed as string
-  console.log('Deleted:', event.id);
-});
-```
-
-## Event Payload Reference
-
-### Upload Events
-
-```typescript
-{
-  input: {
-    buffer: Buffer;
-    filename: string;
-    mimeType: string;
-    folder?: string;
-    title?: string;
-    alt?: string;
-    // ... other upload options
-  },
-  result?: IMediaDocument; // Only in 'after:upload'
-  error?: Error;           // Only in 'error:upload'
-}
-```
-
-### Delete Events
-
-```typescript
-{
-  id: string;              // File ID
-  error?: Error;           // Only in 'error:delete'
-}
 ```
 
 ## Next Steps

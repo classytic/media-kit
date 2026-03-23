@@ -1,56 +1,31 @@
 /**
- * @classytic/media-kit
- * 
+ * @classytic/media-kit v2.1.0
+ *
  * Production-grade media management for Mongoose powered by @classytic/mongokit.
- * Features pluggable storage providers, smart pagination, and full TypeScript support.
- * 
+ * Features pluggable storage drivers, status lifecycle, focal points, soft deletes,
+ * asset transforms, smart pagination, and full TypeScript support.
+ *
  * @example
  * ```ts
  * import { createMedia, createMediaSchema } from '@classytic/media-kit';
  * import { S3Provider } from '@classytic/media-kit/providers/s3';
- * import { cachePlugin, createMemoryCache } from '@classytic/mongokit';
  * import mongoose from 'mongoose';
- * 
- * // Create media kit with mongokit plugins
+ *
  * const media = createMedia({
- *   provider: new S3Provider({
- *     bucket: 'my-bucket',
- *     region: 'us-east-1',
- *   }),
- *   folders: {
- *     baseFolders: ['products', 'users', 'posts'],
- *   },
- *   processing: {
- *     format: 'webp',
- *     quality: 80,
- *   },
- *   // Mongokit cache plugin
- *   plugins: [
- *     cachePlugin({ adapter: createMemoryCache() })
- *   ],
+ *   driver: new S3Provider({ bucket: 'my-bucket', region: 'us-east-1' }),
+ *   folders: { defaultFolder: 'general' },
+ *   processing: { format: 'original', quality: { jpeg: 82, webp: 82, avif: 50, png: 100 } },
  * });
- * 
- * // Create model and initialize
+ *
  * const Media = mongoose.model('Media', media.schema);
  * media.init(Media);
- * 
- * // Upload file
+ *
  * const uploaded = await media.upload({
- *   buffer,
- *   filename: 'photo.jpg',
- *   mimeType: 'image/jpeg',
+ *   buffer, filename: 'photo.jpg', mimeType: 'image/jpeg',
  *   folder: 'products/featured',
  * });
- * 
- * // Smart pagination (mongokit-powered)
- * const page1 = await media.getAll({ page: 1, limit: 20 });
- * const stream = await media.getAll({ sort: { createdAt: -1 }, limit: 50 });
- * const next = await media.getAll({ after: stream.next, sort: { createdAt: -1 } });
- * 
- * // Direct repository access for advanced queries
- * const stats = await media.repository.getStorageByFolder();
  * ```
- * 
+ *
  * @packageDocumentation
  */
 
@@ -61,15 +36,21 @@ export { createMedia } from './media';
 export { DEFAULT_CONFIG, mergeConfig } from './config';
 
 // Schema
-export { createMediaSchema, MediaSchema, DEFAULT_BASE_FOLDERS } from './schema/media.schema';
+export { createMediaSchema, MediaSchema } from './schema/media.schema';
 export type { MediaSchemaOptions } from './schema/media.schema';
 
 // Repository (extends mongokit Repository)
 export { createMediaRepository, MediaRepository } from './repository/media.repository';
 export type { MediaRepositoryOptions, FolderAggregateResult } from './repository/media.repository';
 
+// Events (awaitable)
+export { MediaEventEmitter } from './events';
+
 // Processing
 export { ImageProcessor, createImageProcessor } from './processing/image';
+export { calculateFocalPointCrop, isValidFocalPoint, DEFAULT_FOCAL_POINT } from './processing/focal-point';
+export { generateThumbHash } from './processing/thumbhash';
+export { DEVICE_WIDTHS, COMPACT_WIDTHS, IMAGE_WIDTHS, generateResponsiveVariants, resolvePresetWidths, PROCESSING_PRESETS, resolveProcessingPreset } from './processing/presets';
 
 // Utilities
 export * from './utils/folders';
@@ -77,65 +58,111 @@ export * from './utils/mime';
 export * from './utils/hash';
 export * from './utils/alt-text';
 
-// Types - Media Kit specific
+// Types — Storage Driver
 export type {
-  // Storage
-  StorageProvider,
-  UploadResult,
-  UploadOptions,
-  
-  // Processing
+  StorageDriver,
+  WriteResult,
+  FileStat,
+  PresignedUploadResult,
+} from './types';
+
+// Types — Processing
+export type {
   AspectRatioPreset,
   ProcessingConfig,
+  ProcessingPresetName,
+  OriginalHandling,
   ProcessingOptions,
   ProcessedImage,
+  ImageAdapter,
   ImageProcessor as IImageProcessor,
+  QualityMap,
   SizeVariant,
   GeneratedVariant,
   AltGenerationConfig,
-  
-  // Documents
+  FocalPoint,
+  SharpOptions,
+  VideoAdapter,
+  RawAdapter,
+  MediaCacheConfig,
+} from './types';
+
+// Re-export QueryParser from mongokit for convenience
+export { QueryParser } from '@classytic/mongokit';
+export type { ParsedQuery, QueryParserOptions } from '@classytic/mongokit';
+
+// Types — Documents
+export type {
   IMedia,
   IMediaDocument,
   MediaModel,
+  MediaStatus,
   ExifMetadata,
-  VideoMetadata,
-  
-  // Configuration
+} from './types';
+
+// Types — Configuration
+export type {
   MediaKitConfig,
   FileTypesConfig,
   FolderConfig,
   MultiTenancyConfig,
-  FieldAccessConfig,
   DeduplicationConfig,
+  SoftDeleteConfig,
+  ConcurrencyConfig,
   MediaKitLogger,
-  
-  // Operations
+} from './types';
+
+// Types — Operations
+export type {
   OperationContext,
   UploadInput,
+  ConfirmUploadInput,
+  ImportOptions,
   BulkResult,
-  
-  // Folder
+  RewriteResult,
+  InitiateMultipartInput,
+  CompleteMultipartInput,
+  MultipartUploadSession,
+  ResumableUploadSession,
+  SignedPartResult,
+  CompletedPart,
+  HashStrategy,
+  BatchPresignInput,
+  BatchPresignResult,
+} from './types';
+
+// Types — Folder
+export type {
   FolderNode,
   FolderTree,
   BreadcrumbItem,
   FolderStats,
-  
-  // Events
+} from './types';
+
+// Types — Events
+export type {
   MediaEventName,
   EventContext,
   EventResult,
   EventError,
+  ProgressEvent,
   EventListener,
-  EventEmitter,
-  
-  // Main
-  MediaKit,
+  Unsubscribe,
 } from './types';
+
+// Types — Transforms
+export type {
+  TransformParams,
+  TransformRequest,
+  TransformResponse,
+  TransformCache,
+} from './types';
+
+// Types — Main
+export type { MediaKit } from './types';
 
 // Re-export mongokit types for convenience
 export type {
-  // Pagination
   PaginationConfig,
   OffsetPaginationResult,
   KeysetPaginationResult,
@@ -145,18 +172,12 @@ export type {
   SortDirection,
   PopulateSpec,
   SelectSpec,
-  
-  // Plugins
   Plugin,
   PluginFunction,
   PluginType,
-  
-  // Cache
   CacheAdapter,
   CacheOptions,
   CacheOperationOptions,
-  
-  // Repository
   RepositoryContext,
   RepositoryEvent,
   EventPayload,
@@ -164,7 +185,5 @@ export type {
   CreateOptions,
   UpdateOptions,
   DeleteResult,
-  
-  // Error
   HttpError,
 } from './types';

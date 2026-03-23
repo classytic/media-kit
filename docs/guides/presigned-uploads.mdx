@@ -1,0 +1,661 @@
+# Presigned Uploads
+
+Upload large files directly from the browser to cloud storage, bypassing your server.
+
+## Why Presigned Uploads
+
+Standard uploads flow through your server: the browser sends the file to your API, your API buffers it in memory, then your API uploads it to cloud storage. This works fine for small files, but falls apart at scale.
+
+Problems with server-proxied uploads:
+
+- **Memory pressure** - A 500MB video held in server memory blocks other requests
+- **Slow transfers** - The file travels twice: browser-to-server, then server-to-cloud
+- **Timeout risk** - Long uploads on slow connections hit request timeouts
+- **Scaling cost** - More concurrent uploads means more server instances
+
+Presigned uploads solve all of this. Your server generates a short-lived signed URL, the browser uploads directly to S3 or GCS, and your server only handles lightweight JSON requests.
+
+## How It Works
+
+```
+1. Client requests a presigned URL from your server
+   Client  ──POST /api/media/presigned-url──>  Server
+
+2. Server generates a signed URL via the storage provider
+   Server  ──getSignedUploadUrl()──>  S3 / GCS
+   Server  <──{ uploadUrl, key, publicUrl }──  S3 / GCS
+
+3. Server returns the signed URL to the client
+   Server  ──{ uploadUrl, key, publicUrl }──>  Client
+
+4. Client uploads the file directly to cloud storage
+   Client  ──PUT (file bytes)──>  S3 / GCS
+
+5. Client confirms the upload with your server
+   Client  ──POST /api/media/confirm-upload──>  Server
+
+6. Server registers the file in the database
+   Server  ──confirmUpload()──>  MongoDB
+```
+
+The file never touches your server. Your server handles two small JSON requests and the cloud provider handles the heavy lifting.
+
+## Server Setup
+
+### Generate Presigned URL
+
+```typescript
+import express from 'express';
+import { media } from './media'; // your MediaKit instance
+
+const router = express.Router();
+
+router.get('/api/media/presigned-url', async (req, res) => {
+  const { filename, contentType, folder } = req.query;
+
+  if (!filename || !contentType) {
+    return res.status(400).json({
+      error: 'filename and contentType are required',
+    });
+  }
+
+  const result = await media.getSignedUploadUrl(
+    filename as string,
+    contentType as string,
+    {
+      folder: folder as string,
+      expiresIn: 600, // 10 minutes
+    }
+  );
+
+  res.json(result);
+});
+```
+
+### Confirm Upload
+
+```typescript
+router.post('/api/media/confirm-upload', async (req, res) => {
+  const { key, filename, mimeType, size, folder, alt, title } = req.body;
+
+  if (!key || !filename || !mimeType || !size) {
+    return res.status(400).json({
+      error: 'key, filename, mimeType, and size are required',
+    });
+  }
+
+  const file = await media.confirmUpload(
+    { key, filename, mimeType, size, folder, alt, title },
+    { userId: req.user.id }
+  );
+
+  res.json(file);
+});
+```
+
+### Full Router
+
+```typescript
+import express from 'express';
+import { media } from './media';
+import { authenticate } from './middleware/auth';
+
+const router = express.Router();
+
+// Both routes require authentication
+router.use(authenticate);
+
+router.get('/api/media/presigned-url', async (req, res) => {
+  const { filename, contentType, folder } = req.query;
+
+  if (!filename || !contentType) {
+    return res.status(400).json({ error: 'filename and contentType are required' });
+  }
+
+  // Validate content type
+  const allowed = ['image/', 'video/', 'audio/', 'application/pdf'];
+  if (!allowed.some((prefix) => (contentType as string).startsWith(prefix))) {
+    return res.status(400).json({ error: 'File type not allowed' });
+  }
+
+  const result = await media.getSignedUploadUrl(
+    filename as string,
+    contentType as string,
+    { folder: folder as string, expiresIn: 600 }
+  );
+
+  res.json(result);
+});
+
+router.post('/api/media/confirm-upload', async (req, res) => {
+  const { key, filename, mimeType, size, folder, alt, title } = req.body;
+
+  if (!key || !filename || !mimeType || !size) {
+    return res.status(400).json({
+      error: 'key, filename, mimeType, and size are required',
+    });
+  }
+
+  // Enforce size limit (100MB)
+  if (size > 100 * 1024 * 1024) {
+    return res.status(400).json({ error: 'File exceeds 100MB limit' });
+  }
+
+  const file = await media.confirmUpload(
+    { key, filename, mimeType, size, folder, alt, title },
+    { userId: req.user.id, organizationId: req.user.organizationId }
+  );
+
+  res.json(file);
+});
+
+export default router;
+```
+
+## Frontend Implementation
+
+### Basic Upload with Progress
+
+Use `XMLHttpRequest` for upload progress tracking. The `fetch` API does not support upload progress events.
+
+```typescript
+async function uploadWithPresignedUrl(
+  file: File,
+  folder?: string,
+  onProgress?: (percent: number) => void
+) {
+  // 1. Get presigned URL from your server
+  const params = new URLSearchParams({
+    filename: file.name,
+    contentType: file.type,
+    ...(folder && { folder }),
+  });
+
+  const presignRes = await fetch(`/api/media/presigned-url?${params}`);
+  if (!presignRes.ok) throw new Error('Failed to get upload URL');
+
+  const { uploadUrl, key, publicUrl, headers } = await presignRes.json();
+
+  // 2. Upload directly to cloud storage
+  await new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', uploadUrl);
+
+    // Set required headers
+    xhr.setRequestHeader('Content-Type', file.type);
+    if (headers) {
+      Object.entries(headers).forEach(([k, v]) => {
+        xhr.setRequestHeader(k, v as string);
+      });
+    }
+
+    // Track progress
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) {
+        const percent = Math.round((event.loaded / event.total) * 100);
+        onProgress(percent);
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        reject(new Error(`Upload failed with status ${xhr.status}`));
+      }
+    };
+
+    xhr.onerror = () => reject(new Error('Upload failed'));
+    xhr.send(file);
+  });
+
+  // 3. Confirm upload with your server
+  const confirmRes = await fetch('/api/media/confirm-upload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      key,
+      filename: file.name,
+      mimeType: file.type,
+      size: file.size,
+      folder,
+    }),
+  });
+
+  if (!confirmRes.ok) throw new Error('Failed to confirm upload');
+
+  return confirmRes.json();
+}
+```
+
+### Usage
+
+```typescript
+const file = document.querySelector<HTMLInputElement>('#file-input')!.files![0];
+
+const result = await uploadWithPresignedUrl(file, 'videos', (percent) => {
+  console.log(`Upload progress: ${percent}%`);
+  progressBar.style.width = `${percent}%`;
+});
+
+console.log('Uploaded:', result.url);
+```
+
+## React Hook
+
+A reusable hook that manages the full presigned upload lifecycle.
+
+```typescript
+import { useState, useCallback, useRef } from 'react';
+
+interface UploadState {
+  isUploading: boolean;
+  progress: number;
+  error: string | null;
+}
+
+interface PresignedUploadOptions {
+  folder?: string;
+  onSuccess?: (file: any) => void;
+  onError?: (error: Error) => void;
+}
+
+export function usePresignedUpload(options: PresignedUploadOptions = {}) {
+  const { folder, onSuccess, onError } = options;
+  const [state, setState] = useState<UploadState>({
+    isUploading: false,
+    progress: 0,
+    error: null,
+  });
+  const xhrRef = useRef<XMLHttpRequest | null>(null);
+
+  const upload = useCallback(
+    async (file: File) => {
+      setState({ isUploading: true, progress: 0, error: null });
+
+      try {
+        // 1. Get presigned URL
+        const params = new URLSearchParams({
+          filename: file.name,
+          contentType: file.type,
+          ...(folder && { folder }),
+        });
+
+        const presignRes = await fetch(`/api/media/presigned-url?${params}`);
+        if (!presignRes.ok) {
+          throw new Error('Failed to get upload URL');
+        }
+
+        const { uploadUrl, key, headers } = await presignRes.json();
+
+        // 2. Upload to cloud
+        await new Promise<void>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhrRef.current = xhr;
+          xhr.open('PUT', uploadUrl);
+
+          xhr.setRequestHeader('Content-Type', file.type);
+          if (headers) {
+            Object.entries(headers).forEach(([k, v]) => {
+              xhr.setRequestHeader(k, v as string);
+            });
+          }
+
+          xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable) {
+              const progress = Math.round(
+                (event.loaded / event.total) * 100
+              );
+              setState((prev) => ({ ...prev, progress }));
+            }
+          };
+
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve();
+            } else {
+              reject(new Error(`Upload failed with status ${xhr.status}`));
+            }
+          };
+
+          xhr.onerror = () => reject(new Error('Network error during upload'));
+          xhr.send(file);
+        });
+
+        // 3. Confirm upload
+        const confirmRes = await fetch('/api/media/confirm-upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            key,
+            filename: file.name,
+            mimeType: file.type,
+            size: file.size,
+            folder,
+          }),
+        });
+
+        if (!confirmRes.ok) {
+          throw new Error('Failed to confirm upload');
+        }
+
+        const result = await confirmRes.json();
+        setState({ isUploading: false, progress: 100, error: null });
+        onSuccess?.(result);
+        return result;
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error('Upload failed');
+        setState({ isUploading: false, progress: 0, error: error.message });
+        onError?.(error);
+        throw error;
+      } finally {
+        xhrRef.current = null;
+      }
+    },
+    [folder, onSuccess, onError]
+  );
+
+  const cancel = useCallback(() => {
+    if (xhrRef.current) {
+      xhrRef.current.abort();
+      xhrRef.current = null;
+      setState({ isUploading: false, progress: 0, error: 'Upload cancelled' });
+    }
+  }, []);
+
+  return {
+    upload,
+    cancel,
+    isUploading: state.isUploading,
+    progress: state.progress,
+    error: state.error,
+  };
+}
+```
+
+### Using the Hook
+
+```tsx
+function VideoUploader() {
+  const { upload, cancel, isUploading, progress, error } = usePresignedUpload({
+    folder: 'videos',
+    onSuccess: (file) => {
+      console.log('Upload complete:', file.url);
+    },
+  });
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      await upload(file);
+    }
+  };
+
+  return (
+    <div>
+      <input
+        type="file"
+        accept="video/*"
+        onChange={handleFileChange}
+        disabled={isUploading}
+      />
+
+      {isUploading && (
+        <div>
+          <div className="progress-bar" style={{ width: `${progress}%` }} />
+          <span>{progress}%</span>
+          <button onClick={cancel}>Cancel</button>
+        </div>
+      )}
+
+      {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+```
+
+## Error Handling
+
+### Presigned URL Expired
+
+Presigned URLs have a limited lifetime (default: 10 minutes). If the user waits too long before starting the upload, the URL will expire and S3/GCS will return a `403`.
+
+```typescript
+xhr.onload = () => {
+  if (xhr.status === 403) {
+    // URL expired - request a new one and retry
+    reject(new Error('PRESIGNED_URL_EXPIRED'));
+  } else if (xhr.status >= 200 && xhr.status < 300) {
+    resolve();
+  } else {
+    reject(new Error(`Upload failed with status ${xhr.status}`));
+  }
+};
+```
+
+Handle the retry in your upload function:
+
+```typescript
+async function uploadWithRetry(file: File, folder?: string, retries = 1) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await uploadWithPresignedUrl(file, folder);
+    } catch (err) {
+      if (
+        err instanceof Error &&
+        err.message === 'PRESIGNED_URL_EXPIRED' &&
+        attempt < retries
+      ) {
+        console.log('Presigned URL expired, retrying with a new URL...');
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+```
+
+### Upload Failure
+
+Network errors or cloud provider issues during the PUT request:
+
+```typescript
+xhr.onerror = () => {
+  // Network failure - safe to retry since PUT is idempotent
+  reject(new Error('UPLOAD_NETWORK_ERROR'));
+};
+
+xhr.ontimeout = () => {
+  reject(new Error('UPLOAD_TIMEOUT'));
+};
+
+// Set a timeout for very large files (30 minutes)
+xhr.timeout = 30 * 60 * 1000;
+```
+
+### Confirm Failure
+
+The file was uploaded to cloud storage but the confirmation request failed. The file exists in storage but is not registered in the database.
+
+```typescript
+try {
+  await confirmUpload(key, filename, mimeType, size);
+} catch (err) {
+  // Retry confirmation - the file is already in cloud storage
+  // This is safe because confirmUpload is idempotent for the same key
+  await retryWithBackoff(() => confirmUpload(key, filename, mimeType, size), {
+    maxRetries: 3,
+    baseDelay: 1000,
+  });
+}
+```
+
+## Orphan Cleanup
+
+When a file is uploaded to cloud storage but never confirmed (user closes browser, confirmation fails permanently, etc.), you end up with orphan files consuming storage.
+
+### Tracking Pending Uploads
+
+Store pending upload keys when generating presigned URLs:
+
+```typescript
+// In your presigned URL route
+const result = await media.getSignedUploadUrl(filename, contentType, {
+  folder,
+  expiresIn: 600,
+});
+
+// Track the pending upload
+await PendingUpload.create({
+  key: result.key,
+  createdAt: new Date(),
+  expiresAt: new Date(Date.now() + 600 * 1000),
+  userId: req.user.id,
+});
+
+res.json(result);
+```
+
+Remove the pending record on confirmation:
+
+```typescript
+// In your confirm route
+const file = await media.confirmUpload({ key, filename, mimeType, size });
+await PendingUpload.deleteOne({ key });
+res.json(file);
+```
+
+### Cron Job
+
+Run a cleanup job periodically to remove orphans:
+
+```typescript
+import cron from 'node-cron';
+
+// Run every hour
+cron.schedule('0 * * * *', async () => {
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours ago
+
+  const orphans = await PendingUpload.find({
+    createdAt: { $lt: cutoff },
+  });
+
+  for (const orphan of orphans) {
+    try {
+      await media.provider.delete(orphan.key);
+      await orphan.deleteOne();
+      console.log(`Cleaned up orphan: ${orphan.key}`);
+    } catch (err) {
+      console.error(`Failed to clean orphan ${orphan.key}:`, err);
+    }
+  }
+
+  console.log(`Orphan cleanup complete. Removed ${orphans.length} files.`);
+});
+```
+
+Use a generous cutoff (24 hours) to avoid deleting files from uploads that are still in progress or retrying.
+
+## Security Considerations
+
+### URL Expiry Time
+
+Keep presigned URLs short-lived. The default `expiresIn` of 600 seconds (10 minutes) is a good balance. Shorter times are more secure but risk expiring before large uploads complete on slow connections.
+
+```typescript
+// Short-lived for small files (images, documents)
+await media.getSignedUploadUrl(filename, contentType, { expiresIn: 300 });
+
+// Longer for large files (videos)
+await media.getSignedUploadUrl(filename, contentType, { expiresIn: 3600 });
+```
+
+### Content Type Validation
+
+Always validate the content type on the server before generating a presigned URL. The presigned URL locks the `Content-Type` header, so the browser cannot upload a different file type than what was requested.
+
+```typescript
+const ALLOWED_TYPES: Record<string, number> = {
+  'image/jpeg': 10 * 1024 * 1024,    // 10MB
+  'image/png': 10 * 1024 * 1024,     // 10MB
+  'image/webp': 10 * 1024 * 1024,    // 10MB
+  'video/mp4': 500 * 1024 * 1024,    // 500MB
+  'video/webm': 500 * 1024 * 1024,   // 500MB
+  'application/pdf': 20 * 1024 * 1024, // 20MB
+};
+
+router.get('/api/media/presigned-url', async (req, res) => {
+  const { filename, contentType } = req.query;
+
+  const maxSize = ALLOWED_TYPES[contentType as string];
+  if (!maxSize) {
+    return res.status(400).json({ error: 'File type not allowed' });
+  }
+
+  const result = await media.getSignedUploadUrl(
+    filename as string,
+    contentType as string,
+    { expiresIn: 600 }
+  );
+
+  // Return the max size so the client can validate before uploading
+  res.json({ ...result, maxSize });
+});
+```
+
+### Size Limits
+
+Validate file size on both sides. Check it on the client before uploading, and verify the reported size during confirmation:
+
+```typescript
+// Client-side check before uploading
+if (file.size > maxSize) {
+  throw new Error(`File too large. Maximum size: ${maxSize / 1024 / 1024}MB`);
+}
+
+// Server-side check during confirmation
+router.post('/api/media/confirm-upload', async (req, res) => {
+  const { key, mimeType, size } = req.body;
+
+  const maxSize = ALLOWED_TYPES[mimeType];
+  if (!maxSize || size > maxSize) {
+    // Delete the uploaded file since it violates size limits
+    await media.provider.delete(key);
+    return res.status(400).json({ error: 'File exceeds size limit' });
+  }
+
+  // Optionally verify the actual file size in storage
+  const metadata = await media.provider.getMetadata(key);
+  if (metadata.size !== size) {
+    await media.provider.delete(key);
+    return res.status(400).json({ error: 'Reported size does not match actual file' });
+  }
+
+  const file = await media.confirmUpload(req.body);
+  res.json(file);
+});
+```
+
+### Rate Limiting
+
+Protect the presigned URL endpoint from abuse. Each presigned URL is a permission slip for writing to your cloud storage.
+
+```typescript
+import rateLimit from 'express-rate-limit';
+
+const presignLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30,                   // 30 presigned URLs per window
+  message: { error: 'Too many upload requests, try again later' },
+});
+
+router.get('/api/media/presigned-url', presignLimiter, async (req, res) => {
+  // ...
+});
+```
+
+## Next Steps
+
+- [Uploading Files](./uploading-files.mdx) - Standard server-side uploads
+- [Storage Providers](./storage-providers.mdx) - Provider configuration
+- [Events](./events.mdx) - Hook into upload lifecycle
