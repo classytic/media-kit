@@ -28,22 +28,38 @@
  */
 
 import type {
-  MediaKit,
   TransformParams,
   TransformRequest,
   TransformResponse,
   TransformCache,
   FocalPoint,
   ImageAdapter,
+  IMediaDocument,
+  StorageDriver,
 } from '../types';
 import { calculateFocalPointCrop } from '../processing/focal-point';
+
+/**
+ * Minimal structural type — accepts either a MediaEngine or a raw repo+driver pair.
+ * Keeps transforms framework-agnostic and compatible with v3 MediaEngine.
+ */
+export interface MediaTransformSource {
+  readonly driver: StorageDriver;
+  readonly repositories?: {
+    readonly media: {
+      getById(id: string): Promise<IMediaDocument | null>;
+    };
+  };
+  /** v2 legacy — direct getById on the kit. Prefer .repositories.media.getById. */
+  getById?(id: string): Promise<IMediaDocument | null>;
+}
 
 /**
  * Asset transform configuration
  */
 export interface AssetTransformConfig {
-  /** MediaKit instance (must be initialized) */
-  media: MediaKit;
+  /** MediaEngine instance or any source exposing driver + getById */
+  media: MediaTransformSource;
   /** Optional transform cache */
   cache?: TransformCache;
   /** Max allowed width (security) */
@@ -126,7 +142,7 @@ function parseRange(range: string, totalSize: number): { start: number; end: num
  * Asset Transform Service
  */
 export class AssetTransformService {
-  private media: MediaKit;
+  private media: MediaTransformSource;
   private cache?: TransformCache;
   private maxWidth: number;
   private maxHeight: number;
@@ -151,8 +167,10 @@ export class AssetTransformService {
     if (params.w) params.w = Math.min(params.w, this.maxWidth);
     if (params.h) params.h = Math.min(params.h, this.maxHeight);
 
-    // Fetch file metadata from DB
-    const file = await this.media.getById(fileId);
+    // Fetch file metadata from DB — prefer v3 engine shape, fall back to v2
+    const file = this.media.repositories
+      ? await this.media.repositories.media.getById(fileId)
+      : await this.media.getById!(fileId);
     if (!file) {
       throw new Error(`File not found: ${fileId}`);
     }

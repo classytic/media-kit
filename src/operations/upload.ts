@@ -14,7 +14,7 @@ import type {
   EventResult,
   EventError,
 } from '../types';
-import type { MediaRepository } from '../repository/media.repository';
+import type { MediaRepository } from '../repositories/media.repository';
 import { computeFileHash } from '../utils/hash';
 import { isImage } from '../utils/mime';
 import { normalizeFolderPath } from '../utils/folders';

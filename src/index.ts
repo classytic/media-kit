@@ -1,72 +1,139 @@
 /**
- * @classytic/media-kit v2.1.0
+ * @classytic/media-kit v3.0.0
  *
  * Production-grade media management for Mongoose powered by @classytic/mongokit.
- * Features pluggable storage drivers, status lifecycle, focal points, soft deletes,
- * asset transforms, smart pagination, and full TypeScript support.
+ * Engine-factory pattern — package owns its models, exposes repository as the API surface,
+ * emits events via arc-compatible EventTransport.
  *
  * @example
  * ```ts
- * import { createMedia, createMediaSchema } from '@classytic/media-kit';
+ * import { createMedia } from '@classytic/media-kit';
  * import { S3Provider } from '@classytic/media-kit/providers/s3';
  * import mongoose from 'mongoose';
  *
- * const media = createMedia({
+ * const engine = await createMedia({
+ *   connection: mongoose.connection,
  *   driver: new S3Provider({ bucket: 'my-bucket', region: 'us-east-1' }),
- *   folders: { defaultFolder: 'general' },
- *   processing: { format: 'original', quality: { jpeg: 82, webp: 82, avif: 50, png: 100 } },
+ *   tenantFieldType: 'objectId',
+ *   multiTenancy: { enabled: true, required: true },
+ *   softDelete: { enabled: true, ttlDays: 30 },
+ *   processing: { enabled: true, format: 'webp', quality: 80 },
  * });
  *
- * const Media = mongoose.model('Media', media.schema);
- * media.init(Media);
+ * // Repositories ARE the API surface
+ * const media = await engine.repositories.media.upload({
+ *   buffer, filename: 'photo.jpg', mimeType: 'image/jpeg', folder: 'products',
+ * }, { organizationId: 'org_123', userId: 'user_456' });
  *
- * const uploaded = await media.upload({
- *   buffer, filename: 'photo.jpg', mimeType: 'image/jpeg',
- *   folder: 'products/featured',
+ * // Subscribe to events (glob patterns supported)
+ * await engine.events.subscribe('media:asset.*', async (event) => {
+ *   console.log(event.type, event.payload);
  * });
+ *
+ * // Arc integration: drop in any @classytic/arc EventTransport
+ * // const engine = await createMedia({ ..., eventTransport: redisTransport });
  * ```
  *
  * @packageDocumentation
  */
 
-// Main factory
-export { createMedia } from './media';
+// ── Engine factory ───────────────────────────────────────────
+export { createMedia, default } from './engine/create-media.js';
+export type {
+  MediaConfig,
+  MediaEngine,
+  ResolvedMediaConfig,
+  MediaContext,
+} from './engine/engine-types.js';
 
-// Configuration
-export { DEFAULT_CONFIG, mergeConfig } from './config';
+// ── Repository (API surface) ─────────────────────────────────
+export { MediaRepository } from './repositories/media.repository.js';
+export type { MediaRepositoryDeps } from './repositories/media.repository.js';
+export { createMediaRepositories } from './repositories/create-repositories.js';
+export type { MediaRepositories, CreateRepositoriesDeps } from './repositories/create-repositories.js';
 
-// Schema
-export { createMediaSchema, MediaSchema } from './schema/media.schema';
-export type { MediaSchemaOptions } from './schema/media.schema';
+// ── Models ───────────────────────────────────────────────────
+export { createMediaModels } from './models/create-models.js';
+export type { MediaModels } from './models/create-models.js';
+export { buildMediaSchema } from './models/media.schema.js';
+export type { MediaSchemaConfig } from './models/media.schema.js';
+export { tenantFieldDef, DEFAULT_TENANT_CONFIG } from './models/tenant-field.js';
+export type { TenantFieldConfig } from './models/tenant-field.js';
 
-// Repository (extends mongokit Repository)
-export { createMediaRepository, MediaRepository } from './repository/media.repository';
-export type { MediaRepositoryOptions, FolderAggregateResult } from './repository/media.repository';
+// ── Bridges (host-implemented adapters) ──────────────────────
+export type {
+  MediaBridges,
+  SourceBridge,
+  SourceRef,
+  SourceResolver,
+  ScanBridge,
+  ScanResult,
+  ScanVerdict,
+  CdnBridge,
+  CdnContext,
+  TransformBridge,
+  TransformOp,
+  TransformOpInput,
+  TransformOpOutput,
+  TransformOpContext,
+} from './bridges/index.js';
 
-// Events (awaitable)
-export { MediaEventEmitter } from './events';
+// ── Events (arc-compatible) ──────────────────────────────────
+export type { DomainEvent, EventHandler, EventTransport } from './events/transport.js';
+export { InProcessMediaBus } from './events/in-process-bus.js';
+export { MEDIA_EVENTS } from './events/event-constants.js';
+export type { MediaEventName } from './events/event-constants.js';
+export { createMediaEvent } from './events/helpers.js';
+export type {
+  AssetUploadedPayload,
+  AssetReplacedPayload,
+  AssetDeletedPayload,
+  AssetSoftDeletedPayload,
+  AssetRestoredPayload,
+  AssetMovedPayload,
+  AssetImportedPayload,
+  AssetPurgedPayload,
+  AssetTaggedPayload,
+  AssetUntaggedPayload,
+  FocalPointSetPayload,
+  FolderRenamedPayload,
+  FolderDeletedPayload,
+  UploadConfirmedPayload,
+  MultipartCompletedPayload,
+  BatchDeletedPayload,
+  MediaEventMap,
+  TypedMediaEventMap,
+} from './events/event-payloads.js';
 
-// Processing
-export { ImageProcessor, createImageProcessor } from './processing/image';
-export { calculateFocalPointCrop, isValidFocalPoint, DEFAULT_FOCAL_POINT } from './processing/focal-point';
-export { generateThumbHash } from './processing/thumbhash';
-export { DEVICE_WIDTHS, COMPACT_WIDTHS, IMAGE_WIDTHS, generateResponsiveVariants, resolvePresetWidths, PROCESSING_PRESETS, resolveProcessingPreset } from './processing/presets';
+// ── Processing ───────────────────────────────────────────────
+export { ImageProcessor, createImageProcessor } from './processing/image.js';
+export { calculateFocalPointCrop, isValidFocalPoint, DEFAULT_FOCAL_POINT } from './processing/focal-point.js';
+export { generateThumbHash } from './processing/thumbhash.js';
+export {
+  DEVICE_WIDTHS,
+  COMPACT_WIDTHS,
+  IMAGE_WIDTHS,
+  generateResponsiveVariants,
+  resolvePresetWidths,
+  PROCESSING_PRESETS,
+  resolveProcessingPreset,
+} from './processing/presets.js';
 
-// Utilities
-export * from './utils/folders';
-export * from './utils/mime';
-export * from './utils/hash';
-export * from './utils/alt-text';
+// ── Utilities ────────────────────────────────────────────────
+export * from './utils/folders.js';
+export * from './utils/mime.js';
+export * from './utils/hash.js';
+export * from './utils/alt-text.js';
 
-// Types — Storage Driver
+// ── Types — Storage Driver ───────────────────────────────────
 export type {
   StorageDriver,
   WriteResult,
   FileStat,
   PresignedUploadResult,
-} from './types';
+} from './types.js';
 
-// Types — Processing
+// ── Types — Processing ───────────────────────────────────────
 export type {
   AspectRatioPreset,
   ProcessingConfig,
@@ -85,24 +152,19 @@ export type {
   VideoAdapter,
   RawAdapter,
   MediaCacheConfig,
-} from './types';
+} from './types.js';
 
-// Re-export QueryParser from mongokit for convenience
-export { QueryParser } from '@classytic/mongokit';
-export type { ParsedQuery, QueryParserOptions } from '@classytic/mongokit';
-
-// Types — Documents
+// ── Types — Documents ───────────────────────────────────────
 export type {
   IMedia,
   IMediaDocument,
   MediaModel,
   MediaStatus,
   ExifMetadata,
-} from './types';
+} from './types.js';
 
-// Types — Configuration
+// ── Types — Configuration sub-interfaces ────────────────────
 export type {
-  MediaKitConfig,
   FileTypesConfig,
   FolderConfig,
   MultiTenancyConfig,
@@ -110,11 +172,10 @@ export type {
   SoftDeleteConfig,
   ConcurrencyConfig,
   MediaKitLogger,
-} from './types';
+} from './types.js';
 
-// Types — Operations
+// ── Types — Operations ──────────────────────────────────────
 export type {
-  OperationContext,
   UploadInput,
   ConfirmUploadInput,
   ImportOptions,
@@ -129,39 +190,27 @@ export type {
   HashStrategy,
   BatchPresignInput,
   BatchPresignResult,
-} from './types';
+} from './types.js';
 
-// Types — Folder
+// ── Types — Folder ──────────────────────────────────────────
 export type {
   FolderNode,
   FolderTree,
   BreadcrumbItem,
   FolderStats,
-} from './types';
+} from './types.js';
 
-// Types — Events
-export type {
-  MediaEventName,
-  EventContext,
-  EventResult,
-  EventError,
-  ProgressEvent,
-  EventListener,
-  Unsubscribe,
-} from './types';
-
-// Types — Transforms
+// ── Types — Transforms ──────────────────────────────────────
 export type {
   TransformParams,
   TransformRequest,
   TransformResponse,
   TransformCache,
-} from './types';
+} from './types.js';
 
-// Types — Main
-export type { MediaKit } from './types';
-
-// Re-export mongokit types for convenience
+// ── Re-export mongokit types for convenience ────────────────
+export { QueryParser } from '@classytic/mongokit';
+export type { ParsedQuery, QueryParserOptions } from '@classytic/mongokit';
 export type {
   PaginationConfig,
   OffsetPaginationResult,
@@ -186,4 +235,4 @@ export type {
   UpdateOptions,
   DeleteResult,
   HttpError,
-} from './types';
+} from '@classytic/mongokit';

@@ -94,7 +94,7 @@ export async function importFromUrl(
  * Handles IPv4, IPv6, and IPv4-mapped IPv6 (::ffff:x.x.x.x) encodings.
  * Exported for testability.
  */
-export function isPrivateIP(ip: string): boolean {
+function isPrivateIP(ip: string): boolean {
   // Normalize IPv4-mapped IPv6 (::ffff:127.0.0.1 → 127.0.0.1)
   let normalized = ip;
   const v4MappedMatch = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
@@ -140,7 +140,7 @@ export function isPrivateIP(ip: string): boolean {
  * Blocks private/internal IPs, non-http(s) protocols, and known metadata endpoints.
  * Returns the resolved IP address so callers can pin it (prevents DNS rebinding TOCTOU).
  */
-export async function validateUrlSafety(url: string): Promise<string> {
+async function validateUrlSafety(url: string): Promise<string> {
   const parsed = new URL(url);
 
   // Only allow http/https

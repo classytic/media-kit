@@ -7,7 +7,6 @@
  */
 
 import type { Document, Schema, Model, Types } from 'mongoose';
-import type { MediaRepository } from './repository/media.repository';
 
 // Re-export mongokit types for consumers
 export type {
@@ -725,6 +724,13 @@ export interface IMedia {
   /** Null = active, Date = soft-deleted */
   deletedAt?: Date | null;
 
+  // --- Polymorphic Source Reference (PACKAGE_RULES §7) ---
+
+  /** Source entity ID (opaque — ObjectId hex, UUID, Stripe ID, etc.) */
+  sourceId?: string;
+  /** Source entity type (e.g. 'Product', 'Order', 'StripeCharge') */
+  sourceModel?: string;
+
   // --- Audit ---
 
   /** User who uploaded the file */
@@ -923,6 +929,10 @@ export interface UploadInput {
   focalPoint?: FocalPoint;
   /** Content type hint for processing (e.g., 'product', 'avatar') */
   contentType?: string;
+  /** Polymorphic source reference — entity this media belongs to */
+  sourceId?: string;
+  /** Polymorphic source model name */
+  sourceModel?: string;
   /** Skip processing */
   skipProcessing?: boolean;
   /** Override processing quality for this upload (1-100 or per-format map) */
@@ -1227,122 +1237,3 @@ export interface TransformCache {
   invalidate(fileId: string): Promise<void>;
 }
 
-// ============================================
-// MEDIA KIT INSTANCE
-// ============================================
-
-/**
- * Main MediaKit instance interface
- */
-export interface MediaKit {
-  /** Configuration */
-  readonly config: MediaKitConfig;
-  /** Storage driver */
-  readonly driver: StorageDriver;
-  /** Mongoose schema */
-  readonly schema: Schema<IMediaDocument>;
-  /** Mongokit-powered repository (available after init()) */
-  readonly repository: MediaRepository;
-
-  // --- Initialization ---
-
-  init(model: MediaModel): this;
-
-  // --- Event System (awaitable) ---
-
-  /** Register event listener. Returns unsubscribe function. */
-  on<T = unknown>(event: MediaEventName, listener: EventListener<T>): Unsubscribe;
-
-  // --- Lifecycle ---
-
-  /** Release resources (event listeners, cached state). Safe to call multiple times. */
-  dispose(): void;
-
-  // --- Core Operations ---
-
-  upload(input: UploadInput, context?: OperationContext): Promise<IMediaDocument>;
-  uploadMany(inputs: UploadInput[], context?: OperationContext): Promise<IMediaDocument[]>;
-  delete(id: string, context?: OperationContext): Promise<boolean>;
-  deleteMany(ids: string[], context?: OperationContext): Promise<BulkResult>;
-  move(ids: string[], targetFolder: string, context?: OperationContext): Promise<RewriteResult>;
-
-  // --- File Replacement (same ID, new content) ---
-
-  replace(id: string, input: UploadInput, context?: OperationContext): Promise<IMediaDocument>;
-
-  // --- Soft Deletes ---
-
-  softDelete(id: string, context?: OperationContext): Promise<IMediaDocument>;
-  restore(id: string, context?: OperationContext): Promise<IMediaDocument>;
-  purgeDeleted(olderThan?: Date, context?: OperationContext): Promise<number>;
-
-  // --- URL Import ---
-
-  importFromUrl(url: string, options?: ImportOptions, context?: OperationContext): Promise<IMediaDocument>;
-
-  // --- Tags ---
-
-  addTags(id: string, tags: string[], context?: OperationContext): Promise<IMediaDocument>;
-  removeTags(id: string, tags: string[], context?: OperationContext): Promise<IMediaDocument>;
-
-  // --- Focal Point ---
-
-  setFocalPoint(id: string, focalPoint: FocalPoint, context?: OperationContext): Promise<IMediaDocument>;
-
-  // --- Query Operations ---
-
-  getById(id: string, context?: OperationContext): Promise<IMediaDocument | null>;
-  getAll(
-    params?: {
-      filters?: Record<string, unknown>;
-      sort?: import('@classytic/mongokit').SortSpec | string;
-      limit?: number;
-      page?: number;
-      cursor?: string;
-      after?: string;
-      search?: string;
-    },
-    context?: OperationContext
-  ): Promise<import('@classytic/mongokit').OffsetPaginationResult<IMediaDocument> | import('@classytic/mongokit').KeysetPaginationResult<IMediaDocument>>;
-  search(query: string, params?: { limit?: number; page?: number; filters?: Record<string, unknown> }, context?: OperationContext): Promise<import('@classytic/mongokit').OffsetPaginationResult<IMediaDocument> | import('@classytic/mongokit').KeysetPaginationResult<IMediaDocument>>;
-
-  // --- Presigned Upload Operations ---
-
-  getSignedUploadUrl(
-    filename: string,
-    contentType: string,
-    options?: { folder?: string; expiresIn?: number },
-  ): Promise<PresignedUploadResult>;
-  confirmUpload(input: ConfirmUploadInput, context?: OperationContext): Promise<IMediaDocument>;
-
-  // --- Multipart Upload (S3) ---
-
-  initiateMultipartUpload(input: InitiateMultipartInput): Promise<MultipartUploadSession>;
-  signUploadPart(key: string, uploadId: string, partNumber: number, expiresIn?: number): Promise<SignedPartResult>;
-  signUploadParts(key: string, uploadId: string, partNumbers: number[], expiresIn?: number): Promise<SignedPartResult[]>;
-  completeMultipartUpload(input: CompleteMultipartInput, context?: OperationContext): Promise<IMediaDocument>;
-  abortMultipartUpload(key: string, uploadId: string): Promise<void>;
-
-  // --- Resumable Upload Helpers (GCS) ---
-
-  abortResumableUpload(sessionUri: string): Promise<void>;
-  getResumableUploadStatus(sessionUri: string): Promise<{ uploadedBytes: number }>;
-
-  // --- Batch Presigned URLs ---
-
-  generateBatchPutUrls(input: BatchPresignInput): Promise<BatchPresignResult>;
-
-  // --- Folder Operations ---
-
-  getFolderTree(context?: OperationContext): Promise<FolderTree>;
-  getFolderStats(folder: string, context?: OperationContext): Promise<FolderStats>;
-  getBreadcrumb(folder: string): BreadcrumbItem[];
-  deleteFolder(folder: string, context?: OperationContext): Promise<BulkResult>;
-  renameFolder(oldPath: string, newPath: string, context?: OperationContext): Promise<RewriteResult>;
-  getSubfolders(parentPath: string, context?: OperationContext): Promise<FolderNode[]>;
-
-  // --- Utilities ---
-
-  validateFile(buffer: Buffer, filename: string, mimeType: string): void;
-  getContentType(folder: string): string;
-}

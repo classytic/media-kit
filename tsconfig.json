@@ -13,7 +13,6 @@
     "rootDir": "src",
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "isolatedDeclarations": true,
     "noEmit": true,
     "noUncheckedIndexedAccess": true,
     "verbatimModuleSyntax": true

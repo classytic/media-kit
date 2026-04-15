@@ -131,7 +131,7 @@ export function validateFile(
  * Copy a file between storage keys.
  * Uses driver.copy() if available, otherwise read → write fallback.
  */
-export async function copyStorageFile(
+async function copyStorageFile(
   driver: StorageDriver,
   sourceKey: string,
   destinationKey: string,

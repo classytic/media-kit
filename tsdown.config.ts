@@ -8,6 +8,7 @@ export default defineConfig({
     'providers/local': 'src/providers/local.provider.ts',
     'providers/router': 'src/providers/router.ts',
     transforms: 'src/transforms/index.ts',
+    schemas: 'src/validators/index.ts',
   },
   format: ['esm'],
   dts: true,

@@ -1,6 +1,9 @@
 /**
- * Shared dependency interface for all operation functions.
- * Created once by MediaKitImpl and passed to all operations.
+ * Shared dependency interface for legacy operation functions.
+ *
+ * v3 internal: these operation files are implementation details.
+ * The new MediaRepository passes a shim for `events` (no-op emitter)
+ * so operation files can run unchanged.
  */
 
 import type {
@@ -8,11 +11,21 @@ import type {
   StorageDriver,
   MediaKitLogger,
   ImageAdapter,
-} from '../types';
-import type { MediaRepository } from '../repository/media.repository';
-import type { ImageProcessor } from '../processing/image';
-import type { MediaEventEmitter } from '../events';
-import type { Semaphore } from '../utils/semaphore';
+} from '../types.js';
+import type { MediaRepository } from '../repositories/media.repository.js';
+import type { ImageProcessor } from '../processing/image.js';
+import type { Semaphore } from '../utils/semaphore.js';
+
+/**
+ * Minimal event emitter shim used internally by operation files.
+ * Matches the old MediaEventEmitter shape — repository provides a no-op.
+ */
+export interface InternalEventEmitter {
+  emit(event: string, payload: unknown): Promise<void>;
+  on(event: string, listener: (payload: unknown) => void | Promise<void>): () => void;
+  removeAllListeners(event?: string): void;
+  listenerCount(event: string): number;
+}
 
 export interface OperationDeps {
   readonly config: MediaKitConfig;
@@ -20,13 +33,9 @@ export interface OperationDeps {
   readonly repository: MediaRepository;
   readonly processor: ImageProcessor | ImageAdapter | null;
   readonly processorReady: Promise<void> | null;
-  readonly events: MediaEventEmitter;
+  readonly events: InternalEventEmitter;
   readonly uploadSemaphore: Semaphore;
   readonly logger?: MediaKitLogger;
 }
 
-/**
- * Minimal deps subset for config-only helpers (validateFile, getContentType).
- * These helpers never touch storage, repository, or events.
- */
 export type ConfigOnlyDeps = Pick<OperationDeps, 'config'>;

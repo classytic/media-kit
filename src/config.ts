@@ -8,7 +8,7 @@ import { resolveProcessingPreset } from './processing/presets';
 /**
  * Default configuration values
  */
-export const DEFAULT_CONFIG: Omit<MediaKitConfig, 'driver'> = {
+const DEFAULT_CONFIG: Omit<MediaKitConfig, 'driver'> = {
   fileTypes: {
     allowed: [...FILE_TYPE_PRESETS.all],
     maxSize: 100 * 1024 * 1024, // 100MB

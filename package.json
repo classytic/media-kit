@@ -1,7 +1,7 @@
 {
   "name": "@classytic/media-kit",
-  "version": "2.1.0",
-  "description": "Production-grade media management powered by mongokit - storage drivers, status lifecycle, focal points, soft deletes, asset transforms, and smart pagination",
+  "version": "3.0.0",
+  "description": "Engine-factory media management for Mongoose and Arc — arc-compatible events, dynamic multi-tenancy, pluggable storage drivers, smart pagination, image processing",
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.mjs",
@@ -32,6 +32,10 @@
       "types": "./dist/transforms.d.mts",
       "import": "./dist/transforms.mjs"
     },
+    "./schemas": {
+      "types": "./dist/schemas.d.mts",
+      "import": "./dist/schemas.mjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -42,8 +46,14 @@
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "vitest run --project unit --project integration",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "test:e2e": "vitest run --project e2e",
+    "test:all": "vitest run",
+    "test:smoke": "npm run build && node tests/smoke/dist-exports.mjs",
+    "test:bench": "vitest bench --run",
+    "test:watch": "vitest --project unit --project integration",
     "test:cleanup": "npx tsx tests/cleanup-s3-test-files.ts",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build && npm run test && npm run typecheck",
@@ -58,6 +68,8 @@
     "media",
     "mongoose",
     "mongokit",
+    "arc",
+    "engine",
     "s3",
     "gcs",
     "image-upload",
@@ -71,7 +83,8 @@
     "focal-point",
     "soft-delete",
     "asset-transform",
-    "image-processing"
+    "image-processing",
+    "event-driven"
   ],
   "author": "Classytic <classytic.dev@gmail.com> (https://github.com/classytic)",
   "contributors": [
@@ -89,11 +102,12 @@
   "peerDependencies": {
     "@aws-sdk/client-s3": ">=3.1014.0",
     "@aws-sdk/s3-request-presigner": ">=3.1014.0",
-    "@classytic/mongokit": ">=3.3.2",
+    "@classytic/mongokit": ">=3.6.2",
     "@google-cloud/storage": ">=7.19.0",
     "mime-types": ">=2.1.35",
-    "mongoose": ">=9.3.1",
-    "sharp": ">=0.34.5"
+    "mongoose": ">=9.4.1",
+    "sharp": ">=0.34.5",
+    "zod": ">=4.0.0"
   },
   "peerDependenciesMeta": {
     "sharp": {
@@ -116,17 +130,21 @@
     "@arethetypeswrong/core": ">=0.18.2",
     "@aws-sdk/client-s3": ">=3.1014.0",
     "@aws-sdk/s3-request-presigner": ">=3.1014.0",
-    "@classytic/mongokit": ">=3.3.2",
+    "@classytic/mongokit": ">=3.6.2",
     "@google-cloud/storage": ">=7.19.0",
     "@types/mime-types": ">=2.1.4",
     "@types/node": ">=22.0.0",
+    "@vitest/coverage-v8": ">=4.1.0",
     "dotenv": ">=17.3.1",
-    "mongoose": ">=9.3.1",
+    "mongodb-memory-server": ">=10.0.0",
+    "mongoose": ">=9.4.1",
     "publint": ">=0.3.18",
     "sharp": ">=0.34.5",
-    "tsdown": ">=0.21.4",
+    "tsdown": ">=0.21.8",
+    "tsx": ">=4.20.0",
     "typescript": ">=5.0.0",
-    "vitest": ">=4.1.0"
+    "vitest": ">=4.1.0",
+    "zod": ">=4.0.0"
   },
   "engines": {
     "node": ">=22.0.0"

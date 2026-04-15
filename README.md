@@ -1,645 +1,465 @@
 # @classytic/media-kit
 
-Production-grade media management for Mongoose with pluggable storage drivers, image processing presets, presigned uploads, multipart/resumable uploads, and smart pagination.
+Engine-factory media management for Mongoose — framework-agnostic, Arc-compatible events, pluggable storage, and a bridge-based extension surface for hosts to compose their own ImageKit-like stack.
 
-Built on [@classytic/mongokit](https://github.com/classytic/mongokit) for pagination, search, and repository patterns.
-
-## Features
-
-- **Storage drivers** — S3, GCS, Local, Storage Router (multi-backend), or bring your own
-- **Image processing** — resize, format conversion (WebP/AVIF/JPEG/PNG), variants, ThumbHash, dominant color
-- **Processing presets** — `social-media`, `web-optimized`, `high-quality`, `thumbnail` — one-line config
-- **Enhanced Sharp** — mozjpeg, smart WebP subsampling, AVIF effort tuning out of the box
-- **Camera RAW support** — pluggable `RawAdapter` for CR2, NEF, DNG, ARW, RAF, ORF, PEF
-- **Presigned uploads** — direct client-to-storage with hash verification (skip/etag/sha256)
-- **Multipart & resumable** — S3 multipart or GCS resumable, auto-detected from driver
-- **Batch presigned URLs** — HLS segments, multi-file uploads in one call
-- **Soft delete** — TTL-based with restore, purge, and full storage cleanup
-- **Folder management** — tree, breadcrumbs, rename, move, subfolder queries
-- **Multi-tenancy** — scoped queries by org/user field
-- **Events** — `before:*/after:*/error:*` hooks on every operation
-- **Focal point** — per-image crop anchor for responsive display
-- **Deduplication** — SHA-256 content hashing
-- **URL import** — fetch remote files with SSRF protection
-
-## Install
+Built on [@classytic/mongokit](https://www.npmjs.com/package/@classytic/mongokit) ≥3.6.2. Zero runtime deps.
 
 ```bash
-npm install @classytic/media-kit @classytic/mongokit mongoose
+npm install @classytic/media-kit @classytic/mongokit mongoose zod
 ```
 
-Optional peer dependencies — install only what you need:
+Optional peers — install what you use: `sharp`, `@aws-sdk/client-s3`, `@google-cloud/storage`, `mime-types`.
 
-```bash
-npm install sharp                    # Image processing (resize, format, variants)
-npm install @aws-sdk/client-s3 @aws-sdk/s3-request-presigner  # S3 storage
-npm install @google-cloud/storage    # GCS storage
-npm install mime-types               # Extended MIME detection (built-in fallback included)
-```
+Requires Node ≥22, Mongoose ≥9.4.1, Zod ≥4.0.0.
 
-The library works without optional deps. Without `sharp`, uploads still work but images won't be processed. Without S3/GCS, use the local provider or bring your own.
+---
 
-## Quick Start
+## Quick start
 
 ```ts
 import { createMedia } from '@classytic/media-kit';
 import { S3Provider } from '@classytic/media-kit/providers/s3';
 import mongoose from 'mongoose';
 
-const media = createMedia({
-  driver: new S3Provider({
-    bucket: 'my-bucket',
-    region: 'us-east-1',
-    credentials: {
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
-    },
-  }),
+const engine = await createMedia({
+  connection: mongoose.connection,
+  driver: new S3Provider({ bucket: 'my-bucket', region: 'us-east-1' }),
+  tenantFieldType: 'objectId',
+  multiTenancy: { enabled: true, required: true },
+  softDelete: { enabled: true, ttlDays: 30 },
+  processing: { enabled: true, format: 'webp', quality: 80 },
 });
 
-const Media = mongoose.model('Media', media.schema);
-media.init(Media);
+// Repositories ARE the API surface
+const media = await engine.repositories.media.upload(
+  { buffer, filename: 'photo.jpg', mimeType: 'image/jpeg', folder: 'products' },
+  { organizationId: 'org_123', userId: 'user_456' },
+);
 
-const file = await media.upload({
-  buffer: fileBuffer,
-  filename: 'photo.jpg',
-  mimeType: 'image/jpeg',
-  folder: 'products/featured',
-});
-
-console.log(file.url);
-```
-
-## Storage Providers
-
-Four built-in providers, all implementing the `StorageDriver` interface:
-
-### S3 (+ S3-compatible)
-
-```ts
-import { S3Provider } from '@classytic/media-kit/providers/s3';
-
-const driver = new S3Provider({
-  bucket: 'my-bucket',
-  region: 'us-east-1',
-  credentials: { accessKeyId: '...', secretAccessKey: '...' },
-  publicUrl: 'https://cdn.example.com',  // optional CDN
-  // S3-compatible (MinIO, R2, etc.):
-  // endpoint: 'https://minio.example.com',
-  // forcePathStyle: true,
+// Arc-compatible events
+await engine.events.subscribe('media:asset.*', async (event) => {
+  console.log(event.type, event.payload);
 });
 ```
 
-### Google Cloud Storage
+---
+
+## Core concepts
+
+### The engine
+
+`createMedia(config)` returns a frozen `MediaEngine`:
 
 ```ts
-import { GCSProvider } from '@classytic/media-kit/providers/gcs';
-
-const driver = new GCSProvider({
-  bucket: 'my-bucket',
-  projectId: 'my-project',
-  keyFilename: './service-account.json',
-});
-```
-
-### Local Filesystem
-
-```ts
-import { LocalProvider } from '@classytic/media-kit/providers/local';
-
-const driver = new LocalProvider({
-  basePath: './uploads',
-  baseUrl: 'http://localhost:3000/uploads',
-});
-```
-
-### Storage Router (multi-backend)
-
-Route files to different backends by key prefix:
-
-```ts
-import { StorageRouter } from '@classytic/media-kit/providers/router';
-
-const driver = new StorageRouter({
-  drivers: {
-    s3: new S3Provider({ ... }),
-    local: new LocalProvider({ ... }),
-  },
-  routes: [
-    { prefix: 'temp/', driver: 'local' },
-    { prefix: 'drafts/', driver: 'local' },
-  ],
-  default: 's3',
-});
-```
-
-### Custom Provider
-
-Implement the `StorageDriver` interface:
-
-```ts
-import type { StorageDriver, WriteResult, FileStat } from '@classytic/media-kit';
-
-class MyDriver implements StorageDriver {
-  readonly name = 'my-driver';
-
-  async write(key: string, data: Buffer | NodeJS.ReadableStream, contentType: string): Promise<WriteResult> {
-    // ...
-    return { key, url, size };
-  }
-  async read(key: string, range?: { start: number; end: number }): Promise<NodeJS.ReadableStream> { ... }
-  async delete(key: string): Promise<boolean> { ... }
-  async exists(key: string): Promise<boolean> { ... }
-  async stat(key: string): Promise<FileStat> { ... }
-  getPublicUrl(key: string): string { ... }
-
-  // Optional:
-  // list?(prefix: string): AsyncIterable<string>;
-  // copy?(source: string, destination: string): Promise<WriteResult>;
-  // move?(source: string, destination: string): Promise<WriteResult>;
-  // getSignedUrl?(key: string, expiresIn?: number): Promise<string>;
-  // getSignedUploadUrl?(key: string, contentType: string, expiresIn?: number): Promise<PresignedUploadResult>;
-  // createMultipartUpload?(key: string, contentType: string): Promise<{ uploadId: string }>;
-  // signUploadPart?(key: string, uploadId: string, partNumber: number, expiresIn?: number): Promise<SignedPartResult>;
-  // completeMultipartUpload?(key: string, uploadId: string, parts: CompletedPart[]): Promise<{ etag: string; size: number }>;
-  // abortMultipartUpload?(key: string, uploadId: string): Promise<void>;
-  // createResumableUpload?(key: string, contentType: string, options?: { size?: number }): Promise<ResumableUploadSession>;
+interface MediaEngine {
+  repositories: { media: MediaRepository };  // API surface
+  events: EventTransport;                     // arc-compatible
+  models: { Media: Model<IMediaDocument> };   // for Arc adapters
+  config: ResolvedMediaConfig;
+  driver: StorageDriver;
+  bridges: MediaBridges;
+  dispose(): Promise<void>;
 }
 ```
 
-## Configuration
+The package **owns its models** — you pass a `connection`, not a model. One `createMedia()` call. No `.init()`, no feature flags, no tiers.
+
+### Repositories are the API surface
+
+`MediaRepository` extends mongokit's `Repository<IMediaDocument>`. Hosts get:
+
+| Inherited from mongokit | Domain verbs added |
+|---|---|
+| `getById`, `getAll`, `getByQuery`, `count`, `exists`, `aggregate` | `upload`, `uploadMany`, `replace` |
+| `create`, `update`, `delete`, `restore` (via softDelete) | `hardDelete`, `hardDeleteMany`, `purgeDeleted` |
+| `getDeleted`, soft-delete TTL, keyset pagination | `move`, `importFromUrl`, `addTags`, `removeTags` |
+| Transactions, plugins, hooks, QueryParser | `setFocalPoint`, folder operations, presigned URLs |
+| | Bridge verbs: `resolveSource`, `getAssetUrl`, `applyTransforms` |
+
+**No envelopes.** Raw Mongoose docs, raw mongokit pagination shapes. Arc's `BaseController` wraps responses — the package stays out of the way.
+
+### Arc-compatible events
+
+The event transport shape matches `@classytic/arc` exactly — any Arc transport drops in:
 
 ```ts
-const media = createMedia({
-  driver: s3Provider,
+import { RedisEventTransport } from '@classytic/arc/events';
 
-  fileTypes: {
-    allowed: ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'],
-    maxSize: 100 * 1024 * 1024, // 100 MB (default)
-  },
-
-  folders: {
-    defaultFolder: 'general',
-    enableSubfolders: true,
-    rewriteKeys: true, // physically move files on rename/move
-    contentTypeMap: {
-      product: ['products'],
-      avatar: ['users', 'avatars'],
-    },
-  },
-
-  processing: {
-    enabled: true,       // requires sharp
-    preset: 'web-optimized',  // or 'social-media' | 'high-quality' | 'thumbnail'
-    format: 'webp',      // 'webp' | 'jpeg' | 'png' | 'avif' | 'original'
-    quality: 80,         // or per-format: { jpeg: 80, webp: 75, avif: 60, png: 90 }
-    maxWidth: 2048,
-    originalHandling: 'keep-variant', // 'keep-variant' | 'replace' | 'discard'
-    generateAlt: true,   // auto alt-text from filename
-    aspectRatios: {
-      product: { aspectRatio: 3 / 4, fit: 'cover' },
-      avatar: { aspectRatio: 1, fit: 'cover' },
-      default: { preserveRatio: true },
-    },
-    sizes: [
-      { name: 'thumbnail', width: 150, height: 150 },
-      { name: 'medium', width: 800 },
-      { name: 'large', width: 1920 },
-    ],
-    sharpOptions: {
-      concurrency: 2,
-      cache: false,
-      mozjpeg: true,             // trellis quantization (default: true)
-      webpSmartSubsample: true,  // sharper chroma (default: true)
-      avifEffort: 6,             // 0-9, higher = slower + smaller (default: 6)
-    },
-  },
-
-  deduplication: { enabled: true, algorithm: 'sha256' },
-  softDelete: { enabled: true, ttlDays: 30 },
-  concurrency: { maxConcurrent: 5 },
-  multiTenancy: { enabled: false, field: 'organizationId' },
-
-  plugins: [/* mongokit plugins */],
-  logger: console,
-  suppressWarnings: false,
-});
-```
-
-All fields except `driver` are optional and have sensible defaults.
-
-## Processing Presets
-
-One-line processing configuration for common use cases. User overrides always win over preset defaults.
-
-```ts
-const media = createMedia({
+const engine = await createMedia({
+  connection,
   driver,
-  processing: { preset: 'web-optimized' },
+  eventTransport: new RedisEventTransport({ url: process.env.REDIS_URL }),
 });
 ```
 
-| Preset | Max Size | Format | Quality | Variants | Metadata | Use Case |
-|--------|----------|--------|---------|----------|----------|----------|
-| `social-media` | 1080px | JPEG | 80 | thumb (150), small (320), medium (640) | stripped | Social posts, Instagram, Facebook |
-| `web-optimized` | 2048px | WebP | 80 | ThumbHash + dominant color | stripped | Websites, blogs, e-commerce |
-| `high-quality` | 4096px | original | 92 | none | preserved | Photography, print, archives |
-| `thumbnail` | 300px | WebP | 65 | none, no original kept | stripped | Avatars, icons, previews |
+Without an `eventTransport`, a 50-line `InProcessMediaBus` fallback is used. Both support exact / `*` / `media.*` glob patterns.
 
-Override any preset field:
+Event names follow `media:resource.verb`:
+
+```
+media:asset.uploaded / replaced / deleted / softDeleted / restored
+media:asset.moved / imported / purged / tagged / untagged / focalPointSet
+media:folder.renamed / deleted
+media:upload.confirmed / multipartCompleted
+media:batch.deleted
+```
+
+---
+
+## Bridges — the extensibility primitives
+
+Bridges are optional host-implemented adapters. media-kit stays thin; hosts compose.
+
+### `SourceBridge` — polymorphic refs
+
+Link media to entities in other packages or external systems without hardcoding ObjectId refs:
 
 ```ts
-const media = createMedia({
-  driver,
-  processing: {
-    preset: 'social-media',
-    maxWidth: 1200,  // override preset's 1080
-    sizes: [         // override preset's variants
-      { name: 'thumb', width: 200, height: 200 },
-      { name: 'large', width: 1200 },
-    ],
+bridges: {
+  source: {
+    async resolve(sourceId, sourceModel, ctx) {
+      if (sourceModel === 'Product') return productRepo.getById(sourceId);
+      if (sourceModel === 'StripeCharge') return stripe.charges.retrieve(sourceId);
+      return null;
+    },
+    async resolveMany(refs, ctx) { /* batch to avoid N+1 */ },
   },
+}
+
+// Upload attaches the ref
+await engine.repositories.media.upload(
+  { buffer, filename, mimeType, sourceId: 'prod_123', sourceModel: 'Product' },
+  ctx,
+);
+
+// List-endpoint enrichment (1 batch call, no N+1)
+const page = await engine.repositories.media.getAll({ page: 1, limit: 20 });
+const sources = await engine.repositories.media.resolveSourcesMany(page.docs);
+```
+
+### `ScanBridge` — upload-time moderation
+
+Reject malicious / quarantine NSFW / allow clean — host wires the scanner:
+
+```ts
+bridges: {
+  scan: {
+    async scan(buffer, mimeType, filename) {
+      const score = await rekognition.detectModerationLabels(buffer);
+      if (score > 0.9) return { verdict: 'reject', reason: 'Explicit content' };
+      if (score > 0.5) return { verdict: 'quarantine', reason: 'Manual review' };
+      return { verdict: 'clean' };
+    },
+  },
+}
+```
+
+- `reject` → upload throws, nothing persisted
+- `quarantine` → stored with `status: 'error'` + scan metadata for manual review
+- `clean` → normal flow
+
+### `CdnBridge` — URL rewriting
+
+imgix, CloudFront, Cloudflare Images, or custom signing:
+
+```ts
+bridges: {
+  cdn: {
+    transform(key, defaultUrl, ctx) {
+      if (ctx?.signed) return signCloudFrontUrl(`https://cdn.example.com/${key}`, 3600);
+      return `https://my-images.imgix.net/${key}?auto=format,compress`;
+    },
+  },
+}
+
+await engine.repositories.media.getAssetUrl(media, { signed: true });
+await engine.repositories.media.getVariantUrls(media);  // all variants transformed
+```
+
+### `TransformBridge` — on-the-fly AI transforms
+
+Pluggable URL-param ops. Build `GET /transform/:id?op=bg-remove,upscale&scale=4`:
+
+```ts
+bridges: {
+  transform: {
+    ops: {
+      'bg-remove': async ({ buffer }) => {
+        const out = await replicate.run('rembg/rembg-silueta', { input: { image: buffer } });
+        return { buffer: out, mimeType: 'image/png' };
+      },
+      'upscale': async ({ buffer }, ctx) => {
+        const scale = Number(ctx.params.scale ?? 2);
+        const out = await replicate.run('nightmareai/real-esrgan', { input: { image: buffer, scale } });
+        return { buffer: out, mimeType: 'image/png' };
+      },
+    },
+  },
+}
+
+// Host route handler:
+const result = await engine.repositories.media.applyTransforms(id, {
+  ops: ['bg-remove', 'upscale'],
+  params: { scale: '4' },
+});
+// Stream result.buffer with Content-Type: result.mimeType
+```
+
+---
+
+## Multi-tenancy
+
+Dynamic `tenantFieldType` drives both schema and plugin (via mongokit ≥3.6.2):
+
+| `tenantFieldType` | Schema | `$lookup` / `.populate()` | Use when |
+|---|---|---|---|
+| `'objectId'` | `Schema.Types.ObjectId, ref: 'Organization'` | Works | Better Auth, ObjectId orgs |
+| `'string'` (default) | `String` | N/A | UUID / slug auth systems |
+
+```ts
+await createMedia({
+  connection,
+  driver,
+  tenantFieldType: 'objectId',
+  multiTenancy: { enabled: true, field: 'organizationId', required: true },
 });
 ```
 
-## Original Image Handling
+All CRUD ops auto-scope by `ctx.organizationId`. Cross-tenant mutations return "not found" (fail-safe).
 
-Control what happens to the original unprocessed image during processing:
+---
+
+## Storage drivers
+
+Swap backends with one line. All implement the same `StorageDriver` interface.
+
+```ts
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+import { GCSProvider } from '@classytic/media-kit/providers/gcs';
+import { LocalProvider } from '@classytic/media-kit/providers/local';
+import { StorageRouter } from '@classytic/media-kit/providers/router';
+
+// Route by key prefix (e.g. private → S3, public → GCS CDN)
+const router = new StorageRouter({
+  routes: [
+    { match: (key) => key.startsWith('private/'), driver: new S3Provider({ ... }) },
+    { match: (key) => key.startsWith('public/'),  driver: new GCSProvider({ ... }) },
+  ],
+  default: new LocalProvider({ basePath: './uploads' }),
+});
+```
+
+Each driver supports: `write`, `read`, `delete`, `exists`, `stat`, `copy` (optional), signed URLs, multipart (S3) or resumable (GCS) upload.
+
+---
+
+## Arc integration
+
+The package drops into an Arc host as a resource. The recommended pattern is an **eager singleton** so the Mongoose model is registered before Arc's resource discovery runs:
+
+```ts
+// src/resources/media/media.engine.ts — the singleton
+import mongoose from 'mongoose';
+import { createMedia } from '@classytic/media-kit';
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+
+let engine: Awaited<ReturnType<typeof createMedia>> | null = null;
+let pending: Promise<typeof engine> | null = null;
+
+export async function ensureMediaEngine() {
+  if (engine) return engine;
+  if (!pending) {
+    pending = (async () => {
+      engine = await createMedia({
+        connection: mongoose.connection,
+        driver: new S3Provider({ bucket: process.env.S3_BUCKET!, region: 'us-east-1' }),
+        tenantFieldType: 'objectId',
+        multiTenancy: { enabled: true, required: true },
+        softDelete: { enabled: true, ttlDays: 30 },
+        processing: { enabled: true, format: 'webp' },
+      });
+      return engine;
+    })();
+  }
+  return pending;
+}
+```
+
+```ts
+// src/resources/media/media.resource.ts — the Arc resource
+import { defineResource, createMongooseAdapter, BaseController } from '@classytic/arc';
+import type { IRequestContext, IControllerResponse } from '@classytic/arc';
+import { z } from 'zod';
+import { uploadInputSchema, confirmUploadSchema } from '@classytic/media-kit/schemas';
+import { ensureMediaEngine } from './media.engine.js';
+
+const engine = await ensureMediaEngine();
+const repo = engine.repositories.media;
+
+// MediaRepository extends mongokit's Repository<T>, so it already
+// satisfies Arc's RepositoryLike — pass it straight to BaseController.
+class MediaController extends BaseController {
+  // Route DELETE /:id through hardDelete so storage objects get cleaned up.
+  async delete(req: IRequestContext): Promise<IControllerResponse<{ id: string }>> {
+    const id = req.params?.id;
+    if (!id) return { success: false, error: 'ID required', status: 400 };
+    const ok = await repo.hardDelete(id, { userId: (req.user as { id?: string })?.id });
+    return ok
+      ? { success: true, data: { id } }
+      : { success: false, error: 'Not found', status: 404 };
+  }
+
+  async upload(req: IRequestContext, reply: unknown) {
+    const file = await (req as { file: () => Promise<{ toBuffer(): Promise<Buffer>; filename: string; mimetype: string }> }).file();
+    const buffer = await file.toBuffer();
+    const doc = await repo.upload(
+      { buffer, filename: file.filename, mimeType: file.mimetype, folder: 'products' },
+      { userId: (req.user as { id?: string })?.id },
+    );
+    return (reply as { code: (n: number) => { send: (b: unknown) => void } })
+      .code(201).send({ success: true, data: doc });
+  }
+}
+
+export default defineResource({
+  name: 'media',
+  prefix: '/media',
+  adapter: createMongooseAdapter({ model: engine.models.Media, repository: repo }),
+  controller: new MediaController(repo),
+  // CRUD schemas — Arc auto-converts Zod via z.toJSONSchema().
+  customSchemas: {
+    update: { body: z.object({ alt: z.string().max(255).optional(), tags: z.array(z.string()).optional() }) },
+  },
+  routes: [
+    {
+      method: 'POST',
+      path: '/upload',
+      raw: true,
+      handler: (new MediaController(repo)).upload.bind(new MediaController(repo)),
+      schema: { body: uploadInputSchema }, // Zod v4 → JSON Schema automatic
+    },
+    {
+      method: 'POST',
+      path: '/presigned-upload/confirm',
+      raw: true,
+      handler: async (req: { body: unknown; user?: { id?: string } }) => {
+        return repo.confirmUpload(req.body as never, { userId: req.user?.id });
+      },
+      schema: { body: confirmUploadSchema },
+    },
+  ],
+});
+```
+
+Key wiring notes:
+
+- **`engine.models.Media`** — the engine exposes models at the top level, not under `.engine.models`.
+- **`MediaRepository` is a drop-in for `RepositoryLike`** — no adapter layer needed between Arc and mongokit.
+- **Override `delete()` on your controller** to route through `repo.hardDelete()` if you want storage cleanup; the inherited handler runs soft-delete when the plugin is enabled.
+- **Zod schemas from `/schemas`** — import `uploadInputSchema`, `confirmUploadSchema`, etc. so your host validates against the same shapes the package uses internally.
+- **`customSchemas` vs per-route `schema`** — `customSchemas` carries the CRUD endpoints (`list`/`get`/`create`/`update`/`delete`); raw routes attach their own `schema` field.
+
+---
+
+## Soft delete
+
+Via mongokit's `softDeletePlugin`:
+
+```ts
+softDelete: { enabled: true, ttlDays: 30 }
+```
+
+- `repo.delete(id)` → soft (sets `deletedAt`)
+- `repo.delete(id, { mode: 'hard' })` → physical
+- `repo.hardDelete(id)` → physical + storage cleanup (domain verb)
+- `repo.restore(id)` → undo
+- `repo.getDeleted()` → trash bin
+- `repo.purgeDeleted(olderThan)` → GC soft-deleted + storage
+
+TTL index auto-purges after `ttlDays`.
+
+---
+
+## Image processing
+
+Bring your own via `ImageAdapter`, or use the built-in Sharp processor.
 
 ```ts
 processing: {
   enabled: true,
-  originalHandling: 'keep-variant', // default
+  format: 'webp',
+  quality: { jpeg: 82, webp: 82, avif: 50, png: 100 },
+  responsivePreset: 'nextjs',       // or 'compact' | number[] | 'none'
+  aspectRatios: {
+    product: { aspectRatio: 3/4, fit: 'cover' },
+    avatar:  { aspectRatio: 1,   fit: 'cover' },
+  },
+  preset: 'web-optimized',          // shortcut; user overrides still win
+  stripMetadata: true,
+  thumbhash: true,
+  dominantColor: true,
 }
 ```
 
-| Mode | Behavior |
-|------|----------|
-| `keep-variant` | Store original as `__original` variant alongside processed output (default) |
-| `replace` | Only processed image is stored — original is not kept |
-| `discard` | No original stored, only processed + size variants |
-
-## Camera RAW Support
-
-media-kit detects camera RAW formats (CR2, NEF, DNG, ARW, RAF, ORF, PEF) and can convert them before processing via Sharp. **No RAW library is bundled** — you provide a `RawAdapter` with your preferred converter.
-
-Without a `rawAdapter`, RAW files are uploaded as-is (no processing, no thumbnails).
-
-### Approach 1: Extract Embedded JPEG (fastest, recommended)
-
-Every DSLR RAW file embeds a full-resolution JPEG preview. This is the fastest approach — no sensor decoding needed:
-
-```bash
-npm install exiftool-vendored
-```
+Custom adapter example (wrap any cloud API):
 
 ```ts
-import { exiftool } from 'exiftool-vendored';
-import { writeFileSync, readFileSync, unlinkSync } from 'fs';
-import type { RawAdapter } from '@classytic/media-kit';
-
-const rawAdapter: RawAdapter = {
-  supportedTypes: [
-    'image/x-canon-cr2', 'image/x-nikon-nef', 'image/x-adobe-dng',
-    'image/x-sony-arw', 'image/x-fuji-raf', 'image/x-olympus-orf',
-  ],
-  async convert(buffer, mimeType) {
-    const tmp = `/tmp/raw-${Date.now()}`;
-    const previewPath = `${tmp}.jpg`;
-    writeFileSync(tmp, buffer);
-    await exiftool.extractJpgFromRaw(tmp, previewPath);
-    const jpeg = readFileSync(previewPath);
-    unlinkSync(tmp);
-    unlinkSync(previewPath);
-    return { buffer: jpeg, mimeType: 'image/jpeg' };
+processing: {
+  imageAdapter: {
+    async process(buffer, options) {
+      const out = await cloudinary.transform(buffer, { width: options.maxWidth });
+      return { buffer: out, mimeType: 'image/webp', width: ..., height: ... };
+    },
+    isProcessable: (_, mt) => mt.startsWith('image/'),
   },
-};
+}
 ```
 
-### Approach 2: dcraw (pure JS via WASM)
+---
 
-Full RAW decode to TIFF, then Sharp processes normally:
-
-```bash
-npm install dcraw
-```
+## Subpath exports
 
 ```ts
-import dcraw from 'dcraw';
-import type { RawAdapter } from '@classytic/media-kit';
-
-const rawAdapter: RawAdapter = {
-  supportedTypes: [
-    'image/x-canon-cr2', 'image/x-nikon-nef', 'image/x-adobe-dng',
-    'image/x-sony-arw', 'image/x-fuji-raf', 'image/x-olympus-orf',
-  ],
-  async convert(buffer, mimeType) {
-    const tiff = dcraw(buffer, { exportAsTiff: true });
-    return { buffer: Buffer.from(tiff), mimeType: 'image/tiff' };
-  },
-};
-```
-
-### Approach 3: LibRaw WASM (full sensor decode)
-
-Best quality — decodes from raw sensor data:
-
-```bash
-npm install libraw-wasm
-```
-
-```ts
-import LibRaw from 'libraw-wasm';
-import sharp from 'sharp';
-import type { RawAdapter } from '@classytic/media-kit';
-
-const rawAdapter: RawAdapter = {
-  supportedTypes: [
-    'image/x-canon-cr2', 'image/x-nikon-nef', 'image/x-adobe-dng',
-    'image/x-sony-arw', 'image/x-fuji-raf', 'image/x-olympus-orf',
-  ],
-  async convert(buffer, mimeType) {
-    const libraw = await LibRaw.load();
-    const decoded = await libraw.decode(buffer);
-    const tiff = await sharp(decoded.data, {
-      raw: { width: decoded.width, height: decoded.height, channels: 4 },
-    }).tiff().toBuffer();
-    return { buffer: tiff, mimeType: 'image/tiff' };
-  },
-};
-```
-
-### Wire it up
-
-```ts
-const media = createMedia({
-  driver,
-  processing: {
-    enabled: true,
-    preset: 'web-optimized',
-    rawAdapter,
-  },
-});
-
-// DSLR uploads now auto-convert → Sharp processes → WebP/AVIF output
-await media.upload({ buffer: cr2Buffer, filename: 'photo.cr2', mimeType: 'image/x-canon-cr2' });
-```
-
-If RAW conversion fails, the file is uploaded as-is (graceful fallback, no crash).
-
-## API
-
-### Upload & Replace
-
-```ts
-const file = await media.upload({ buffer, filename, mimeType, folder, tags, alt, focalPoint }, context?);
-const files = await media.uploadMany([...inputs], context?);
-const replaced = await media.replace(id, { buffer, filename, mimeType }, context?);
-```
-
-### Delete
-
-```ts
-await media.delete(id, context?);
-await media.deleteMany([id1, id2], context?);   // returns { success[], failed[] }
-await media.deleteFolder('old-folder', context?);
-```
-
-### Soft Delete
-
-Requires `softDelete: { enabled: true }` in config.
-
-```ts
-await media.softDelete(id, context?);
-await media.restore(id, context?);
-await media.purgeDeleted(olderThan?, context?);  // hard-delete expired
-```
-
-### Queries
-
-Powered by mongokit pagination (offset or keyset):
-
-```ts
-const file = await media.getById(id, context?);
-const page = await media.getAll({ page: 1, limit: 20, sort: '-createdAt', filters: { folder: 'products' } }, context?);
-const results = await media.search('shoes', { limit: 10 }, context?);
-```
-
-### Folders
-
-```ts
-const tree = await media.getFolderTree(context?);
-const stats = await media.getFolderStats('products', context?);
-const crumbs = media.getBreadcrumb('products/electronics/phones');
-const subs = await media.getSubfolders('products', context?);
-await media.renameFolder('old/path', 'new/path', context?);
-await media.move([id1, id2], 'target-folder', context?);
-```
-
-### Tags
-
-```ts
-await media.addTags(id, ['sale', 'featured'], context?);
-await media.removeTags(id, ['sale'], context?);
-```
-
-### Focal Point
-
-```ts
-await media.setFocalPoint(id, { x: 0.3, y: 0.2 }, context?);
-```
-
-### Presigned Uploads
-
-Direct client-to-storage uploads (no server buffering):
-
-```ts
-// Server: generate signed URL
-const { uploadUrl, key } = await media.getSignedUploadUrl('photo.jpg', 'image/jpeg', { folder: 'uploads' });
-
-// Client: PUT file directly to S3/GCS
-await fetch(uploadUrl, { method: 'PUT', body: file, headers: { 'Content-Type': 'image/jpeg' } });
-
-// Server: confirm + create DB record
-const doc = await media.confirmUpload({
-  key, filename: 'photo.jpg', mimeType: 'image/jpeg', size: file.size,
-  hashStrategy: 'skip',  // 'skip' (default) | 'etag' | 'sha256'
-  process: true,          // opt-in: generate ThumbHash, variants, dominant color
-}, context?);
-```
-
-### Multipart Upload (large files, resumable)
-
-S3 multipart or GCS resumable — auto-detected from driver:
-
-```ts
-// Initiate (returns discriminated union: type='multipart' or type='resumable')
-const session = await media.initiateMultipartUpload({
-  filename: 'video.mp4', contentType: 'video/mp4', folder: 'videos',
-  partCount: Math.ceil(fileSize / (5 * 1024 * 1024)), // optional: sign all parts upfront
-});
-
-// S3 path (type='multipart'): upload parts in parallel
-const parts = await Promise.all(
-  chunks.map((chunk, i) =>
-    fetch(session.parts[i].uploadUrl, { method: 'PUT', body: chunk })
-      .then(r => ({ partNumber: i + 1, etag: r.headers.get('etag')! }))
-  )
-);
-
-// Complete: assemble parts + create DB record
-const doc = await media.completeMultipartUpload({
-  key: session.key, uploadId: session.uploadId!, parts,
-  filename: 'video.mp4', mimeType: 'video/mp4', size: fileSize,
-});
-
-// GCS path (type='resumable'): upload chunks to single URI with Content-Range
-// Then call media.confirmUpload({ key: session.key, ... }) — GCS auto-assembles
-
-// On-demand part signing (instead of upfront):
-const part = await media.signUploadPart(key, uploadId, partNumber);
-const parts = await media.signUploadParts(key, uploadId, [1, 2, 3]);
-
-// Abort abandoned uploads:
-await media.abortMultipartUpload(key, uploadId);
-
-// GCS helpers:
-const { uploadedBytes } = await media.getResumableUploadStatus(sessionUri);
-await media.abortResumableUpload(sessionUri);
-```
-
-### Batch Presigned URLs
-
-Generate multiple signed URLs at once (HLS segments, multi-file):
-
-```ts
-const { uploads } = await media.generateBatchPutUrls({
-  files: [
-    { filename: 'segment-0.ts', contentType: 'video/mp2t' },
-    { filename: 'segment-1.ts', contentType: 'video/mp2t' },
-  ],
-  folder: 'live/session-abc',
-});
-```
-
-### URL Import
-
-```ts
-const file = await media.importFromUrl('https://example.com/photo.jpg', { folder: 'imports', tags: ['external'] }, context?);
-```
-
-### Lifecycle
-
-```ts
-media.dispose(); // release listeners and cached state
-```
-
-## Events
-
-Subscribe to lifecycle hooks with `on()`. All listeners are awaited (`Promise.allSettled`).
-
-```ts
-media.on('before:upload', async (event) => { /* modify event.data */ });
-media.on('after:upload', async (event) => { await notifyUser(event.result); });
-media.on('error:upload', async (event) => { console.error(event.error); });
-```
-
-Every operation follows a `before:*/after:*/error:*` pattern:
-
-`upload` `uploadMany` `delete` `deleteMany` `move` `replace` `softDelete` `restore` `import` `presignedUpload` `confirmUpload` `rename` `multipartUpload` `completeMultipart`
-
-Plus `before:validate`, `after:process`, and progress events for bulk operations:
-
-```ts
-media.on('progress:move', (event) => {
-  console.log(`${event.completed}/${event.total} files moved`);
-});
-```
-
-## Multi-Tenancy
-
-```ts
-const media = createMedia({
-  driver,
-  multiTenancy: { enabled: true, field: 'organizationId', required: true },
-});
-
-// All operations scoped to the org
-const ctx = { userId: user._id, organizationId: org._id };
-await media.upload(input, ctx);
-await media.getAll({ limit: 20 }, ctx);
-```
-
-## Asset Transforms (on-the-fly)
-
-Serve transformed images on the fly with URL query parameters. No pre-generation needed:
-
-```ts
-import { AssetTransform } from '@classytic/media-kit/transforms';
-
-const transform = new AssetTransform(driver, { cache: true });
-
-// Express/Fastify route
-app.get('/assets/:key(*)', async (req, res) => {
-  // GET /assets/products/photo.jpg?w=400&h=300&format=webp&q=80
-  const result = await transform.serve(req.params.key, req.query);
-  res.status(result.status).set(result.headers).send(result.body);
-});
-```
-
-Supported params: `w` (width), `h` (height), `q` (quality 1-100), `format` (webp/avif/jpeg/png/auto), `fit` (cover/contain/fill/inside/outside), `download` (force download).
-
-## Using Schema or Repository Directly
-
-```ts
-import { createMediaSchema, createMediaRepository } from '@classytic/media-kit';
-
-// Schema only
-const schema = createMediaSchema({ multiTenancy: { enabled: true } });
-const Media = mongoose.model('Media', schema);
-
-// Repository only (extends mongokit Repository)
-const repo = createMediaRepository(Media, { multiTenancy: { enabled: true } });
-const tree = await repo.getFolderTree(context);
-```
-
-## Exports
-
-```ts
-// Main entry
-import { createMedia, createMediaSchema, createMediaRepository, PROCESSING_PRESETS } from '@classytic/media-kit';
-
-// Storage providers
+import { ... } from '@classytic/media-kit';               // engine + repo + types
 import { S3Provider } from '@classytic/media-kit/providers/s3';
 import { GCSProvider } from '@classytic/media-kit/providers/gcs';
 import { LocalProvider } from '@classytic/media-kit/providers/local';
 import { StorageRouter } from '@classytic/media-kit/providers/router';
-
-// Asset transforms
-import { AssetTransform } from '@classytic/media-kit/transforms';
-
-// Types
-import type {
-  StorageDriver, ProcessingConfig, ProcessingPresetName,
-  OriginalHandling, RawAdapter, VideoAdapter, ImageAdapter,
-  SharpOptions, SizeVariant, FocalPoint, IMedia,
-} from '@classytic/media-kit';
+import { AssetTransformService } from '@classytic/media-kit/transforms';
+import { uploadInputSchema, mediaConfigSchema } from '@classytic/media-kit/schemas';  // Zod v4 → OpenAPI
 ```
 
-## Peer Dependencies
+---
 
-All peer deps use floor versions (`>=`) — media-kit works with any compatible version:
+## Testing
 
-| Package | Required | Version |
-|---------|----------|---------|
-| `@classytic/mongokit` | yes | >= 3.2.0 |
-| `mongoose` | yes | >= 8.0.0 |
-| `sharp` | optional | >= 0.33.0 |
-| `@aws-sdk/client-s3` | optional | >= 3.0.0 |
-| `@aws-sdk/s3-request-presigner` | optional | >= 3.0.0 |
-| `@google-cloud/storage` | optional | >= 7.0.0 |
-| `mime-types` | optional | >= 2.1.0 |
+Four tiers per [testing-infrastructure](../../sniffer/testing-infrastructure.md):
+
+```bash
+npm test              # unit + integration (CI default)
+npm run test:unit     # fast feedback
+npm run test:integration  # mongodb-memory-server + memory driver
+npm run test:e2e      # real S3 / GCS (gated by env)
+npm run test:smoke    # dist exports + package.json hygiene
+npm run test:bench    # microbenchmarks
+```
+
+E2E is gated — missing credentials → skipped, never failed. Set `tests/.env`:
+
+```
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=...
+S3_BUCKET_NAME=...
+GCS_BUCKET_NAME=...
+GCS_PROJECT_ID=...
+GCS_KEY_FILENAME=/path/to/gcs-key.json
+```
+
+---
 
 ## License
 
-MIT
+MIT © Classytic
+
+See [CLAUDE.md](./CLAUDE.md) for the agent-facing guide.
