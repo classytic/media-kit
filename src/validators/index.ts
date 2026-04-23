@@ -7,7 +7,7 @@
 
 export {
   mediaConfigSchema,
-  multiTenancySchema,
+  tenantSchema,
   softDeleteSchema,
   fileTypesSchema,
   folderSchema,

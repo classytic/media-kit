@@ -8,16 +8,18 @@
 
 import type { Connection, Model } from 'mongoose';
 import type { PaginationConfig, PluginType } from '@classytic/mongokit';
-import type { EventTransport } from '../events/transport.js';
+import type { OperationContext } from '@classytic/primitives/context';
+import type { EventTransport } from '@classytic/primitives/events';
+import type { ResolvedTenantConfig } from '@classytic/primitives/tenant';
 import type { MediaRepository } from '../repositories/media.repository.js';
 import type { MediaBridges } from '../bridges/types.js';
+import type { MediaTenantInput } from '../models/inject-tenant.js';
 import type {
   StorageDriver,
   IMediaDocument,
   FileTypesConfig,
   FolderConfig,
   ProcessingConfig,
-  MultiTenancyConfig,
   DeduplicationConfig,
   SoftDeleteConfig,
   ConcurrencyConfig,
@@ -35,11 +37,14 @@ export interface MediaConfig {
   driver: StorageDriver;
 
   /**
-   * How to store/query the tenant ID.
-   * - 'string' (default): String field — for UUID/slug auth systems
-   * - 'objectId': Schema.Types.ObjectId + ref — enables $lookup, .populate()
+   * Tenant / scope configuration (PACKAGE_RULES P11).
+   *
+   * Accepts the canonical {@link TenantConfig} from `@classytic/primitives/tenant`,
+   * a boolean (`false` disables scoping, `true` enables with defaults), or the
+   * legacy `{ tenantFieldType, multiTenant }` shorthand. media-kit defaults
+   * differ from primitives': `fieldType: 'string'`, `required: false`.
    */
-  tenantFieldType?: 'objectId' | 'string';
+  tenant?: MediaTenantInput;
 
   /** Arc-compatible event transport. Default: in-process bus. */
   eventTransport?: EventTransport;
@@ -56,8 +61,6 @@ export interface MediaConfig {
   folders?: FolderConfig;
   /** Image processing config. */
   processing?: ProcessingConfig;
-  /** Multi-tenancy config. */
-  multiTenancy?: MultiTenancyConfig;
   /** File deduplication config. */
   deduplication?: DeduplicationConfig;
   /** Soft delete config (wires mongokit softDeletePlugin when enabled). */
@@ -88,12 +91,13 @@ export interface MediaConfig {
 
 // ── ResolvedMediaConfig (after merge with defaults) ──────────
 
-export interface ResolvedMediaConfig extends Omit<MediaConfig, 'connection' | 'eventTransport'> {
+export interface ResolvedMediaConfig extends Omit<MediaConfig, 'connection' | 'eventTransport' | 'tenant'> {
   connection: Connection;
   fileTypes: Required<FileTypesConfig>;
   folders: Required<FolderConfig>;
   processing: ProcessingConfig;
-  multiTenancy: Required<MultiTenancyConfig>;
+  /** Resolved tenant config — single source of truth for scoping (P11). */
+  tenant: ResolvedTenantConfig;
   deduplication: Required<DeduplicationConfig>;
   softDelete: Required<SoftDeleteConfig>;
   concurrency: Required<ConcurrencyConfig>;
@@ -130,17 +134,21 @@ export interface MediaEngine {
 
 // ── MediaContext (threaded through domain verbs) ──────────────
 
-export interface MediaContext {
-  /** Current user ID. */
+/**
+ * Extends `@classytic/primitives`' {@link OperationContext}. Media-kit's
+ * `userId` (the upload/mutation owner) is an alias for primitives'
+ * `actorId`; keep both until consumers migrate, then drop `userId`.
+ * Narrows `IdLike` to `string | ObjectId` for mongoose storage.
+ *
+ * Host-specific extras should go through primitives' `metadata?` field
+ * (inherited from OperationContext) — avoids an index signature that
+ * would dilute the inherited typed fields.
+ */
+export interface MediaContext extends OperationContext {
+  /** Upload/mutation owner. Media-kit alias for primitives' `actorId`. */
   userId?: string | import('mongoose').Types.ObjectId;
-  /** Organization ID for multi-tenancy. */
+  /** Narrows primitives' `IdLike` to Mongoose-storable types. */
   organizationId?: string | import('mongoose').Types.ObjectId;
-  /** Correlation ID for tracing. */
-  correlationId?: string;
-  /** Mongoose session for transactions (PACKAGE_RULES §17). */
-  session?: unknown;
   /** Include soft-deleted files in queries. */
   includeDeleted?: boolean;
-  /** Additional context data. */
-  [key: string]: unknown;
 }

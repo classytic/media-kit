@@ -26,8 +26,7 @@ export function createMediaModels(
   }
 
   const schema = buildMediaSchema({
-    multiTenancy: config.multiTenancy,
-    tenantFieldType: config.tenantFieldType ?? 'string',
+    tenant: config.tenant,
     softDelete: config.softDelete,
     extraFields: config.schemaOptions?.extraFields as Record<string, import('mongoose').SchemaDefinitionProperty> | undefined,
     extraIndexes: config.schemaOptions?.extraIndexes,

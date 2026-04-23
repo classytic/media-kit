@@ -1,29 +1,23 @@
 /**
  * In-process event bus — default fallback when no arc transport is provided.
  *
- * Structurally identical to arc's MemoryEventTransport.
- * ~50 lines. Supports exact, wildcard (*), and glob (media.*) matching.
- * Handler errors are swallowed — event emission never propagates.
+ * Structurally identical to arc's MemoryEventTransport. Pattern matching is
+ * delegated to `@classytic/primitives`' `matchEventPattern` (exact / `*` /
+ * `prefix.*` / `prefix:*`). Handler errors are swallowed — event emission
+ * never propagates.
  */
 
-import type { DomainEvent, EventHandler, EventTransport } from './transport.js';
+import type {
+  DomainEvent,
+  EventHandler,
+  EventTransport,
+} from '@classytic/primitives/events';
+import { matchEventPattern } from '@classytic/primitives/events';
 import type { MediaKitLogger } from '../types.js';
 
 interface Sub {
   pattern: string;
   handler: EventHandler;
-}
-
-function patternMatches(pattern: string, type: string): boolean {
-  if (pattern === '*' || pattern === type) return true;
-  if (pattern.endsWith('.*')) {
-    const prefix = pattern.slice(0, -2);
-    return type === prefix || type.startsWith(`${prefix}.`);
-  }
-  if (pattern.endsWith('*')) {
-    return type.startsWith(pattern.slice(0, -1));
-  }
-  return false;
 }
 
 export class InProcessMediaBus implements EventTransport {
@@ -36,7 +30,7 @@ export class InProcessMediaBus implements EventTransport {
   }
 
   async publish(event: DomainEvent): Promise<void> {
-    const matching = this.subs.filter((s) => patternMatches(s.pattern, event.type));
+    const matching = this.subs.filter((s) => matchEventPattern(s.pattern, event.type));
     for (const sub of matching) {
       try {
         await sub.handler(event);

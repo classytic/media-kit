@@ -32,8 +32,8 @@ const EXPECTED_MAIN = [
   // Models
   'createMediaModels',
   'buildMediaSchema',
-  'tenantFieldDef',
-  'DEFAULT_TENANT_CONFIG',
+  'resolveMediaTenant',
+  'injectTenantField',
   // Events
   'InProcessMediaBus',
   'MEDIA_EVENTS',
@@ -122,7 +122,7 @@ OK('./schemas — Zod schemas exported and callable');
 
 // Verify Zod parse works at runtime
 const parsed = schemas.mediaConfigSchema.parse({});
-assert.equal(parsed.tenantFieldType, 'string', 'default tenantFieldType should be "string"');
+assert.equal(parsed.suppressWarnings, false, 'default suppressWarnings should be false');
 OK('schemas.mediaConfigSchema.parse({}) — defaults applied');
 
 // ── Package.json: no unexpected dependencies ──────────────────
@@ -138,12 +138,12 @@ assert.equal(
 );
 OK('package.json — ESM-only, sideEffects:false, no runtime deps');
 
-// Mongokit peer dep is >=3.6.2 (required for fieldType)
+// Mongokit peer dep is >=3.11.0 (required for UpdatePatch rename + class-level bulk ops)
 assert.ok(
-  pkg.peerDependencies?.['@classytic/mongokit']?.includes('3.6.2'),
-  `mongokit peer must be >=3.6.2, got: ${pkg.peerDependencies?.['@classytic/mongokit']}`,
+  pkg.peerDependencies?.['@classytic/mongokit']?.includes('3.11'),
+  `mongokit peer must be >=3.11.0, got: ${pkg.peerDependencies?.['@classytic/mongokit']}`,
 );
-OK('package.json — @classytic/mongokit peer dep >=3.6.2');
+OK('package.json — @classytic/mongokit peer dep >=3.11.0');
 
 // Zod peer is >=4.0.0
 assert.ok(

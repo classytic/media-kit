@@ -7,11 +7,22 @@
 
 import { z } from 'zod';
 
-export const multiTenancySchema = z.object({
-  enabled: z.boolean(),
-  field: z.string().optional().default('organizationId'),
-  required: z.boolean().optional().default(false),
-});
+/**
+ * Tenant config schema — mirrors the canonical `TenantConfig` from
+ * `@classytic/primitives/tenant` (strategy omitted here; callers that need
+ * custom / none pass explicit config and bypass zod).
+ */
+export const tenantSchema = z.union([
+  z.boolean(),
+  z.object({
+    enabled: z.boolean().optional(),
+    tenantField: z.string().optional(),
+    fieldType: z.enum(['objectId', 'string']).optional(),
+    ref: z.string().optional(),
+    contextKey: z.string().optional(),
+    required: z.boolean().optional(),
+  }),
+]);
 
 export const softDeleteSchema = z.object({
   enabled: z.boolean(),
@@ -54,8 +65,7 @@ export const schemaOptionsSchema = z.object({
  * plugins, cache, processing, and logger are validated by type system only.
  */
 export const mediaConfigSchema = z.object({
-  tenantFieldType: z.enum(['objectId', 'string']).optional().default('string'),
-  multiTenancy: multiTenancySchema.optional(),
+  tenant: tenantSchema.optional(),
   softDelete: softDeleteSchema.optional(),
   fileTypes: fileTypesSchema.optional(),
   folders: folderSchema.optional(),

@@ -42,7 +42,7 @@ import type {
   MediaKitLogger,
   GeneratedVariant,
 } from '../types.js';
-import type { EventTransport } from '../events/transport.js';
+import type { EventTransport } from '@classytic/primitives/events';
 import type { ResolvedMediaConfig, MediaContext } from '../engine/engine-types.js';
 import type { MediaBridges } from '../bridges/types.js';
 import type { SourceRef } from '../bridges/source.bridge.js';
@@ -191,11 +191,13 @@ export class MediaRepository extends Repository<IMediaDocument> {
     // Apply quarantine verdict from scan bridge (if present)
     const quarantine = (input as any)._scanQuarantine as { reason?: string; metadata?: Record<string, unknown> } | null;
     if (quarantine) {
-      media = await this.update(String(media._id), {
+      const quarantined = await this.update(String(media._id), {
         status: 'error',
         errorMessage: `Quarantined: ${quarantine.reason ?? 'manual review required'}`,
         metadata: { ...media.metadata, scanMetadata: quarantine.metadata ?? {} },
       } as any, { session: ctx?.session, organizationId: ctx?.organizationId } as any);
+      if (!quarantined) throw new Error(`[media-kit] Media disappeared during quarantine update: ${media._id}`);
+      media = quarantined;
     }
 
     this._log('info', 'Media uploaded', { id: media._id, folder: media.folder, size: media.size });
@@ -283,6 +285,7 @@ export class MediaRepository extends Repository<IMediaDocument> {
       ...(input.alt !== undefined && { alt: input.alt }),
       ...(input.title !== undefined && { title: input.title }),
     } as any, { session: ctx?.session } as any);
+    if (!updated) throw new Error(`[media-kit] Media not found after replace: ${id}`);
 
     // Cleanup old files (best-effort)
     try { await this.driver.delete(previousKey); } catch { /* ignore */ }
@@ -989,7 +992,9 @@ export class MediaRepository extends Repository<IMediaDocument> {
 
     try {
       // Step 2: processing
-      media = await this.update(mediaId, { status: 'processing' } as any, updateOpts);
+      const processing = await this.update(mediaId, { status: 'processing' } as any, updateOpts);
+      if (!processing) throw new Error(`[media-kit] Media not found after create: ${mediaId}`);
+      media = processing;
 
       const processed = await processImage(this._opDeps, {
         buffer, filename, mimeType,
@@ -1013,7 +1018,7 @@ export class MediaRepository extends Repository<IMediaDocument> {
       const writeResult = await this.driver.write(key, processed.finalBuffer, processed.finalMimeType);
 
       // Step 4: ready
-      media = await this.update(mediaId, {
+      const ready = await this.update(mediaId, {
         filename: processed.finalFilename,
         mimeType: processed.finalMimeType,
         size: writeResult.size,
@@ -1030,6 +1035,8 @@ export class MediaRepository extends Repository<IMediaDocument> {
         exif: processed.exif,
         ...(processed.duration !== undefined && { duration: processed.duration }),
       } as any, updateOpts);
+      if (!ready) throw new Error(`[media-kit] Media not found after processing: ${mediaId}`);
+      media = ready;
 
       return media;
     } catch (error) {
@@ -1063,7 +1070,9 @@ export class MediaRepository extends Repository<IMediaDocument> {
 
   /** @internal */
   async updateMedia(id: string, data: Record<string, unknown>, context?: any): Promise<IMediaDocument> {
-    return this.update(id, data as any, context);
+    const updated = await this.update(id, data as any, context);
+    if (!updated) throw new Error(`[media-kit] Media not found: ${id}`);
+    return updated;
   }
 
   /** @internal */

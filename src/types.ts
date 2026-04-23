@@ -784,18 +784,6 @@ export interface FolderConfig {
 }
 
 /**
- * Multi-tenancy configuration
- */
-export interface MultiTenancyConfig {
-  /** Enable multi-tenancy */
-  enabled: boolean;
-  /** Field name for organization ID */
-  field?: string;
-  /** Require organization ID on all operations */
-  required?: boolean;
-}
-
-/**
  * Deduplication configuration
  */
 export interface DeduplicationConfig {
@@ -857,8 +845,6 @@ export interface MediaKitConfig {
   folders?: FolderConfig;
   /** Image processing config */
   processing?: ProcessingConfig;
-  /** Multi-tenancy config */
-  multiTenancy?: MultiTenancyConfig;
   /** File deduplication config */
   deduplication?: DeduplicationConfig;
   /** Soft delete config */

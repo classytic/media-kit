@@ -3,6 +3,36 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] — 2026-04-23
+
+Migration to `@classytic/primitives` transport; drops the local
+`src/events/transport.ts` in favor of the shared `EventTransport` contract
+at `@classytic/primitives/events`. Zero behavior change for consumers —
+re-exports of `DomainEvent`, `EventHandler`, `EventTransport` from the
+media-kit root still resolve.
+
+### Changed
+
+- **`src/events/transport.ts` removed.** `EventTransport` now comes from
+  `@classytic/primitives/events`. `src/engine/create-media.ts` imports
+  the type directly from primitives; `src/index.ts` re-exports the
+  primitives type under the existing export path so existing consumers
+  on 3.0.x need no code change.
+- **Events helpers / in-process-bus refreshed** to match the primitives
+  envelope field order. No wire-format drift.
+- **DevDeps:** `@classytic/primitives` moved off `file:` link onto
+  `>=0.1.0` now that primitives ships on npm (package-rules compliance).
+- **Tests refreshed** — 373 tests across 27 files passing (up from 355).
+  Dropped the `tenant-field.test.ts` suite (validated obsolete after the
+  3.0 engine-factory split); all real coverage moved into
+  `validators.test.ts` + `package-contents.test.ts`.
+
+### Peer deps
+
+- Unchanged: `@classytic/mongokit >=3.11.0`, `@classytic/primitives >=0.1.0`,
+  `mongoose >=9.4.1`, `zod >=4.0.0`. Optional peers (sharp, aws-sdk,
+  gcs, mime-types) unchanged.
+
 ## [3.0.0] — 2026-04-15
 
 Full rewrite. **Breaking — no backward compatibility** with v2.x.

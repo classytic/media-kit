@@ -43,11 +43,6 @@ const DEFAULT_CONFIG: Omit<MediaKitConfig, 'driver'> = {
       cache: false,
     },
   },
-  multiTenancy: {
-    enabled: false,
-    field: 'organizationId',
-    required: false,
-  },
   deduplication: {
     enabled: false,
     returnExisting: true,
@@ -118,7 +113,6 @@ export function mergeConfig(config: MediaKitConfig): MediaKitConfig {
         ...config.processing?.sharpOptions,
       },
     },
-    multiTenancy: { ...DEFAULT_CONFIG.multiTenancy, ...config.multiTenancy },
     deduplication: { ...DEFAULT_CONFIG.deduplication, ...config.deduplication },
     softDelete: { ...DEFAULT_CONFIG.softDelete, ...config.softDelete },
     concurrency: { ...DEFAULT_CONFIG.concurrency, ...config.concurrency },

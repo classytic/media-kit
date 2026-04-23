@@ -14,8 +14,7 @@
  * const engine = await createMedia({
  *   connection: mongoose.connection,
  *   driver: new S3Provider({ bucket: 'my-bucket', region: 'us-east-1' }),
- *   tenantFieldType: 'objectId',
- *   multiTenancy: { enabled: true, required: true },
+ *   tenant: { enabled: true, fieldType: 'objectId', required: true },
  *   softDelete: { enabled: true, ttlDays: 30 },
  *   processing: { enabled: true, format: 'webp', quality: 80 },
  * });
@@ -57,8 +56,8 @@ export { createMediaModels } from './models/create-models.js';
 export type { MediaModels } from './models/create-models.js';
 export { buildMediaSchema } from './models/media.schema.js';
 export type { MediaSchemaConfig } from './models/media.schema.js';
-export { tenantFieldDef, DEFAULT_TENANT_CONFIG } from './models/tenant-field.js';
-export type { TenantFieldConfig } from './models/tenant-field.js';
+export { resolveMediaTenant, injectTenantField } from './models/inject-tenant.js';
+export type { MediaTenantInput } from './models/inject-tenant.js';
 
 // ── Bridges (host-implemented adapters) ──────────────────────
 export type {
@@ -79,7 +78,7 @@ export type {
 } from './bridges/index.js';
 
 // ── Events (arc-compatible) ──────────────────────────────────
-export type { DomainEvent, EventHandler, EventTransport } from './events/transport.js';
+export type { DomainEvent, EventHandler, EventTransport } from '@classytic/primitives/events';
 export { InProcessMediaBus } from './events/in-process-bus.js';
 export { MEDIA_EVENTS } from './events/event-constants.js';
 export type { MediaEventName } from './events/event-constants.js';
@@ -167,7 +166,6 @@ export type {
 export type {
   FileTypesConfig,
   FolderConfig,
-  MultiTenancyConfig,
   DeduplicationConfig,
   SoftDeleteConfig,
   ConcurrencyConfig,

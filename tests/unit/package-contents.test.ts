@@ -57,8 +57,10 @@ describe('Package Contents', () => {
     expect(peerDepsMeta['mongoose']).toBeUndefined();
     expect(peerDepsMeta['@classytic/mongokit']).toBeUndefined();
 
-    // mongokit should be >=3.6.2 (v3 requires fieldType support + latest practices)
-    expect(peerDeps['@classytic/mongokit']).toBe('>=3.6.2');
+    // mongokit should be >=3.11.0 (UpdatePatch rename + class-level bulk ops)
+    expect(peerDeps['@classytic/mongokit']).toBe('>=3.11.0');
+    // primitives declares the shared event envelope (DomainEvent / EventTransport)
+    expect(peerDeps['@classytic/primitives']).toBe('>=0.1.0');
   });
 
   it('should have no runtime dependencies (all are peer)', () => {

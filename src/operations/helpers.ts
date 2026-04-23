@@ -38,14 +38,15 @@ export function requireTenant(
   deps: OperationDeps,
   context?: OperationContext,
 ): OperationContext['organizationId'] | undefined {
-  if (!deps.config.multiTenancy?.enabled) {
+  const { tenant } = deps.config;
+  if (!tenant?.enabled) {
     return undefined;
   }
 
   const organizationId = context?.organizationId;
-  const field = deps.config.multiTenancy.field || 'organizationId';
+  const field = tenant.tenantField;
 
-  if (!organizationId && deps.config.multiTenancy.required) {
+  if (!organizationId && tenant.required) {
     throw new Error(`Multi-tenancy enabled: '${field}' is required in context`);
   }
 

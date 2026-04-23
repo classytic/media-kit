@@ -26,8 +26,7 @@ describe('MediaRepository — multi-tenancy', () => {
 
     beforeEach(async () => {
       handle = await createTestEngine({
-        tenantFieldType: 'string',
-        multiTenancy: { enabled: true, field: 'organizationId', required: true },
+        tenant: { enabled: true, fieldType: 'string', tenantField: 'organizationId', required: true },
       });
     });
 
@@ -86,8 +85,13 @@ describe('MediaRepository — multi-tenancy', () => {
 
     beforeEach(async () => {
       handle = await createTestEngine({
-        tenantFieldType: 'objectId',
-        multiTenancy: { enabled: true, field: 'organizationId', required: true },
+        tenant: {
+          enabled: true,
+          fieldType: 'objectId',
+          tenantField: 'organizationId',
+          ref: 'Organization',
+          required: true,
+        },
       });
     });
 

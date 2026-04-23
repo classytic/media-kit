@@ -19,8 +19,7 @@
  * const engine = await createMedia({
  *   connection: mongoose.connection,
  *   driver: new S3Provider({ bucket, region }),
- *   tenantFieldType: 'objectId',
- *   multiTenancy: { enabled: true, required: true },
+ *   tenant: { enabled: true, fieldType: 'objectId', required: true },
  *   processing: { enabled: true, format: 'webp', quality: 80 },
  * });
  *
@@ -33,10 +32,11 @@
  */
 
 import type { MediaConfig, MediaEngine, ResolvedMediaConfig } from './engine-types.js';
-import type { EventTransport } from '../events/transport.js';
+import type { EventTransport } from '@classytic/primitives/events';
 import type { ImageAdapter } from '../types.js';
 import { InProcessMediaBus } from '../events/in-process-bus.js';
 import { createMediaModels } from '../models/create-models.js';
+import { resolveMediaTenant } from '../models/inject-tenant.js';
 import { createMediaRepositories } from '../repositories/create-repositories.js';
 import { ImageProcessor } from '../processing/image.js';
 import { mergeConfig } from '../config.js';
@@ -53,7 +53,7 @@ export async function createMedia(config: MediaConfig): Promise<MediaEngine> {
   // Resolve defaults (reuses v2 mergeConfig)
   const resolved = mergeConfig(config as any) as unknown as ResolvedMediaConfig;
   resolved.connection = config.connection;
-  resolved.tenantFieldType = config.tenantFieldType ?? 'string';
+  resolved.tenant = resolveMediaTenant(config.tenant);
   resolved.schemaOptions = config.schemaOptions;
 
   // Resolve event transport (default: in-process bus)

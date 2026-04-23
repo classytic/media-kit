@@ -1,6 +1,6 @@
 {
   "name": "@classytic/media-kit",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Engine-factory media management for Mongoose and Arc — arc-compatible events, dynamic multi-tenancy, pluggable storage drivers, smart pagination, image processing",
   "type": "module",
   "sideEffects": false,
@@ -102,7 +102,8 @@
   "peerDependencies": {
     "@aws-sdk/client-s3": ">=3.1014.0",
     "@aws-sdk/s3-request-presigner": ">=3.1014.0",
-    "@classytic/mongokit": ">=3.6.2",
+    "@classytic/mongokit": ">=3.11.0",
+    "@classytic/primitives": ">=0.1.0",
     "@google-cloud/storage": ">=7.19.0",
     "mime-types": ">=2.1.35",
     "mongoose": ">=9.4.1",
@@ -130,7 +131,8 @@
     "@arethetypeswrong/core": ">=0.18.2",
     "@aws-sdk/client-s3": ">=3.1014.0",
     "@aws-sdk/s3-request-presigner": ">=3.1014.0",
-    "@classytic/mongokit": ">=3.6.2",
+    "@classytic/mongokit": ">=3.11.0",
+    "@classytic/primitives": ">=0.1.0",
     "@google-cloud/storage": ">=7.19.0",
     "@types/mime-types": ">=2.1.4",
     "@types/node": ">=22.0.0",

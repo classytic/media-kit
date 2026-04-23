@@ -11,7 +11,7 @@ import {
   type PluginType,
 } from '@classytic/mongokit';
 import type { StorageDriver, ImageAdapter, MediaKitLogger } from '../types.js';
-import type { EventTransport } from '../events/transport.js';
+import type { EventTransport } from '@classytic/primitives/events';
 import type { ResolvedMediaConfig } from '../engine/engine-types.js';
 import type { MediaBridges } from '../bridges/types.js';
 import type { MediaModels } from '../models/create-models.js';
@@ -41,14 +41,15 @@ export function createMediaRepositories(
     methodRegistryPlugin(),
   ];
 
-  // Multi-tenant plugin
-  if (deps.config.multiTenancy?.enabled) {
+  // Multi-tenant plugin (driven by resolved TenantConfig — P11).
+  const { tenant } = deps.config;
+  if (tenant.enabled && tenant.strategy === 'field') {
     plugins.push(
       multiTenantPlugin({
-        tenantField: deps.config.multiTenancy.field || 'organizationId',
-        contextKey: 'organizationId',
-        required: deps.config.multiTenancy.required ?? false,
-        fieldType: deps.config.tenantFieldType ?? 'string',
+        tenantField: tenant.tenantField,
+        contextKey: tenant.contextKey,
+        required: tenant.required,
+        fieldType: tenant.fieldType,
       }),
     );
   }

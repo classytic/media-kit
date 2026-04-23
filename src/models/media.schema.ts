@@ -1,22 +1,20 @@
 /**
  * Media Schema Factory — v3
  *
- * Creates a configurable Mongoose schema for media documents.
- * Uses tenantFieldDef() for dynamic tenant field type.
- * Supports status lifecycle, focal points, tags, soft deletes, and multi-tenancy.
+ * Creates a configurable Mongoose schema for media documents. Tenant field
+ * type (string vs ObjectId) is injected via `injectTenantField()` from a
+ * resolved `TenantConfig` (PACKAGE_RULES P11). Supports status lifecycle,
+ * focal points, tags, soft deletes, and multi-tenancy.
  */
 
 import mongoose, { Schema } from 'mongoose';
+import type { ResolvedTenantConfig } from '@classytic/primitives/tenant';
 import type { IMediaDocument } from '../types.js';
-import { tenantFieldDef, type TenantFieldConfig } from './tenant-field.js';
+import { injectTenantField } from './inject-tenant.js';
 
 export interface MediaSchemaConfig {
-  multiTenancy?: {
-    enabled: boolean;
-    field?: string;
-    required?: boolean;
-  };
-  tenantFieldType?: 'objectId' | 'string';
+  /** Resolved tenant config — from `resolveMediaTenant()`. */
+  tenant?: ResolvedTenantConfig;
   softDelete?: {
     enabled: boolean;
     ttlDays?: number;
@@ -29,8 +27,7 @@ export interface MediaSchemaConfig {
 
 export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaDocument> {
   const {
-    multiTenancy = { enabled: false },
-    tenantFieldType = 'string',
+    tenant,
     softDelete = { enabled: false },
     extraFields = {},
     extraIndexes = [],
@@ -118,16 +115,6 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
     ...extraFields,
   };
 
-  // Dynamic tenant field (PACKAGE_RULES §9.2)
-  if (multiTenancy.enabled) {
-    const fieldName = multiTenancy.field || 'organizationId';
-    const tenantConfig: TenantFieldConfig = {
-      tenantFieldType,
-      required: multiTenancy.required ?? false,
-    };
-    schemaDefinition[fieldName] = tenantFieldDef(tenantConfig);
-  }
-
   const schema = new Schema<IMediaDocument>(schemaDefinition, {
     timestamps: true,
     collection,
@@ -142,22 +129,19 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
     { name: 'media_text_search' },
   );
 
-  // Multi-tenancy compound indexes
-  if (multiTenancy.enabled) {
-    const field = multiTenancy.field || 'organizationId';
-    schema.index({ [field]: 1, folder: 1, createdAt: -1 });
-    schema.index({ [field]: 1, status: 1, createdAt: -1 });
-  }
+  // Note: tenant-scoped compound indexes for folder / status queries are
+  // formed automatically by injectTenantField() below — it prepends the
+  // tenant field onto the `{folder:1, createdAt:-1}` and
+  // `{status:1, createdAt:-1}` indexes declared above.
 
-  // Optimized compound indexes for soft-delete-aware queries
+  // Optimized compound indexes for soft-delete-aware queries. When tenant
+  // scoping is enabled, injectTenantField() prepends the tenant key to each
+  // of these at the bottom of the function, producing tenant-scoped
+  // deletedAt indexes automatically.
   if (optimizedIndexes) {
     schema.index({ deletedAt: 1, createdAt: -1, _id: -1 });
     schema.index({ deletedAt: 1, folder: 1, createdAt: -1 });
     schema.index({ deletedAt: 1, status: 1, createdAt: -1 });
-    if (multiTenancy.enabled) {
-      const field = multiTenancy.field || 'organizationId';
-      schema.index({ deletedAt: 1, [field]: 1, createdAt: -1, _id: -1 });
-    }
   }
 
   // Soft delete TTL index
@@ -171,6 +155,11 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
   // Custom indexes
   for (const indexSpec of extraIndexes) {
     schema.index(indexSpec);
+  }
+
+  // Inject tenant field + prepend tenant key to compound indexes (P11).
+  if (tenant) {
+    injectTenantField(schema, tenant);
   }
 
   return schema;

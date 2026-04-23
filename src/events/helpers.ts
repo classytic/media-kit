@@ -1,29 +1,26 @@
 /**
  * Event creation helper.
  *
- * Fills in meta.id (uuid), meta.timestamp (now), and optional fields
- * (userId, organizationId, correlationId) from the media context.
+ * Thin wrapper around `@classytic/primitives`' `createEvent` that fills the
+ * shared `EventMeta` from a `MediaContext` (userId, organizationId, correlationId).
  */
 
-import type { DomainEvent } from './transport.js';
+import { createEvent as createPrimitiveEvent } from '@classytic/primitives/events';
+import type { DomainEvent, EventMeta } from '@classytic/primitives/events';
 import type { MediaContext } from '../engine/engine-types.js';
 
 export function createMediaEvent<T>(
   type: string,
   payload: T,
   ctx?: MediaContext,
-  meta?: Partial<DomainEvent['meta']>,
+  meta?: Partial<EventMeta>,
 ): DomainEvent<T> {
-  return {
-    type,
-    payload,
-    meta: {
-      id: crypto.randomUUID(),
-      timestamp: new Date(),
-      userId: ctx?.userId ? String(ctx.userId) : undefined,
-      organizationId: ctx?.organizationId ? String(ctx.organizationId) : undefined,
-      correlationId: ctx?.correlationId,
-      ...meta,
-    },
-  };
+  return createPrimitiveEvent<T>(type, payload, {
+    ...(ctx?.userId !== undefined ? { userId: String(ctx.userId) } : {}),
+    ...(ctx?.organizationId !== undefined
+      ? { organizationId: String(ctx.organizationId) }
+      : {}),
+    ...(ctx?.correlationId !== undefined ? { correlationId: ctx.correlationId } : {}),
+    ...meta,
+  });
 }

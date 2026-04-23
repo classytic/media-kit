@@ -15,26 +15,36 @@ describe('Zod schemas', () => {
   describe('mediaConfigSchema', () => {
     it('accepts an empty config and applies defaults', () => {
       const parsed = mediaConfigSchema.parse({});
-      expect(parsed.tenantFieldType).toBe('string');
       expect(parsed.suppressWarnings).toBe(false);
     });
 
-    it('accepts tenantFieldType: objectId', () => {
-      const parsed = mediaConfigSchema.parse({ tenantFieldType: 'objectId' });
-      expect(parsed.tenantFieldType).toBe('objectId');
-    });
-
-    it('rejects invalid tenantFieldType', () => {
-      expect(() => mediaConfigSchema.parse({ tenantFieldType: 'wrong' })).toThrow();
-    });
-
-    it('validates nested multiTenancy config', () => {
+    it('accepts tenant config with fieldType: objectId', () => {
       const parsed = mediaConfigSchema.parse({
-        multiTenancy: { enabled: true, field: 'orgId', required: true },
+        tenant: { fieldType: 'objectId', enabled: true },
       });
-      expect(parsed.multiTenancy?.enabled).toBe(true);
-      expect(parsed.multiTenancy?.field).toBe('orgId');
-      expect(parsed.multiTenancy?.required).toBe(true);
+      expect(parsed.tenant).toMatchObject({ fieldType: 'objectId', enabled: true });
+    });
+
+    it('rejects invalid fieldType on tenant config', () => {
+      expect(() =>
+        mediaConfigSchema.parse({ tenant: { fieldType: 'wrong' } as any }),
+      ).toThrow();
+    });
+
+    it('accepts tenant as a boolean shorthand', () => {
+      const parsed = mediaConfigSchema.parse({ tenant: true });
+      expect(parsed.tenant).toBe(true);
+    });
+
+    it('validates nested tenant config', () => {
+      const parsed = mediaConfigSchema.parse({
+        tenant: { enabled: true, tenantField: 'orgId', required: true },
+      });
+      expect(parsed.tenant).toMatchObject({
+        enabled: true,
+        tenantField: 'orgId',
+        required: true,
+      });
     });
 
     it('validates softDelete config', () => {
