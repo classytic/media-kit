@@ -8,7 +8,7 @@
  */
 
 import mongoose, { Schema } from 'mongoose';
-import type { ResolvedTenantConfig } from '@classytic/primitives/tenant';
+import type { ResolvedTenantConfig } from '@classytic/repo-core/tenant';
 import type { IMediaDocument } from '../types.js';
 import { injectTenantField } from './inject-tenant.js';
 
@@ -103,6 +103,23 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
 
     // --- Soft Delete ---
     deletedAt: { type: Date, default: null, index: true },
+
+    // --- Storage Provider ---
+    // Name of the StorageDriver that holds this file. Used to route storage
+    // operations (delete, read, stat) in multi-provider setups. Absent on
+    // docs created before multi-provider was introduced — those fall back to
+    // the engine's defaultProvider at query time.
+    provider: { type: String, index: true },
+
+    // Provider-specific write metadata (fileId, etag, dimensions, etc.).
+    // Stored as-is; not normalized across providers.
+    providerMetadata: { type: Schema.Types.Mixed },
+
+    // --- Temporal lifecycle ---
+    // NOT a MongoDB TTL index — purgeExpired() is code-driven so storage
+    // files are cleaned up before the doc is removed. A plain index here
+    // enables fast range queries for the purge batch and getExpiringSoon().
+    expiresAt: { type: Date, default: null, index: true },
 
     // --- Polymorphic Source Reference (PACKAGE_RULES §7) ---
     sourceId: { type: String, index: true },

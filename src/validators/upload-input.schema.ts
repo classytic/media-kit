@@ -22,6 +22,8 @@ export const uploadInputSchema = z.object({
   focalPoint: focalPointSchema.optional(),
   contentType: z.string().optional(),
   skipProcessing: z.boolean().optional(),
+  provider: z.string().optional(),
+  expiresAt: z.coerce.date().optional(),
 });
 
 export const confirmUploadSchema = z.object({

@@ -108,6 +108,18 @@ const router = await import('../../dist/providers/router.mjs').catch((err) => FA
 assert.ok(router.StorageRouter, 'StorageRouter missing');
 OK('./providers/router — StorageRouter exported');
 
+const imgbb = await import('../../dist/providers/imgbb.mjs').catch((err) => FAIL(`providers/imgbb import failed: ${err.message}`));
+assert.ok(imgbb.ImgbbProvider, 'ImgbbProvider missing');
+OK('./providers/imgbb — ImgbbProvider exported');
+
+const imagekit = await import('../../dist/providers/imagekit.mjs').catch((err) => FAIL(`providers/imagekit import failed: ${err.message}`));
+assert.ok(imagekit.ImageKitProvider, 'ImageKitProvider missing');
+OK('./providers/imagekit — ImageKitProvider exported');
+
+const cloudinary = await import('../../dist/providers/cloudinary.mjs').catch((err) => FAIL(`providers/cloudinary import failed: ${err.message}`));
+assert.ok(cloudinary.CloudinaryProvider, 'CloudinaryProvider missing');
+OK('./providers/cloudinary — CloudinaryProvider exported');
+
 // ── Subpath: transforms ────────────────────────────────────────
 const transforms = await import('../../dist/transforms.mjs').catch((err) => FAIL(`transforms import failed: ${err.message}`));
 assert.ok(transforms.AssetTransformService, 'AssetTransformService missing');
@@ -140,10 +152,10 @@ OK('package.json — ESM-only, sideEffects:false, no runtime deps');
 
 // Mongokit peer dep is >=3.11.0 (required for UpdatePatch rename + class-level bulk ops)
 assert.ok(
-  pkg.peerDependencies?.['@classytic/mongokit']?.includes('3.11'),
-  `mongokit peer must be >=3.11.0, got: ${pkg.peerDependencies?.['@classytic/mongokit']}`,
+  pkg.peerDependencies?.['@classytic/mongokit']?.includes('3.13'),
+  `mongokit peer must be >=3.13.0, got: ${pkg.peerDependencies?.['@classytic/mongokit']}`,
 );
-OK('package.json — @classytic/mongokit peer dep >=3.11.0');
+OK('package.json — @classytic/mongokit peer dep >=3.13.0');
 
 // Zod peer is >=4.0.0
 assert.ok(
@@ -178,7 +190,7 @@ OK(`package.json — dist JS size ${(totalMjsBytes / 1024).toFixed(1)} KB (budge
 
 // Subpath exports all resolve (already verified above, but assert count)
 const subpathExports = Object.keys(pkg.exports).filter((k) => k !== '.' && k !== './package.json');
-assert.ok(subpathExports.length >= 6, `expected 6+ subpath exports, got ${subpathExports.length}`);
+assert.ok(subpathExports.length >= 9, `expected 9+ subpath exports, got ${subpathExports.length}`);
 OK(`package.json — ${subpathExports.length} subpath exports (providers + transforms + schemas)`);
 
 console.log('\n🎉 Smoke test passed — dist is healthy.');

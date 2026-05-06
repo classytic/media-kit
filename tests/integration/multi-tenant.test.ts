@@ -63,10 +63,10 @@ describe('MediaRepository — multi-tenancy', () => {
         { organizationId: OTHER_ORG_HEX } as any,
       );
 
-      expect((orgA as any).docs).toHaveLength(1);
-      expect((orgB as any).docs).toHaveLength(1);
-      expect((orgA as any).docs[0].filename).toBe('a.txt');
-      expect((orgB as any).docs[0].filename).toBe('b.txt');
+      expect((orgA as any).data).toHaveLength(1);
+      expect((orgB as any).data).toHaveLength(1);
+      expect((orgA as any).data[0].filename).toBe('a.txt');
+      expect((orgB as any).data[0].filename).toBe('b.txt');
     });
 
     it('throws when required tenant is missing', async () => {
@@ -123,8 +123,8 @@ describe('MediaRepository — multi-tenancy', () => {
         { page: 1, limit: 10 },
         { organizationId: ORG_HEX } as any,
       );
-      expect((orgA as any).docs).toHaveLength(1);
-      expect((orgA as any).docs[0].filename).toBe('a.txt');
+      expect((orgA as any).data).toHaveLength(1);
+      expect((orgA as any).data[0].filename).toBe('a.txt');
     });
 
     it('schema declares ref: Organization for populate compatibility', async () => {

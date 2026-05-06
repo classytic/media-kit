@@ -118,6 +118,19 @@ export interface BatchDeletedPayload {
   failedIds: string[];
 }
 
+// ── Temporal lifecycle payloads ────────────────────────────
+
+export interface AssetsExpiredPayload {
+  /** IDs successfully purged (storage + DB removed). */
+  purgedIds: string[];
+  /** IDs where purge failed (file/doc may still exist). */
+  failedIds: string[];
+  /** Cutoff timestamp used for the batch. */
+  before: Date;
+  purgedCount: number;
+  failedCount: number;
+}
+
 // ── Event map (name → payload) ────────────────────────────
 
 export interface MediaEventMap {
@@ -142,4 +155,5 @@ export interface TypedMediaEventMap {
   'media:upload.confirmed': UploadConfirmedPayload;
   'media:upload.multipartCompleted': MultipartCompletedPayload;
   'media:batch.deleted': BatchDeletedPayload;
+  'media:assets.expired': AssetsExpiredPayload;
 }

@@ -57,10 +57,30 @@ describe('Package Contents', () => {
     expect(peerDepsMeta['mongoose']).toBeUndefined();
     expect(peerDepsMeta['@classytic/mongokit']).toBeUndefined();
 
-    // mongokit should be >=3.11.0 (UpdatePatch rename + class-level bulk ops)
-    expect(peerDeps['@classytic/mongokit']).toBe('>=3.11.0');
-    // primitives declares the shared event envelope (DomainEvent / EventTransport)
-    expect(peerDeps['@classytic/primitives']).toBe('>=0.1.0');
+    // mongokit must be >=3.13.0 — that release ships `claim()` (atomic
+    // CAS state transition with `where` for compound predicates) which
+    // media-kit's upload pipeline uses for race-safe pending →
+    // processing → ready transitions, plus `findOneAndUpdate` plugin-
+    // pipeline routing for tag/focal-point updates (avoids cross-tenant
+    // write surface). Also brings the LookupBuilder sanitization
+    // restoration + array-form `select` parity from 3.12 that media-kit
+    // relies on transitively via `lookupPopulate`.
+    expect(peerDeps['@classytic/mongokit']).toBe('>=3.13.0');
+    // primitives 0.4.0 ships the `assertAndClaim` surface that
+    // media-kit's upload pipeline (`presigned.ts`) uses to validate
+    // state-machine transitions before the database round-trip. The
+    // earlier `>=0.3.1` pin was wrong on two counts: (1) `0.3.1` was
+    // never published (only 0.1.0, 0.1.1, 0.2.0, 0.3.0, 0.4.0 exist),
+    // so the lower bound was unreachable; (2) `assertAndClaim` only
+    // landed in 0.4.0. Hosts on 0.3.x silently broke at runtime with
+    // an `ImportError` on first upload.
+    expect(peerDeps['@classytic/primitives']).toBe('>=0.4.0');
+    // repo-core 0.4.0 ships `StandardRepo.claim()` + the
+    // `ClaimTransition.where` compound-CAS predicate that the new
+    // upload-pipeline state-machine writes against. media-kit also
+    // resolves the canonical TenantConfig vocabulary via
+    // `resolveTenantConfig()` from `@classytic/repo-core/tenant`.
+    expect(peerDeps['@classytic/repo-core']).toBe('>=0.4.0');
   });
 
   it('should have no runtime dependencies (all are peer)', () => {

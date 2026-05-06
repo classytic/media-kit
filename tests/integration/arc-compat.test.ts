@@ -142,7 +142,7 @@ describe('Arc EventTransport compatibility', () => {
         const found = await handle.engine.repositories.media.getAll({
           page: 1, limit: 100, filters: { tags: tag },
         });
-        for (const doc of (found as any).docs) {
+        for (const doc of (found as any).data) {
           await handle.engine.repositories.media.hardDelete(String(doc._id));
           cleanupTriggered.push(String(doc._id));
         }

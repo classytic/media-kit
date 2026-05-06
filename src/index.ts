@@ -100,6 +100,7 @@ export type {
   UploadConfirmedPayload,
   MultipartCompletedPayload,
   BatchDeletedPayload,
+  AssetsExpiredPayload,
   MediaEventMap,
   TypedMediaEventMap,
 } from './events/event-payloads.js';
@@ -123,6 +124,9 @@ export * from './utils/folders.js';
 export * from './utils/mime.js';
 export * from './utils/hash.js';
 export * from './utils/alt-text.js';
+
+// ── Driver Registry (multi-provider) ────────────────────────
+export { DriverRegistry } from './providers/driver-registry.js';
 
 // ── Types — Storage Driver ───────────────────────────────────
 export type {
@@ -208,29 +212,36 @@ export type {
 
 // ── Re-export mongokit types for convenience ────────────────
 export { QueryParser } from '@classytic/mongokit';
-export type { ParsedQuery, QueryParserOptions } from '@classytic/mongokit';
+// Repo-core-owned types — sourced from repo-core directly. Mongokit 3.12
+// dropped its re-exports of these to keep one canonical home; the union
+// type formerly known as `PaginationResult` is now `AnyPaginationResult`.
+export type { HttpError } from '@classytic/repo-core/errors';
 export type {
-  PaginationConfig,
-  OffsetPaginationResult,
-  KeysetPaginationResult,
   AggregatePaginationResult,
-  PaginationResult,
-  SortSpec,
-  SortDirection,
-  PopulateSpec,
-  SelectSpec,
+  AnyPaginationResult as PaginationResult,
+  KeysetPaginationResult,
+  OffsetPaginationResult,
+} from '@classytic/repo-core/pagination';
+// Mongokit-owned types.
+export type {
+  CacheAdapter,
+  CacheOperationOptions,
+  CacheOptions,
+  CreateOptions,
+  DeleteResult,
+  EventPayload,
+  OperationOptions,
+  PaginationConfig,
+  ParsedQuery,
   Plugin,
   PluginFunction,
   PluginType,
-  CacheAdapter,
-  CacheOptions,
-  CacheOperationOptions,
+  PopulateSpec,
+  QueryParserOptions,
   RepositoryContext,
   RepositoryEvent,
-  EventPayload,
-  OperationOptions,
-  CreateOptions,
+  SelectSpec,
+  SortDirection,
+  SortSpec,
   UpdateOptions,
-  DeleteResult,
-  HttpError,
 } from '@classytic/mongokit';

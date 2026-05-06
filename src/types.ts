@@ -8,47 +8,46 @@
 
 import type { Document, Schema, Model, Types } from 'mongoose';
 
-// Re-export mongokit types for consumers
+// Repo-core-owned types — sourced from `@classytic/repo-core`. Mongokit
+// 3.12 dropped its re-exports of these so the org has one canonical home;
+// `PaginationResult` was renamed to `AnyPaginationResult` in repo-core.
+export type { HttpError } from '@classytic/repo-core/errors';
 export type {
-  // Pagination
-  PaginationConfig,
-  OffsetPaginationResult,
-  KeysetPaginationResult,
   AggregatePaginationResult,
-  PaginationResult,
-  SortSpec,
-  SortDirection,
-  PopulateSpec,
-  SelectSpec,
+  AnyPaginationResult as PaginationResult,
+  KeysetPaginationResult,
+  OffsetPaginationResult,
+} from '@classytic/repo-core/pagination';
 
-  // Repository
-  RepositoryContext,
-  RepositoryEvent,
+// Mongokit-owned types stay sourced from mongokit.
+export type {
+  // Cache
+  CacheAdapter,
+  CacheOperationOptions,
+  CacheOptions,
+  CreateOptions,
+  DeleteResult,
   EventPayload,
-
+  // Operations
+  OperationOptions,
+  // Pagination configs
+  PaginationConfig,
+  ParsedQuery,
   // Plugins
   Plugin,
   PluginFunction,
   PluginType,
-
-  // Cache
-  CacheAdapter,
-  CacheOptions,
-  CacheOperationOptions,
-
-  // Operations
-  OperationOptions,
-  CreateOptions,
-  UpdateOptions,
-  DeleteResult,
-
-  // Error
-  HttpError,
-
+  PopulateSpec,
   // Query
   QueryParser,
   QueryParserOptions,
-  ParsedQuery,
+  // Repository
+  RepositoryContext,
+  RepositoryEvent,
+  SelectSpec,
+  SortDirection,
+  SortSpec,
+  UpdateOptions,
 } from '@classytic/mongokit';
 
 // ============================================
@@ -65,6 +64,8 @@ export interface WriteResult {
   url: string;
   /** Final file size in bytes */
   size: number;
+  /** Provider-specific metadata (e.g. fileId, etag, dimensions). Stored on the media doc as providerMetadata. */
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -731,6 +732,25 @@ export interface IMedia {
   /** Source entity type (e.g. 'Product', 'Order', 'StripeCharge') */
   sourceModel?: string;
 
+  // --- Storage provider ---
+
+  /** Name of the StorageDriver that holds this file. Used to route delete/read/stat
+   *  through the correct provider in multi-provider setups. Falls back to the
+   *  engine's defaultProvider when absent (backward-compat with existing docs). */
+  provider?: string;
+
+  /** Provider-specific metadata returned by the driver's write() call.
+   *  e.g. { fileId, filePath } for ImageKit, { id, width, height } for imgbb,
+   *  { bucket, etag } for S3. Stored as-is; not normalized. */
+  providerMetadata?: Record<string, unknown>;
+
+  // --- Temporal lifecycle ---
+
+  /** Explicit expiry timestamp. When set, the file is a candidate for
+   *  programmatic purge via purgeExpired(). NOT a MongoDB TTL — purge is
+   *  code-driven so storage files are cleaned up before the doc is removed. */
+  expiresAt?: Date | null;
+
   // --- Audit ---
 
   /** User who uploaded the file */
@@ -831,6 +851,8 @@ export interface ImportOptions {
   maxSize?: number;
   /** Request timeout in milliseconds (default: 30000) */
   timeout?: number;
+  /** Provider name to use for this import. Defaults to engine's defaultProvider. */
+  provider?: string;
 }
 
 /**
@@ -929,6 +951,10 @@ export interface UploadInput {
   maxWidth?: number;
   /** Override max height for this upload */
   maxHeight?: number;
+  /** Provider name to use for this upload. Defaults to engine's defaultProvider. */
+  provider?: string;
+  /** Expiry timestamp. When set, the asset will be eligible for purgeExpired() cleanup. */
+  expiresAt?: Date;
 }
 
 /**
@@ -957,6 +983,8 @@ export interface ConfirmUploadInput {
   etag?: string;
   /** Run post-upload processing (ThumbHash, dominant color, variants). Default: false */
   process?: boolean;
+  /** Expiry timestamp for the confirmed asset. Eligible for purgeExpired() cleanup. */
+  expiresAt?: Date;
 }
 
 /**

@@ -10,10 +10,11 @@ import type { Connection, Model } from 'mongoose';
 import type { PaginationConfig, PluginType } from '@classytic/mongokit';
 import type { OperationContext } from '@classytic/primitives/context';
 import type { EventTransport } from '@classytic/primitives/events';
-import type { ResolvedTenantConfig } from '@classytic/primitives/tenant';
+import type { ResolvedTenantConfig } from '@classytic/repo-core/tenant';
 import type { MediaRepository } from '../repositories/media.repository.js';
 import type { MediaBridges } from '../bridges/types.js';
 import type { MediaTenantInput } from '../models/inject-tenant.js';
+import type { DriverRegistry } from '../providers/driver-registry.js';
 import type {
   StorageDriver,
   IMediaDocument,
@@ -33,16 +34,47 @@ export interface MediaConfig {
   /** Mongoose connection — package creates models on this connection. */
   connection: Connection;
 
-  /** Storage driver instance (S3, GCS, Local, Router). */
-  driver: StorageDriver;
+  /**
+   * Single storage driver — sugar for a one-entry `providers` registry.
+   * Use `providers` + `defaultProvider` when you need multiple backends.
+   * Exactly one of `driver` or `providers` must be set.
+   */
+  driver?: StorageDriver;
+
+  /**
+   * Named storage drivers for multi-provider setups.
+   *
+   * Each key becomes the provider name stored on `IMedia.provider` and passed
+   * to `upload({ provider: 'name' })`. Hosts can mix built-in drivers with
+   * their own `StorageDriver` implementations freely — the interface is open.
+   *
+   * @example
+   * ```ts
+   * createMedia({
+   *   providers: {
+   *     s3:       new S3Provider({ bucket: 'originals', region: 'us-east-1' }),
+   *     imagekit: new ImageKitProvider({ urlEndpoint: '...', privateKey: '...' }),
+   *     imgbb:    new ImgbbProvider({ apiKey: process.env.IMGBB_KEY }),
+   *   },
+   *   defaultProvider: 's3',
+   * })
+   * ```
+   */
+  providers?: Record<string, StorageDriver>;
+
+  /**
+   * Default provider name when `providers` is used.
+   * Required when `providers` is set; ignored when only `driver` is set.
+   */
+  defaultProvider?: string;
 
   /**
    * Tenant / scope configuration (PACKAGE_RULES P11).
    *
-   * Accepts the canonical {@link TenantConfig} from `@classytic/primitives/tenant`,
+   * Accepts the canonical {@link TenantConfig} from `@classytic/repo-core/tenant`,
    * a boolean (`false` disables scoping, `true` enables with defaults), or the
    * legacy `{ tenantFieldType, multiTenant }` shorthand. media-kit defaults
-   * differ from primitives': `fieldType: 'string'`, `required: false`.
+   * differ from repo-core's: `fieldType: 'string'`, `required: false`.
    */
   tenant?: MediaTenantInput;
 
@@ -122,7 +154,17 @@ export interface MediaEngine {
   /** Resolved configuration (frozen). */
   readonly config: Readonly<ResolvedMediaConfig>;
 
-  /** Storage driver reference. */
+  /**
+   * Driver registry — all registered providers, keyed by name.
+   * Use `registry.resolve('name')` to get a specific driver,
+   * or `registry.defaultDriver` for the default.
+   */
+  readonly registry: DriverRegistry;
+
+  /**
+   * Default storage driver (shorthand for `registry.defaultDriver`).
+   * Preserved for single-driver backward compatibility.
+   */
   readonly driver: StorageDriver;
 
   /** Bridges passed in config (frozen). */

@@ -51,7 +51,7 @@ describe('Mongokit passthrough — response shape contract', () => {
   });
 
   describe('getAll — raw mongokit pagination shape', () => {
-    it('offset pagination returns { docs, total, pages, hasNext, hasPrev, method: "offset" }', async () => {
+    it('offset pagination returns { data, total, pages, hasNext, hasPrev, method: "offset" }', async () => {
       for (let i = 0; i < 3; i++) {
         await handle.engine.repositories.media.upload({
           buffer: BUF(`${i}`),
@@ -65,21 +65,20 @@ describe('Mongokit passthrough — response shape contract', () => {
         limit: 10,
       });
 
-      // Mongokit offset-pagination shape (NOT an envelope)
-      expect(result).toHaveProperty('docs');
+      // Mongokit offset-pagination shape (NOT an arc envelope)
+      expect(result).toHaveProperty('data');
       expect(result).toHaveProperty('total', 3);
       expect(result).toHaveProperty('pages');
       expect(result).toHaveProperty('hasNext');
       expect(result).toHaveProperty('hasPrev');
       expect(result).toHaveProperty('method', 'offset');
-      // No envelope keys
+      // No legacy envelope keys (mongokit/repo-core 0.4 dropped `success`)
       expect(result).not.toHaveProperty('success');
-      expect(result).not.toHaveProperty('data');
-      // docs is an array of documents (not `{ data: [...] }`)
-      expect(Array.isArray((result as any).docs)).toBe(true);
+      // `data` is the document array (renamed from `docs` in repo-core 0.4)
+      expect(Array.isArray((result as any).data)).toBe(true);
     });
 
-    it('keyset pagination returns { docs, hasMore, next, method: "keyset" }', async () => {
+    it('keyset pagination returns { data, hasMore, next, method: "keyset" }', async () => {
       for (let i = 0; i < 3; i++) {
         await handle.engine.repositories.media.upload({
           buffer: BUF(`${i}`),
@@ -93,11 +92,11 @@ describe('Mongokit passthrough — response shape contract', () => {
         limit: 2,
       });
 
-      expect(result).toHaveProperty('docs');
+      expect(result).toHaveProperty('data');
       expect(result).toHaveProperty('hasMore');
       expect(result).toHaveProperty('method', 'keyset');
       expect(result).not.toHaveProperty('success');
-      expect(result).not.toHaveProperty('data');
+      expect(result).not.toHaveProperty('docs');
     });
   });
 
@@ -225,7 +224,7 @@ describe('Mongokit passthrough — response shape contract', () => {
 
       const paginated = await handle.engine.repositories.media.getAll({ page: 1, limit: 10 });
       const arcResponse = { success: true, data: paginated, status: 200 };
-      expect(arcResponse.data).toHaveProperty('docs');
+      expect(arcResponse.data).toHaveProperty('data');
       expect(arcResponse.data).toHaveProperty('total');
     });
   });

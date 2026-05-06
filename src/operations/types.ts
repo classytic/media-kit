@@ -13,6 +13,7 @@ import type {
 } from '../types.js';
 import type { ResolvedMediaConfig } from '../engine/engine-types.js';
 import type { MediaRepository } from '../repositories/media.repository.js';
+import type { DriverRegistry } from '../providers/driver-registry.js';
 import type { ImageProcessor } from '../processing/image.js';
 import type { Semaphore } from '../utils/semaphore.js';
 
@@ -29,7 +30,10 @@ export interface InternalEventEmitter {
 
 export interface OperationDeps {
   readonly config: ResolvedMediaConfig;
+  /** Default driver — backward compat for operation files that predate multi-provider. */
   readonly driver: StorageDriver;
+  /** Full registry — operation files that need per-provider routing use this. */
+  readonly registry: DriverRegistry;
   readonly repository: MediaRepository;
   readonly processor: ImageProcessor | ImageAdapter | null;
   readonly processorReady: Promise<void> | null;

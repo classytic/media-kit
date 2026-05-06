@@ -20,7 +20,6 @@ import {
 } from '@classytic/mongokit';
 import type {
   IMediaDocument,
-  StorageDriver,
   UploadInput,
   ConfirmUploadInput,
   PresignedUploadResult,
@@ -43,11 +42,14 @@ import type {
   GeneratedVariant,
 } from '../types.js';
 import type { EventTransport } from '@classytic/primitives/events';
+import { assertAndClaim } from '@classytic/primitives/state-machine';
+import { MEDIA_MACHINE } from '../models/media-state-machine.js';
 import type { ResolvedMediaConfig, MediaContext } from '../engine/engine-types.js';
 import type { MediaBridges } from '../bridges/types.js';
 import type { SourceRef } from '../bridges/source.bridge.js';
 import type { TransformOpOutput } from '../bridges/transform.bridge.js';
 import type { OperationDeps } from '../operations/types.js';
+import type { DriverRegistry } from '../providers/driver-registry.js';
 import { MEDIA_EVENTS } from '../events/event-constants.js';
 import { createMediaEvent } from '../events/helpers.js';
 import { ImageProcessor } from '../processing/image.js';
@@ -73,7 +75,7 @@ import {
 export interface MediaRepositoryDeps {
   events: EventTransport;
   config: ResolvedMediaConfig;
-  driver: StorageDriver;
+  registry: DriverRegistry;
   processor?: ImageProcessor | ImageAdapter | null;
   processorReady?: Promise<void> | null;
   logger?: MediaKitLogger;
@@ -84,7 +86,7 @@ export interface MediaRepositoryDeps {
 
 export class MediaRepository extends Repository<IMediaDocument> {
   private readonly events: EventTransport;
-  private readonly driver: StorageDriver;
+  private readonly registry: DriverRegistry;
   private readonly processor: ImageProcessor | ImageAdapter | null;
   private readonly processorReady: Promise<void> | null;
   private readonly mediaConfig: ResolvedMediaConfig;
@@ -100,7 +102,7 @@ export class MediaRepository extends Repository<IMediaDocument> {
   ) {
     super(model, plugins, pagination);
     this.events = deps.events;
-    this.driver = deps.driver;
+    this.registry = deps.registry;
     this.processor = deps.processor ?? null;
     this.processorReady = deps.processorReady ?? null;
     this.mediaConfig = deps.config;
@@ -117,7 +119,8 @@ export class MediaRepository extends Repository<IMediaDocument> {
     const self = this;
     return {
       config: this.mediaConfig as any,
-      driver: this.driver,
+      driver: this.registry.defaultDriver,
+      registry: this.registry,
       repository: this as any,
       get processor() { return self.processor; },
       processorReady: this.processorReady,
@@ -134,6 +137,31 @@ export class MediaRepository extends Repository<IMediaDocument> {
 
   private _log(level: 'info' | 'warn' | 'error', message: string, meta?: Record<string, unknown>): void {
     this.mediaLogger?.[level]?.(message, meta);
+  }
+
+  /**
+   * Build the options bag used to forward tenant + session context to plugin-
+   * routed Repository methods (`getAll`, `getByQuery`, `aggregatePipeline`,
+   * `update`, etc.).
+   *
+   * Reads the org id from `ctx.organizationId` (the canonical field on
+   * `MediaContext`) and forwards it under the multiTenantPlugin's configured
+   * `contextKey` — defaults to `'organizationId'` but hosts may override.
+   * Without this indirection, scoping silently breaks when a host configures
+   * a non-default `contextKey`.
+   */
+  private _tenantOpts(ctx?: MediaContext): Record<string, unknown> {
+    const opts: Record<string, unknown> = {};
+    if (ctx?.session !== undefined) opts.session = ctx.session;
+    const tenant = this.mediaConfig.tenant;
+    if (tenant?.enabled && ctx?.organizationId !== undefined) {
+      const contextKey = tenant.contextKey ?? 'organizationId';
+      opts[contextKey] = ctx.organizationId;
+    } else if (ctx?.organizationId !== undefined) {
+      // Tenant scoping disabled — still pass for any custom plugin that reads it.
+      opts.organizationId = ctx.organizationId;
+    }
+    return opts;
   }
 
   // ============================================================
@@ -262,8 +290,12 @@ export class MediaRepository extends Repository<IMediaDocument> {
 
     const newKey = generateKey(processed.finalFilename, targetFolder);
 
+    // Resolve provider key: explicit input > existing doc > default
+    const providerKey = input.provider ?? existing.provider ?? this.registry.defaultName;
+    const driver = this.registry.resolve(providerKey);
+
     // Write new file
-    const writeResult = await this.driver.write(newKey, processed.finalBuffer, processed.finalMimeType);
+    const writeResult = await driver.write(newKey, processed.finalBuffer, processed.finalMimeType);
 
     // Update DB record
     const updated = await this.update(id, {
@@ -274,6 +306,7 @@ export class MediaRepository extends Repository<IMediaDocument> {
       url: writeResult.url,
       key: writeResult.key,
       hash,
+      provider: providerKey,
       width: processed.width,
       height: processed.height,
       aspectRatio: processed.aspectRatio,
@@ -282,15 +315,17 @@ export class MediaRepository extends Repository<IMediaDocument> {
       thumbhash: processed.thumbhash,
       dominantColor: processed.dominantColor,
       exif: processed.exif,
+      ...(writeResult.metadata && { providerMetadata: writeResult.metadata }),
       ...(input.alt !== undefined && { alt: input.alt }),
       ...(input.title !== undefined && { title: input.title }),
     } as any, { session: ctx?.session } as any);
     if (!updated) throw new Error(`[media-kit] Media not found after replace: ${id}`);
 
-    // Cleanup old files (best-effort)
-    try { await this.driver.delete(previousKey); } catch { /* ignore */ }
+    // Cleanup old files from old provider (best-effort)
+    const oldDriver = this.registry.resolve(existing.provider ?? this.registry.defaultName);
+    try { await oldDriver.delete(previousKey); } catch { /* ignore */ }
     for (const v of previousVariants) {
-      try { await this.driver.delete(v.key); } catch { /* ignore */ }
+      try { await oldDriver.delete(v.key); } catch { /* ignore */ }
     }
 
     await this.events.publish(createMediaEvent(MEDIA_EVENTS.ASSET_REPLACED, {
@@ -324,12 +359,15 @@ export class MediaRepository extends Repository<IMediaDocument> {
 
     const variantKeys = (media.variants || []).map((v) => v.key);
 
+    // Resolve the driver that stored this file (fall back to default for pre-multi-provider docs)
+    const driver = this.registry.resolve(media.provider ?? this.registry.defaultName);
+
     // Delete from storage (best-effort)
-    try { await this.driver.delete(media.key); } catch (err) {
+    try { await driver.delete(media.key); } catch (err) {
       this._log('warn', 'Failed to delete main file from storage', { id, key: media.key, error: (err as Error).message });
     }
     for (const variant of media.variants || []) {
-      try { await this.driver.delete(variant.key); } catch { /* ignore */ }
+      try { await driver.delete(variant.key); } catch { /* ignore */ }
     }
 
     // Hard delete from DB (bypass softDeletePlugin) — idempotent on race:
@@ -386,7 +424,15 @@ export class MediaRepository extends Repository<IMediaDocument> {
    */
   async purgeDeleted(olderThan?: Date, ctx?: MediaContext): Promise<number> {
     const cutoff = olderThan || new Date(Date.now() - (this.mediaConfig.softDelete?.ttlDays ?? 30) * 86400000);
-    const docs = await this.Model.find({ deletedAt: { $ne: null, $lt: cutoff } }).lean();
+    // Plugin-routed read with `includeDeleted: true` so softDeletePlugin
+    // returns soft-deleted rows (the whole point of the purge); multiTenant
+    // still scopes by configured field. We pass the deletedAt filter
+    // explicitly because we want only docs older than the cutoff.
+    const found = await this.getAll(
+      { filters: { deletedAt: { $ne: null, $lt: cutoff } } },
+      { lean: true, includeDeleted: true, ...this._tenantOpts(ctx) } as Record<string, unknown>,
+    );
+    const docs = (Array.isArray(found) ? found : (found as { data: unknown[] }).data) as Array<{ _id: unknown }>;
 
     let purged = 0;
     for (const doc of docs) {
@@ -408,6 +454,68 @@ export class MediaRepository extends Repository<IMediaDocument> {
     return purged;
   }
 
+  /**
+   * Purge all assets whose `expiresAt` is in the past (or before `before`).
+   *
+   * Queries in batches of 100 to avoid loading the entire collection. Re-queries
+   * from the start each batch since hardDelete() shrinks the result set.
+   * Fires `media:assets.expired` with purge summary after completion.
+   *
+   * Safe to call from a cron job — idempotent if some docs were already removed.
+   * Does NOT touch soft-deleted files (status is not a filter here; purge is
+   * unconditional once expiresAt passes).
+   */
+  async purgeExpired(before?: Date, ctx?: MediaContext): Promise<BulkResult> {
+    const cutoff = before ?? new Date();
+    const result: BulkResult = { success: [], failed: [] };
+    const BATCH = 100;
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const found = await this.getAll(
+        { filters: { expiresAt: { $ne: null, $lte: cutoff } }, pagination: { limit: BATCH, page: 1 } },
+        { lean: true, includeDeleted: true, ...this._tenantOpts(ctx) } as Record<string, unknown>,
+      );
+      const docs = (Array.isArray(found) ? found : (found as { data: unknown[] }).data) as Array<{ _id: unknown }>;
+      if (docs.length === 0) break;
+
+      for (const doc of docs) {
+        const id = String(doc._id);
+        try {
+          await this.hardDelete(id, ctx);
+          result.success.push(id);
+        } catch (err) {
+          result.failed.push({ id, reason: (err as Error).message });
+          this._log('warn', 'Failed to purge expired asset', { id, error: (err as Error).message });
+        }
+      }
+    }
+
+    await this.events.publish(createMediaEvent(MEDIA_EVENTS.ASSETS_EXPIRED, {
+      purgedIds: result.success,
+      failedIds: result.failed.map((f) => f.id),
+      before: cutoff,
+      purgedCount: result.success.length,
+      failedCount: result.failed.length,
+    }, ctx));
+
+    return result;
+  }
+
+  /**
+   * Return assets that will expire within `withinHours` from now.
+   * Useful for sending pre-expiry notifications before purgeExpired() runs.
+   */
+  async getExpiringSoon(withinHours: number, ctx?: MediaContext): Promise<IMediaDocument[]> {
+    const now = new Date();
+    const horizon = new Date(now.getTime() + withinHours * 3600000);
+    const found = await this.getAll(
+      { filters: { expiresAt: { $gt: now, $lte: horizon } } },
+      { lean: true, ...this._tenantOpts(ctx) } as Record<string, unknown>,
+    );
+    return (Array.isArray(found) ? found : (found as { data: unknown[] }).data) as IMediaDocument[];
+  }
+
   // ============================================================
   // DOMAIN VERBS — Move & Import
   // ============================================================
@@ -420,10 +528,11 @@ export class MediaRepository extends Repository<IMediaDocument> {
     const rewriteKeys = this.mediaConfig.folders?.rewriteKeys !== false;
 
     if (!rewriteKeys) {
-      // Metadata-only move
-      const result = await this.Model.updateMany(
+      // Metadata-only move — plugin-routed so multiTenant + softDelete scope.
+      const result = await this.updateMany(
         { _id: { $in: ids } },
         { $set: { folder: normalizedTarget } },
+        this._tenantOpts(ctx) as Parameters<MediaRepository['updateMany']>[2],
       );
       const modifiedCount = result.modifiedCount ?? 0;
       await this.events.publish(createMediaEvent(MEDIA_EVENTS.ASSET_MOVED, {
@@ -432,8 +541,13 @@ export class MediaRepository extends Repository<IMediaDocument> {
       return { modifiedCount, failed: [] };
     }
 
-    // Full key rewrite
-    const files = await this.Model.find({ _id: { $in: ids } }).lean() as unknown as RewritableFile[];
+    // Full key rewrite — load via plugin-routed read so cross-tenant ids
+    // can't leak into the rewrite plan.
+    const found = await this.getAll(
+      { filters: { _id: { $in: ids } } },
+      { lean: true, ...this._tenantOpts(ctx) } as Record<string, unknown>,
+    );
+    const files = (Array.isArray(found) ? found : (found as { data: unknown[] }).data) as unknown as RewritableFile[];
     const result = await executeKeyRewrite(
       this._opDeps,
       files,
@@ -474,10 +588,20 @@ export class MediaRepository extends Repository<IMediaDocument> {
   // ============================================================
 
   async addTags(id: string, tags: string[], ctx?: MediaContext): Promise<IMediaDocument> {
-    const result = await this.Model.findOneAndUpdate(
+    // Route through `this.findOneAndUpdate` (the repo method) — NOT
+    // `this.Model.findOneAndUpdate` (the raw mongoose call). The repo
+    // method threads the `before:findOneAndUpdate` plugin pipeline so
+    // multi-tenant scope, soft-delete filter, audit, and cache
+    // invalidation all fire. The raw mongoose call bypasses every
+    // plugin — a silent cross-tenant write surface.
+    const result = await this.findOneAndUpdate(
       { _id: id },
       { $addToSet: { tags: { $each: tags } } },
-      { new: true },
+      {
+        returnDocument: 'after',
+        ...(ctx?.organizationId !== undefined && { organizationId: ctx.organizationId }),
+        ...(ctx?.session !== undefined && { session: ctx.session }),
+      } as Record<string, unknown>,
     );
     if (!result) throw new Error(`Media ${id} not found`);
 
@@ -489,10 +613,14 @@ export class MediaRepository extends Repository<IMediaDocument> {
   }
 
   async removeTags(id: string, tags: string[], ctx?: MediaContext): Promise<IMediaDocument> {
-    const result = await this.Model.findOneAndUpdate(
+    const result = await this.findOneAndUpdate(
       { _id: id },
       { $pull: { tags: { $in: tags } } },
-      { new: true },
+      {
+        returnDocument: 'after',
+        ...(ctx?.organizationId !== undefined && { organizationId: ctx.organizationId }),
+        ...(ctx?.session !== undefined && { session: ctx.session }),
+      } as Record<string, unknown>,
     );
     if (!result) throw new Error(`Media ${id} not found`);
 
@@ -507,10 +635,14 @@ export class MediaRepository extends Repository<IMediaDocument> {
     if (focalPoint.x < 0 || focalPoint.x > 1 || focalPoint.y < 0 || focalPoint.y > 1) {
       throw new Error('Focal point coordinates must be between 0 and 1');
     }
-    const result = await this.Model.findOneAndUpdate(
+    const result = await this.findOneAndUpdate(
       { _id: id },
       { $set: { focalPoint } },
-      { new: true },
+      {
+        returnDocument: 'after',
+        ...(ctx?.organizationId !== undefined && { organizationId: ctx.organizationId }),
+        ...(ctx?.session !== undefined && { session: ctx.session }),
+      } as Record<string, unknown>,
     );
     if (!result) throw new Error(`Media ${id} not found`);
 
@@ -587,14 +719,19 @@ export class MediaRepository extends Repository<IMediaDocument> {
   // ============================================================
 
   async getFolderTree(ctx?: MediaContext): Promise<FolderTree> {
-    const folders = await this.Model.aggregate([
-      ...(ctx?.organizationId ? [{ $match: { organizationId: ctx.organizationId } }] : []),
-      { $match: { deletedAt: null } },
-      { $group: { _id: '$folder', count: { $sum: 1 }, size: { $sum: '$size' }, latestUpload: { $max: '$createdAt' } } },
-    ]);
+    // Route through `aggregatePipeline` so multiTenantPlugin + softDeletePlugin
+    // inject their `$match` predicates as the leading stage. Raw
+    // `Model.aggregate()` would bypass them — and would scope on the wrong
+    // field name when `tenant.tenantField` differs from 'organizationId'.
+    const folders = (await this.aggregatePipeline(
+      [
+        { $group: { _id: '$folder', count: { $sum: 1 }, size: { $sum: '$size' }, latestUpload: { $max: '$createdAt' } } },
+      ],
+      this._tenantOpts(ctx),
+    )) as Array<{ _id: string; count: number; size: number; latestUpload: Date }>;
 
     const tree = buildFolderTree(
-      folders.map((f: any) => ({
+      folders.map((f) => ({
         folder: f._id,
         count: f.count,
         totalSize: f.size,
@@ -605,26 +742,26 @@ export class MediaRepository extends Repository<IMediaDocument> {
   }
 
   async getFolderStats(folder: string, ctx?: MediaContext): Promise<FolderStats> {
-    const match: Record<string, unknown> = {
-      folder: { $regex: `^${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` },
-      deletedAt: null,
-    };
-    if (ctx?.organizationId) match.organizationId = ctx.organizationId;
+    const folderRegex = `^${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`;
 
-    const [stats] = await this.Model.aggregate([
-      { $match: match },
-      {
-        $group: {
-          _id: null,
-          totalFiles: { $sum: 1 },
-          totalSize: { $sum: '$size' },
-          avgSize: { $avg: '$size' },
-          mimeTypes: { $addToSet: '$mimeType' },
-          oldestFile: { $min: '$createdAt' },
-          newestFile: { $max: '$createdAt' },
+    // Plugin-routed pipeline — tenant + soft-delete predicates auto-injected.
+    const [stats] = (await this.aggregatePipeline(
+      [
+        { $match: { folder: { $regex: folderRegex } } },
+        {
+          $group: {
+            _id: null,
+            totalFiles: { $sum: 1 },
+            totalSize: { $sum: '$size' },
+            avgSize: { $avg: '$size' },
+            mimeTypes: { $addToSet: '$mimeType' },
+            oldestFile: { $min: '$createdAt' },
+            newestFile: { $max: '$createdAt' },
+          },
         },
-      },
-    ]);
+      ],
+      this._tenantOpts(ctx),
+    )) as Array<FolderStats>;
 
     return stats || { totalFiles: 0, totalSize: 0, avgSize: 0, mimeTypes: [], oldestFile: null, newestFile: null };
   }
@@ -638,12 +775,15 @@ export class MediaRepository extends Repository<IMediaDocument> {
   }
 
   async deleteFolder(folder: string, ctx?: MediaContext): Promise<BulkResult> {
-    const files = await this.Model.find({
-      folder: { $regex: `^${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` },
-      deletedAt: null,
-    }).select('_id').lean();
+    // Plugin-routed read — multiTenantPlugin scopes by configured tenant
+    // field; softDeletePlugin filters out already-deleted rows.
+    const found = await this.getAll(
+      { filters: { folder: { $regex: `^${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` } } },
+      { lean: true, select: '_id', ...this._tenantOpts(ctx) } as Record<string, unknown>,
+    );
+    const files = (Array.isArray(found) ? found : (found as { data: unknown[] }).data) as Array<{ _id: unknown }>;
 
-    const ids = files.map((f: any) => String(f._id));
+    const ids = files.map((f) => String(f._id));
     const result = await this.hardDeleteMany(ids, ctx);
 
     await this.events.publish(createMediaEvent(MEDIA_EVENTS.FOLDER_DELETED, {
@@ -657,20 +797,26 @@ export class MediaRepository extends Repository<IMediaDocument> {
     const normalizedOld = normalizeFolderPath(oldPath);
     const normalizedNew = normalizeFolderPath(newPath);
     const rewriteKeys = this.mediaConfig.folders?.rewriteKeys !== false;
+    const folderRegex = `^${normalizedOld.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`;
 
-    // Find all files under old folder path
-    const files = await this.Model.find({
-      folder: { $regex: `^${normalizedOld.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` },
-      deletedAt: null,
-    }).lean() as unknown as RewritableFile[];
+    // Plugin-routed read — multiTenant + softDelete predicates auto-applied.
+    const found = await this.getAll(
+      { filters: { folder: { $regex: folderRegex } } },
+      { lean: true, ...this._tenantOpts(ctx) } as Record<string, unknown>,
+    );
+    const files = (Array.isArray(found) ? found : (found as { data: unknown[] }).data) as unknown as RewritableFile[];
 
     if (!rewriteKeys) {
-      // Metadata-only rename
-      const result = await this.Model.updateMany(
-        { folder: { $regex: `^${normalizedOld.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` } },
-        [{ $set: { folder: { $replaceAll: { input: '$folder', find: normalizedOld, replacement: normalizedNew } } } }],
-      );
-      const modifiedCount = result.modifiedCount ?? 0;
+      // Metadata-only rename. updateMany only accepts an operator-shaped update,
+      // not a pipeline expression — apply the prefix swap per-doc via the IDs we
+      // already loaded above (they were tenant-scoped on the read).
+      const updates = files
+        .filter((f) => f.folder.startsWith(normalizedOld))
+        .map((f) => ({
+          id: f._id.toString(),
+          data: { folder: normalizedNew + f.folder.slice(normalizedOld.length) },
+        }));
+      const { modifiedCount } = await this.bulkUpdateMedia(updates, this._tenantOpts(ctx));
       await this.events.publish(createMediaEvent(MEDIA_EVENTS.FOLDER_RENAMED, {
         oldPath: normalizedOld, newPath: normalizedNew, modifiedCount,
       }, ctx));
@@ -702,40 +848,38 @@ export class MediaRepository extends Repository<IMediaDocument> {
     const escapedPath = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const depth = normalized.split('/').filter(Boolean).length;
 
-    const match: Record<string, unknown> = {
-      folder: { $regex: `^${escapedPath}/` },
-      deletedAt: null,
-    };
-    if (ctx?.organizationId) match.organizationId = ctx.organizationId;
-
-    const results = await this.Model.aggregate([
-      { $match: match },
-      {
-        $addFields: {
-          folderParts: { $split: ['$folder', '/'] },
+    // Plugin-routed pipeline — tenant + soft-delete predicates auto-injected.
+    const results = (await this.aggregatePipeline(
+      [
+        { $match: { folder: { $regex: `^${escapedPath}/` } } },
+        {
+          $addFields: {
+            folderParts: { $split: ['$folder', '/'] },
+          },
         },
-      },
-      {
-        $addFields: {
-          subfolder: {
-            $reduce: {
-              input: { $slice: ['$folderParts', 0, depth + 1] },
-              initialValue: '',
-              in: { $cond: [{ $eq: ['$$value', ''] }, '$$this', { $concat: ['$$value', '/', '$$this'] }] },
+        {
+          $addFields: {
+            subfolder: {
+              $reduce: {
+                input: { $slice: ['$folderParts', 0, depth + 1] },
+                initialValue: '',
+                in: { $cond: [{ $eq: ['$$value', ''] }, '$$this', { $concat: ['$$value', '/', '$$this'] }] },
+              },
             },
           },
         },
-      },
-      {
-        $group: {
-          _id: '$subfolder',
-          count: { $sum: 1 },
-          size: { $sum: '$size' },
-          latestUpload: { $max: '$createdAt' },
+        {
+          $group: {
+            _id: '$subfolder',
+            count: { $sum: 1 },
+            size: { $sum: '$size' },
+            latestUpload: { $max: '$createdAt' },
+          },
         },
-      },
-      { $sort: { _id: 1 } },
-    ]);
+        { $sort: { _id: 1 } },
+      ],
+      this._tenantOpts(ctx),
+    )) as Array<{ _id: string; count: number; size: number; latestUpload: Date }>;
 
     return results.map((r: any) => ({
       id: r._id,
@@ -796,7 +940,7 @@ export class MediaRepository extends Repository<IMediaDocument> {
     media: IMediaDocument,
     options?: { signed?: boolean; expiresIn?: number },
   ): Promise<string> {
-    const defaultUrl = media.url || this.driver.getPublicUrl(media.key);
+    const defaultUrl = media.url || this.registry.resolve(media.provider ?? this.registry.defaultName).getPublicUrl(media.key);
     if (!this.bridges.cdn) return defaultUrl;
     return this.bridges.cdn.transform(media.key, defaultUrl, options);
   }
@@ -852,8 +996,8 @@ export class MediaRepository extends Repository<IMediaDocument> {
       }
     }
 
-    // Read source buffer from storage
-    const stream = await this.driver.read(media.key);
+    // Read source buffer from storage (route to the provider that stored this file)
+    const stream = await this.registry.resolve(media.provider ?? this.registry.defaultName).read(media.key);
     const chunks: Buffer[] = [];
     for await (const chunk of stream as AsyncIterable<Buffer>) {
       chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -887,31 +1031,31 @@ export class MediaRepository extends Repository<IMediaDocument> {
   // ============================================================
 
   async getByHash(hash: string, ctx?: MediaContext): Promise<IMediaDocument | null> {
-    const query: Record<string, unknown> = { hash, deletedAt: null };
-    if (ctx?.organizationId) query.organizationId = ctx.organizationId;
-    return this.Model.findOne(query).lean() as Promise<IMediaDocument | null>;
+    // Plugin-routed read — multiTenantPlugin scopes on the configured
+    // tenant field (not always 'organizationId'); softDeletePlugin
+    // applies the deleted-at filter.
+    return (await this.getByQuery({ hash }, {
+      ...this._tenantOpts(ctx),
+      throwOnNotFound: false,
+    } as Record<string, unknown>)) as IMediaDocument | null;
   }
 
   async getStorageByFolder(ctx?: MediaContext): Promise<Array<{ folder: string; totalSize: number; count: number }>> {
-    const match: Record<string, unknown> = { deletedAt: null };
-    if (ctx?.organizationId) match.organizationId = ctx.organizationId;
-
-    return this.Model.aggregate([
-      { $match: match },
-      { $group: { _id: '$folder', totalSize: { $sum: '$size' }, count: { $sum: 1 } } },
-      { $project: { folder: '$_id', totalSize: 1, count: 1, _id: 0 } },
-      { $sort: { totalSize: -1 } },
-    ]);
+    return (await this.aggregatePipeline(
+      [
+        { $group: { _id: '$folder', totalSize: { $sum: '$size' }, count: { $sum: 1 } } },
+        { $project: { folder: '$_id', totalSize: 1, count: 1, _id: 0 } },
+        { $sort: { totalSize: -1 } },
+      ],
+      this._tenantOpts(ctx),
+    )) as Array<{ folder: string; totalSize: number; count: number }>;
   }
 
   async getTotalStorageUsed(ctx?: MediaContext): Promise<number> {
-    const match: Record<string, unknown> = { deletedAt: null };
-    if (ctx?.organizationId) match.organizationId = ctx.organizationId;
-
-    const [result] = await this.Model.aggregate([
-      { $match: match },
-      { $group: { _id: null, total: { $sum: '$size' } } },
-    ]);
+    const [result] = (await this.aggregatePipeline(
+      [{ $group: { _id: null, total: { $sum: '$size' } } }],
+      this._tenantOpts(ctx),
+    )) as Array<{ total: number }>;
     return result?.total ?? 0;
   }
 
@@ -963,6 +1107,13 @@ export class MediaRepository extends Repository<IMediaDocument> {
     const finalTitle = input.title || generateTitle(filename);
     let key = generateKey(filename, targetFolder);
 
+    // Resolve which driver handles this upload — store the registry key, not
+    // the driver's own `name`, so that lookup always works regardless of whether
+    // the driver reuses a generic name (e.g. two MemoryStorageDrivers both have
+    // `name = 'memory'` but live under different registry keys).
+    const providerKey = input.provider ?? this.registry.defaultName;
+    const driver = this.registry.resolve(providerKey);
+
     // Step 1: Create DB record with status: 'pending'
     let media = await this.create({
       filename,
@@ -970,9 +1121,10 @@ export class MediaRepository extends Repository<IMediaDocument> {
       title: finalTitle,
       mimeType,
       size: buffer.length,
-      url: this.driver.getPublicUrl(key),
+      url: driver.getPublicUrl(key),
       key,
       hash,
+      provider: providerKey,
       status: 'pending',
       folder: targetFolder,
       alt,
@@ -983,6 +1135,7 @@ export class MediaRepository extends Repository<IMediaDocument> {
       metadata: {},
       ...(input.sourceId && { sourceId: input.sourceId }),
       ...(input.sourceModel && { sourceModel: input.sourceModel }),
+      ...(input.expiresAt && { expiresAt: input.expiresAt }),
     } as any, { session: ctx?.session, organizationId: ctx?.organizationId } as any);
 
     const mediaId = String(media._id);
@@ -991,9 +1144,26 @@ export class MediaRepository extends Repository<IMediaDocument> {
     const updateOpts = { session: ctx?.session, organizationId: ctx?.organizationId } as any;
 
     try {
-      // Step 2: processing
-      const processing = await this.update(mediaId, { status: 'processing' } as any, updateOpts);
-      if (!processing) throw new Error(`[media-kit] Media not found after create: ${mediaId}`);
+      // Step 2: pending → processing. State machine + atomic CAS in
+      // one call via primitives' `assertAndClaim`:
+      //   - `MEDIA_MACHINE.assertTransition` rejects malformed
+      //     transitions (compile-time-typed targets, sync, fast).
+      //   - `repo.claim()` rejects concurrent writers (atomic CAS,
+      //     null on race-loss).
+      // Race-safe against retry-driven re-uploads (cron reaping stuck
+      // uploads, host-side retries) — concurrent claimers see one
+      // winner + N-1 nulls.
+      const processing = await assertAndClaim(MEDIA_MACHINE, this, mediaId, {
+        from: 'pending',
+        to: 'processing',
+        options: updateOpts,
+      });
+      if (!processing) {
+        throw new Error(
+          `[media-kit] Failed to claim pending → processing for ${mediaId}: ` +
+            `record may have been claimed by another worker, deleted, or already past pending.`,
+        );
+      }
       media = processing;
 
       const processed = await processImage(this._opDeps, {
@@ -1014,40 +1184,67 @@ export class MediaRepository extends Repository<IMediaDocument> {
         key = generateKey(processed.finalFilename, targetFolder);
       }
 
-      // Step 3: Write to storage
-      const writeResult = await this.driver.write(key, processed.finalBuffer, processed.finalMimeType);
+      // Step 3: Write to storage via the resolved provider
+      const writeResult = await driver.write(key, processed.finalBuffer, processed.finalMimeType);
 
-      // Step 4: ready
-      const ready = await this.update(mediaId, {
-        filename: processed.finalFilename,
-        mimeType: processed.finalMimeType,
-        size: writeResult.size,
-        url: writeResult.url,
-        key: writeResult.key,
-        width: processed.width,
-        height: processed.height,
-        aspectRatio: processed.aspectRatio,
-        variants: variants.length > 0 ? variants : [],
-        status: 'ready',
-        thumbhash: processed.thumbhash,
-        dominantColor: processed.dominantColor,
-        videoMetadata: processed.videoMetadata,
-        exif: processed.exif,
-        ...(processed.duration !== undefined && { duration: processed.duration }),
-      } as any, updateOpts);
-      if (!ready) throw new Error(`[media-kit] Media not found after processing: ${mediaId}`);
+      // Step 4: processing → ready. State transition + payload write
+      // in one atomic CAS — partial-failure can't leave a record
+      // half-updated.
+      const ready = await assertAndClaim(MEDIA_MACHINE, this, mediaId, {
+        from: 'processing',
+        to: 'ready',
+        patch: {
+          filename: processed.finalFilename,
+          mimeType: processed.finalMimeType,
+          size: writeResult.size,
+          url: writeResult.url,
+          key: writeResult.key,
+          width: processed.width,
+          height: processed.height,
+          aspectRatio: processed.aspectRatio,
+          variants: variants.length > 0 ? variants : [],
+          thumbhash: processed.thumbhash,
+          dominantColor: processed.dominantColor,
+          videoMetadata: processed.videoMetadata,
+          exif: processed.exif,
+          ...(processed.duration !== undefined && { duration: processed.duration }),
+          ...(writeResult.metadata && { providerMetadata: writeResult.metadata }),
+        },
+        options: updateOpts,
+      });
+      if (!ready) {
+        throw new Error(
+          `[media-kit] Failed to claim processing → ready for ${mediaId}: ` +
+            `record may have been moved out of processing by another worker.`,
+        );
+      }
       media = ready;
 
       return media;
     } catch (error) {
-      // Step 5: error
+      // Step 5: error — multi-source CAS via `MEDIA_MACHINE.validSources('error')`.
+      // The reverse-adjacency lookup returns ['pending', 'processing']
+      // from the state-machine declaration — one source of truth. If
+      // we ever add a state that can also error (e.g. 'reviewing'),
+      // updating the machine table propagates to this catch handler
+      // for free.
+      //
+      // Best-effort — wrapped in try/catch to keep the original error
+      // rethrowing. `claim` returns null when the row already reached
+      // a terminal state via an out-of-band update; we don't clobber
+      // it.
       try {
-        await this.update(mediaId, { status: 'error', errorMessage: (error as Error).message } as any, updateOpts);
+        await assertAndClaim(MEDIA_MACHINE, this, mediaId, {
+          from: MEDIA_MACHINE.validSources('error'),
+          to: 'error',
+          patch: { errorMessage: (error as Error).message },
+          options: updateOpts,
+        });
       } catch { /* ignore */ }
 
-      // Cleanup orphaned variants
+      // Cleanup orphaned variants from the same provider
       for (const v of variants) {
-        try { await this.driver.delete(v.key); } catch { /* ignore */ }
+        try { await driver.delete(v.key); } catch { /* ignore */ }
       }
 
       throw error;
@@ -1085,18 +1282,35 @@ export class MediaRepository extends Repository<IMediaDocument> {
     }
   }
 
-  /** @internal */
+  /**
+   * @internal
+   * Apply per-document updates and return BOTH which ids landed in the DB
+   * AND which failed (with reason). Callers MUST use `succeededIds` to gate
+   * any storage cleanup — silently swallowing failures while another phase
+   * deletes the old object would corrupt storage.
+   */
   async bulkUpdateMedia(
     updates: Array<{ id: string; data: Record<string, unknown> }>,
     context?: any,
-  ): Promise<{ modifiedCount: number }> {
-    let modified = 0;
+  ): Promise<{
+    modifiedCount: number;
+    succeededIds: Set<string>;
+    failed: Array<{ id: string; reason: string }>;
+  }> {
+    const succeededIds = new Set<string>();
+    const failed: Array<{ id: string; reason: string }> = [];
     for (const { id, data } of updates) {
       try {
-        await this.update(id, data as any, context);
-        modified++;
-      } catch { /* ignore individual failures */ }
+        const result = await this.update(id, data as any, context);
+        if (result === null) {
+          failed.push({ id, reason: 'Update returned null (not found or scoped out)' });
+          continue;
+        }
+        succeededIds.add(id);
+      } catch (err) {
+        failed.push({ id, reason: (err as Error).message });
+      }
     }
-    return { modifiedCount: modified };
+    return { modifiedCount: succeededIds.size, succeededIds, failed };
   }
 }

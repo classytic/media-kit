@@ -187,11 +187,37 @@ export interface RewritableFile {
 }
 
 /**
+ * Per-file rewrite plan — kept together so the cleanup phases can correlate
+ * "which DB row landed" against "which old keys are safe to delete." Stored
+ * IN ORDER alongside the file so a partial DB update doesn't desync from
+ * storage state.
+ */
+interface RewritePlan {
+  fileId: string;
+  oldKey: string;
+  newKey: string;
+  /** Old variant keys we deleted-after — empty when no variants moved. */
+  oldVariantKeys: string[];
+  /** New keys we copied to (main + variants) — used for orphan rollback. */
+  newKeysCopied: string[];
+  /** Update payload for `bulkUpdateMedia`. */
+  updateData: Record<string, unknown>;
+}
+
+/**
  * Shared 3-phase key-rewrite orchestration.
  *
  * Phase 1: Copy files to new storage keys (semaphore-bounded).
- * Phase 2: Bulk update DB (rollback copied files on failure).
- * Phase 3: Delete old storage keys (best-effort).
+ * Phase 2: Bulk update DB; capture per-file success/fail.
+ * Phase 3a: Delete old keys ONLY for files whose DB update succeeded.
+ * Phase 3b: Delete orphaned new copies for files whose DB update failed.
+ *
+ * **Storage-DB consistency contract.** A document's `key` field always
+ * points to an object that exists in storage. If the DB update fails, the
+ * old key stays alive (DB still references it) and the new copy is
+ * rolled back. If the DB update succeeds, the old key is deleted (DB
+ * no longer references it). At no point does the DB point at a deleted
+ * object — that was the corruption shape that motivated this design.
  *
  * Progress events are fire-and-forget (not awaited) so slow listeners
  * can't throttle storage copy throughput.
@@ -205,38 +231,38 @@ export async function executeKeyRewrite(
   context?: OperationContext,
 ): Promise<RewriteResult> {
   const total = files.length;
-  const updates: Array<{ id: string; data: Record<string, unknown> }> = [];
-  const copiedKeys: string[] = [];
-  const keysToDelete: string[] = [];
+  const plans: RewritePlan[] = [];
+  const noOpUpdates: Array<{ id: string; data: Record<string, unknown> }> = [];
   const failed: Array<{ id: string; reason: string }> = [];
   let completed = 0;
 
-  // Phase 1: Copy files to new storage locations
+  // Phase 1: Copy files to new storage locations. Each file's plan is
+  // captured atomically — copy + correlate within the same task — so a
+  // partial copy failure can't desync the cleanup phase from the DB phase.
   await Promise.allSettled(
     files.map((file) =>
       deps.uploadSemaphore.run(async () => {
         const fileId = file._id.toString();
         const { newKey, newFolder } = mapFile(file);
 
-        // Key unchanged — just update folder field if needed
+        // Key unchanged — folder-only update, no storage work
         if (file.key === newKey) {
           if (file.folder !== newFolder) {
-            updates.push({ id: fileId, data: { folder: newFolder } });
+            noOpUpdates.push({ id: fileId, data: { folder: newFolder } });
           }
           completed++;
-          // Fire-and-forget: don't block hot path
           void deps.events.emit(progressEvent, {
             fileId, completed, total, key: file.key, context, timestamp: new Date(),
           });
           return;
         }
 
+        const newKeysCopied: string[] = [];
+        const oldVariantKeys: string[] = [];
         try {
           const writeResult = await copyStorageFile(deps.driver, file.key, newKey);
-          copiedKeys.push(writeResult.key);
-          keysToDelete.push(file.key);
+          newKeysCopied.push(writeResult.key);
 
-          // Copy variants
           const newVariants: GeneratedVariant[] = [];
           for (const variant of (file.variants || []) as GeneratedVariant[]) {
             const newVarKey = mapVariantKey(variant.key);
@@ -245,14 +271,18 @@ export async function executeKeyRewrite(
               continue;
             }
             const varResult = await copyStorageFile(deps.driver, variant.key, newVarKey);
-            copiedKeys.push(varResult.key);
-            keysToDelete.push(variant.key);
+            newKeysCopied.push(varResult.key);
+            oldVariantKeys.push(variant.key);
             newVariants.push({ ...variant, key: varResult.key, url: varResult.url });
           }
 
-          updates.push({
-            id: fileId,
-            data: {
+          plans.push({
+            fileId,
+            oldKey: file.key,
+            newKey: writeResult.key,
+            oldVariantKeys,
+            newKeysCopied,
+            updateData: {
               folder: newFolder,
               key: writeResult.key,
               url: writeResult.url,
@@ -268,6 +298,12 @@ export async function executeKeyRewrite(
           const reason = (err as Error).message;
           failed.push({ id: fileId, reason });
           completed++;
+          // Roll back any partial copies for THIS file before bailing out.
+          // Without this, a variant-copy failure mid-way would leave the
+          // first few new keys orphaned even though no DB update lands.
+          for (const orphan of newKeysCopied) {
+            try { await deps.driver.delete(orphan); } catch { /* ignore */ }
+          }
           void deps.events.emit(progressEvent, {
             fileId, completed, total, key: file.key, context, timestamp: new Date(),
           });
@@ -282,33 +318,66 @@ export async function executeKeyRewrite(
     ),
   );
 
-  if (updates.length === 0) {
+  const allUpdates = [
+    ...plans.map((p) => ({ id: p.fileId, data: p.updateData })),
+    ...noOpUpdates,
+  ];
+
+  if (allUpdates.length === 0) {
     return { modifiedCount: 0, failed };
   }
 
-  // Phase 2: Bulk update DB (rollback copied files on failure)
-  let modifiedCount: number;
+  // Phase 2: Apply DB updates and learn which ones landed. A wholesale
+  // throw rolls back EVERY copied key (no DB row references them); a
+  // partial failure rolls back only the orphaned copies (per-plan).
+  let succeededIds: Set<string>;
+  let perFileFailures: Array<{ id: string; reason: string }>;
   try {
-    const result = await deps.repository.bulkUpdateMedia(updates, context);
-    modifiedCount = result.modifiedCount;
+    const result = await deps.repository.bulkUpdateMedia(allUpdates, context);
+    succeededIds = result.succeededIds;
+    perFileFailures = result.failed;
   } catch (dbError) {
-    for (const key of copiedKeys) {
-      try { await deps.driver.delete(key); } catch { /* ignore rollback failure */ }
+    for (const plan of plans) {
+      for (const key of plan.newKeysCopied) {
+        try { await deps.driver.delete(key); } catch { /* ignore rollback failure */ }
+      }
     }
     throw dbError;
   }
 
-  // Phase 3: Delete old storage files (best-effort)
-  for (const key of keysToDelete) {
-    try {
-      await deps.driver.delete(key);
-    } catch (err) {
-      log(deps, 'warn', 'Failed to delete old file after key rewrite', {
-        key,
-        error: (err as Error).message,
-      });
+  // Phase 3a: Delete old storage files ONLY for plans whose DB update landed.
+  // For plans whose DB update failed, the document still references oldKey —
+  // deleting it would leave the row pointing at a missing object (the
+  // corruption this design prevents).
+  for (const plan of plans) {
+    if (!succeededIds.has(plan.fileId)) continue;
+    for (const oldKey of [plan.oldKey, ...plan.oldVariantKeys]) {
+      try {
+        await deps.driver.delete(oldKey);
+      } catch (err) {
+        log(deps, 'warn', 'Failed to delete old file after key rewrite', {
+          key: oldKey,
+          error: (err as Error).message,
+        });
+      }
     }
   }
 
-  return { modifiedCount, failed };
+  // Phase 3b: Roll back orphaned new copies for plans whose DB update failed.
+  // Without this, a copy lives in storage that no document references —
+  // a slow storage leak.
+  for (const plan of plans) {
+    if (succeededIds.has(plan.fileId)) continue;
+    for (const newKey of plan.newKeysCopied) {
+      try { await deps.driver.delete(newKey); } catch { /* ignore rollback failure */ }
+    }
+    // Surface the failure so callers can react / log / alert.
+    const dbFailure = perFileFailures.find((f) => f.id === plan.fileId);
+    failed.push({
+      id: plan.fileId,
+      reason: dbFailure?.reason ?? 'DB update did not land',
+    });
+  }
+
+  return { modifiedCount: succeededIds.size, failed };
 }

@@ -21,6 +21,8 @@ import type {
 import { computeFileHash } from '../utils/hash';
 import { isAllowedMimeType, isImage } from '../utils/mime';
 import { normalizeFolderPath } from '../utils/folders';
+import { assertAndClaim } from '@classytic/primitives/state-machine';
+import { MEDIA_MACHINE } from '../models/media-state-machine.js';
 import { log, requireTenant, generateKey, generateTitle } from './helpers';
 import { processImage } from './process-image';
 
@@ -192,51 +194,86 @@ export async function confirmUpload(
         tags: [],
         metadata: {},
         ...(organizationId && { organizationId }),
+        ...(input.expiresAt && { expiresAt: input.expiresAt }),
       },
       context,
     );
 
     // Optional post-confirm processing (ThumbHash, dominant color, variants)
     if (input.process && deps.processor && isImage(effectiveMimeType)) {
+      const mediaIdStr = media._id.toString();
       try {
-        media = await deps.repository.updateMedia(media._id.toString(), { status: 'processing' }, context);
-
-        // Read file from storage for processing
-        const stream = await deps.driver.read(input.key);
-        const chunks: Buffer[] = [];
-        for await (const chunk of stream) {
-          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as unknown as Uint8Array));
-        }
-        const buffer = Buffer.concat(chunks);
-
-        // Run through the same processImage pipeline as regular uploads
-        const processed = await processImage(deps, {
-          buffer,
-          filename: input.filename,
-          mimeType: effectiveMimeType,
-          skipProcessing: false,
-          targetFolder: folder,
-          context,
+        // ready → processing — declared transition in MEDIA_MACHINE
+        // for the post-confirm reprocess flow. assertAndClaim
+        // validates the transition is legal AND wins the race in one
+        // call. If another reprocess is in flight, claim returns null
+        // and we skip silently (file is in storage and accessible;
+        // redundant work is the only thing we're avoiding).
+        const claimed = await assertAndClaim(MEDIA_MACHINE, deps.repository, mediaIdStr, {
+          from: 'ready',
+          to: 'processing',
+          options: context as Record<string, unknown>,
         });
+        if (!claimed) {
+          log(deps, 'info', 'Skipping post-confirm processing — record not in ready state', {
+            key: input.key,
+            id: mediaIdStr,
+          });
+        } else {
+          media = claimed;
 
-        // Update DB with processing results (no re-upload of main file — already in storage)
-        const updateData: Record<string, unknown> = {
-          status: 'ready',
-          width: processed.width,
-          height: processed.height,
-          aspectRatio: processed.aspectRatio,
-          thumbhash: processed.thumbhash,
-          dominantColor: processed.dominantColor,
-          exif: processed.exif,
-        };
+          // Read file from storage for processing
+          const stream = await deps.driver.read(input.key);
+          const chunks: Buffer[] = [];
+          for await (const chunk of stream) {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as unknown as Uint8Array));
+          }
+          const buffer = Buffer.concat(chunks);
 
-        if (processed.variants.length > 0) {
-          updateData.variants = processed.variants;
+          // Run through the same processImage pipeline as regular uploads
+          const processed = await processImage(deps, {
+            buffer,
+            filename: input.filename,
+            mimeType: effectiveMimeType,
+            skipProcessing: false,
+            targetFolder: folder,
+            context,
+          });
+
+          // processing → ready with payload merge in the same CAS.
+          const payload: Record<string, unknown> = {
+            width: processed.width,
+            height: processed.height,
+            aspectRatio: processed.aspectRatio,
+            thumbhash: processed.thumbhash,
+            dominantColor: processed.dominantColor,
+            exif: processed.exif,
+          };
+          if (processed.variants.length > 0) {
+            payload.variants = processed.variants;
+          }
+
+          const finalised = await assertAndClaim(MEDIA_MACHINE, deps.repository, mediaIdStr, {
+            from: 'processing',
+            to: 'ready',
+            patch: payload,
+            options: context as Record<string, unknown>,
+          });
+          if (finalised) media = finalised;
         }
-
-        media = await deps.repository.updateMedia(media._id.toString(), updateData, context);
       } catch (processError) {
-        // Processing failure is non-blocking — file is already uploaded and accessible
+        // Processing failure is non-blocking — file is already uploaded and accessible.
+        // Best-effort revert to ready via the same processing → ready
+        // transition declared in MEDIA_MACHINE (the state graph doesn't
+        // distinguish "successful reprocess" from "rolled-back reprocess";
+        // both land the row in `ready`).
+        try {
+          await assertAndClaim(MEDIA_MACHINE, deps.repository, mediaIdStr, {
+            from: 'processing',
+            to: 'ready',
+            options: context as Record<string, unknown>,
+          });
+        } catch { /* ignore revert failure */ }
         log(deps, 'warn', 'Post-confirm processing failed (file still available)', {
           key: input.key,
           error: (processError as Error).message,
@@ -448,39 +485,69 @@ export async function completeMultipartUpload(
 
     // Optional post-upload processing (same as confirmUpload process flag)
     if (input.process && deps.processor && isImage(input.mimeType)) {
+      const mediaIdStr = media._id.toString();
       try {
-        media = await deps.repository.updateMedia(media._id.toString(), { status: 'processing' }, context);
-        const stream = await deps.driver.read(input.key);
-        const chunks: Buffer[] = [];
-        for await (const chunk of stream) {
-          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as unknown as Uint8Array));
-        }
-        const buffer = Buffer.concat(chunks);
-
-        const processed = await processImage(deps, {
-          buffer,
-          filename: input.filename,
-          mimeType: input.mimeType,
-          skipProcessing: false,
-          targetFolder: folder,
-          context,
+        // ready → processing — same MEDIA_MACHINE transition used by
+        // confirmUpload's reprocess flow.
+        const claimed = await assertAndClaim(MEDIA_MACHINE, deps.repository, mediaIdStr, {
+          from: 'ready',
+          to: 'processing',
+          options: context as Record<string, unknown>,
         });
+        if (!claimed) {
+          log(deps, 'info', 'Skipping post-multipart processing — record not in ready state', {
+            key: input.key,
+            id: mediaIdStr,
+          });
+        } else {
+          media = claimed;
 
-        const updateData: Record<string, unknown> = {
-          status: 'ready',
-          width: processed.width,
-          height: processed.height,
-          aspectRatio: processed.aspectRatio,
-          thumbhash: processed.thumbhash,
-          dominantColor: processed.dominantColor,
-          exif: processed.exif,
-        };
-        if (processed.variants.length > 0) {
-          updateData.variants = processed.variants;
+          const stream = await deps.driver.read(input.key);
+          const chunks: Buffer[] = [];
+          for await (const chunk of stream) {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as unknown as Uint8Array));
+          }
+          const buffer = Buffer.concat(chunks);
+
+          const processed = await processImage(deps, {
+            buffer,
+            filename: input.filename,
+            mimeType: input.mimeType,
+            skipProcessing: false,
+            targetFolder: folder,
+            context,
+          });
+
+          const payload: Record<string, unknown> = {
+            width: processed.width,
+            height: processed.height,
+            aspectRatio: processed.aspectRatio,
+            thumbhash: processed.thumbhash,
+            dominantColor: processed.dominantColor,
+            exif: processed.exif,
+          };
+          if (processed.variants.length > 0) {
+            payload.variants = processed.variants;
+          }
+
+          const finalised = await assertAndClaim(MEDIA_MACHINE, deps.repository, mediaIdStr, {
+            from: 'processing',
+            to: 'ready',
+            patch: payload,
+            options: context as Record<string, unknown>,
+          });
+          if (finalised) media = finalised;
         }
-
-        media = await deps.repository.updateMedia(media._id.toString(), updateData, context);
       } catch (processError) {
+        // Best-effort revert if we left the record stuck in 'processing'.
+        // Same processing → ready transition as the success path.
+        try {
+          await assertAndClaim(MEDIA_MACHINE, deps.repository, mediaIdStr, {
+            from: 'processing',
+            to: 'ready',
+            options: context as Record<string, unknown>,
+          });
+        } catch { /* ignore */ }
         log(deps, 'warn', 'Post-multipart processing failed (file still available)', {
           key: input.key,
           error: (processError as Error).message,

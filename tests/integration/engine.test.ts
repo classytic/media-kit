@@ -33,7 +33,7 @@ describe('createMedia() engine factory', () => {
       try {
         await expect(
           createMedia({ connection } as any),
-        ).rejects.toThrow(/driver is required/i);
+        ).rejects.toThrow(/driver or providers must be specified/i);
       } finally {
         await cleanup();
       }

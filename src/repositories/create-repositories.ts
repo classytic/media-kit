@@ -10,9 +10,10 @@ import {
   cachePlugin,
   type PluginType,
 } from '@classytic/mongokit';
-import type { StorageDriver, ImageAdapter, MediaKitLogger } from '../types.js';
+import type { ImageAdapter, MediaKitLogger } from '../types.js';
 import type { EventTransport } from '@classytic/primitives/events';
 import type { ResolvedMediaConfig } from '../engine/engine-types.js';
+import type { DriverRegistry } from '../providers/driver-registry.js';
 import type { MediaBridges } from '../bridges/types.js';
 import type { MediaModels } from '../models/create-models.js';
 import type { ImageProcessor } from '../processing/image.js';
@@ -25,7 +26,7 @@ export interface MediaRepositories {
 export interface CreateRepositoriesDeps {
   events: EventTransport;
   config: ResolvedMediaConfig;
-  driver: StorageDriver;
+  registry: DriverRegistry;
   processor?: ImageProcessor | ImageAdapter | null;
   processorReady?: Promise<void> | null;
   logger?: MediaKitLogger;
@@ -89,7 +90,7 @@ export function createMediaRepositories(
     {
       events: deps.events,
       config: deps.config,
-      driver: deps.driver,
+      registry: deps.registry,
       processor: deps.processor ?? null,
       processorReady: deps.processorReady ?? null,
       logger: deps.logger,

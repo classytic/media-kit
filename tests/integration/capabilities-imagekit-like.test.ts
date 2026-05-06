@@ -315,10 +315,10 @@ describe('ImageKit-like capabilities on media-kit primitives', () => {
 
       // Simulated host list endpoint:
       const page = await handle.engine.repositories.media.getAll({ page: 1, limit: 10 });
-      const docs = (page as any).docs;
+      const data = (page as any).data;
 
       // 1 batch call enriches all docs — no N+1
-      const sources = await handle.engine.repositories.media.resolveSourcesMany(docs);
+      const sources = await handle.engine.repositories.media.resolveSourcesMany(data);
       expect(sources.size).toBe(2); // 2 unique products
       expect(sources.get('prod_tshirt')).toMatchObject({ name: 'Blue T-Shirt' });
       expect(sources.get('prod_mug')).toMatchObject({ name: 'Coffee Mug' });
@@ -362,11 +362,11 @@ describe('ImageKit-like capabilities on media-kit primitives', () => {
 
       // Arc BaseController does: { success: true, data: raw, status: 200 }
       // Which requires `raw` to be the mongokit shape — not an envelope.
-      expect(raw).toHaveProperty('docs');
+      expect(raw).toHaveProperty('data');
       expect(raw).toHaveProperty('total');
       expect(raw).toHaveProperty('method');
       expect(raw).not.toHaveProperty('success');
-      expect(raw).not.toHaveProperty('data');
+      expect(raw).not.toHaveProperty('docs');
     });
 
     it('events are arc-compatible DomainEvent shape (type, payload, meta)', async () => {

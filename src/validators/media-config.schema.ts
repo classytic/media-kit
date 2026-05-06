@@ -9,7 +9,7 @@ import { z } from 'zod';
 
 /**
  * Tenant config schema — mirrors the canonical `TenantConfig` from
- * `@classytic/primitives/tenant` (strategy omitted here; callers that need
+ * `@classytic/repo-core/tenant` (strategy omitted here; callers that need
  * custom / none pass explicit config and bypass zod).
  */
 export const tenantSchema = z.union([

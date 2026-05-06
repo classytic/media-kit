@@ -34,6 +34,9 @@ export const MEDIA_EVENTS = {
 
   // Batch
   BATCH_DELETED: 'media:batch.deleted',
+
+  // Temporal lifecycle
+  ASSETS_EXPIRED: 'media:assets.expired',
 } as const;
 
 export type MediaEventName = (typeof MEDIA_EVENTS)[keyof typeof MEDIA_EVENTS];

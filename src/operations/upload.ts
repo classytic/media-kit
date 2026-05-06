@@ -19,6 +19,8 @@ import { computeFileHash } from '../utils/hash';
 import { isImage } from '../utils/mime';
 import { normalizeFolderPath } from '../utils/folders';
 import { generateAltText, generateAltTextWithOptions } from '../utils/alt-text';
+import { assertAndClaim } from '@classytic/primitives/state-machine';
+import { MEDIA_MACHINE } from '../models/media-state-machine.js';
 import { processImage } from './process-image';
 import { log, requireTenant, generateKey, generateTitle, validateFile } from './helpers';
 
@@ -240,8 +242,22 @@ async function performUpload(
   const variants: GeneratedVariant[] = [];
 
   try {
-    // Step 2: Set status to 'processing'
-    media = await deps.repository.updateMedia(mediaId, { status: 'processing' }, context);
+    // Step 2: pending → processing. State machine + atomic CAS via
+    // primitives' `assertAndClaim` — `MEDIA_MACHINE` validates the
+    // transition is legal in the domain (sync), `repo.claim()`
+    // validates we won the race (atomic CAS, null on race-loss).
+    const processing = await assertAndClaim(MEDIA_MACHINE, deps.repository, mediaId, {
+      from: 'pending',
+      to: 'processing',
+      options: context as Record<string, unknown>,
+    });
+    if (!processing) {
+      throw new Error(
+        `[media-kit] Failed to claim pending → processing for ${mediaId}: ` +
+          `record may have been claimed by another worker, deleted, or already past pending.`,
+      );
+    }
+    media = processing;
 
     // Process image + generate variants
     const processed = await processImage(deps, {
@@ -269,10 +285,13 @@ async function performUpload(
     // Step 3: Upload to storage via driver.write()
     const writeResult = await deps.driver.write(key, finalBuffer, finalMimeType);
 
-    // Step 4: Set status to 'ready', update record with final data
-    media = await deps.repository.updateMedia(
-      mediaId,
-      {
+    // Step 4: processing → ready. State transition + payload write
+    // land in one atomic CAS via assertAndClaim — partial-failure
+    // can't leave a record half-updated.
+    const ready = await assertAndClaim(MEDIA_MACHINE, deps.repository, mediaId, {
+      from: 'processing',
+      to: 'ready',
+      patch: {
         filename: finalFilename,
         mimeType: finalMimeType,
         size: writeResult.size,
@@ -282,28 +301,37 @@ async function performUpload(
         height,
         aspectRatio,
         variants: variants.length > 0 ? variants : [],
-        status: 'ready',
         thumbhash: processed.thumbhash,
         dominantColor: processed.dominantColor,
         videoMetadata: processed.videoMetadata,
         exif: processed.exif,
         ...(processed.duration !== undefined && { duration: processed.duration }),
       },
-      context,
-    );
+      options: context as Record<string, unknown>,
+    });
+    if (!ready) {
+      throw new Error(
+        `[media-kit] Failed to claim processing → ready for ${mediaId}: ` +
+          `record may have been moved out of processing by another worker.`,
+      );
+    }
+    media = ready;
 
     return media;
   } catch (error) {
-    // Step 5: On error, set status to 'error' with errorMessage
+    // Step 5: On error, multi-source CAS via `MEDIA_MACHINE.validSources('error')`
+    // — the reverse-adjacency lookup returns the legal predecessors
+    // straight from the state-machine table. One source of truth for
+    // "which states can transition to error?" — adding a new source
+    // (e.g. 'reviewing') propagates to this catch handler for free.
     try {
-      media = await deps.repository.updateMedia(
-        mediaId,
-        {
-          status: 'error',
-          errorMessage: (error as Error).message,
-        },
-        context,
-      );
+      const errored = await assertAndClaim(MEDIA_MACHINE, deps.repository, mediaId, {
+        from: MEDIA_MACHINE.validSources('error'),
+        to: 'error',
+        patch: { errorMessage: (error as Error).message },
+        options: context as Record<string, unknown>,
+      });
+      if (errored) media = errored;
     } catch (updateErr) {
       log(deps, 'error', 'Failed to set error status on media record', {
         id: mediaId,

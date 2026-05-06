@@ -142,6 +142,7 @@ export class S3Provider implements StorageDriver {
       key,
       url,
       size,
+      metadata: { bucket: this.config.bucket },
     };
   }
 

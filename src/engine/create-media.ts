@@ -38,20 +38,53 @@ import { InProcessMediaBus } from '../events/in-process-bus.js';
 import { createMediaModels } from '../models/create-models.js';
 import { resolveMediaTenant } from '../models/inject-tenant.js';
 import { createMediaRepositories } from '../repositories/create-repositories.js';
+import { DriverRegistry } from '../providers/driver-registry.js';
 import { ImageProcessor } from '../processing/image.js';
 import { mergeConfig } from '../config.js';
+import { mediaConfigSchema } from '../validators/media-config.schema.js';
 
 export async function createMedia(config: MediaConfig): Promise<MediaEngine> {
   // Validate required fields
   if (!config.connection) {
     throw new Error('[media-kit] MediaConfig.connection is required');
   }
-  if (!config.driver) {
-    throw new Error('[media-kit] MediaConfig.driver is required');
+
+  // Build driver registry from either `driver` (single) or `providers` (multi)
+  let registry: DriverRegistry;
+  if (config.providers) {
+    if (!config.defaultProvider) {
+      throw new Error('[media-kit] defaultProvider is required when providers is set');
+    }
+    registry = new DriverRegistry(config.providers, config.defaultProvider);
+  } else if (config.driver) {
+    registry = DriverRegistry.fromSingle(config.driver);
+  } else {
+    throw new Error('[media-kit] Either driver or providers must be specified');
   }
 
+  // Validate the serializable subset of config with Zod. Fail-fast on bad
+  // shapes (negative ttlDays, unknown fieldType, etc.) instead of letting
+  // them silently drift through `mergeConfig`. We pick only the schema-
+  // validated fields — connection/driver/eventTransport/plugins/cache/
+  // processing/logger are not serializable and stay untouched.
+  const validated = mediaConfigSchema.parse({
+    tenant: config.tenant,
+    softDelete: config.softDelete,
+    fileTypes: config.fileTypes,
+    folders: config.folders,
+    deduplication: config.deduplication,
+    concurrency: config.concurrency,
+    schemaOptions: config.schemaOptions,
+    suppressWarnings: config.suppressWarnings,
+  });
+
+  // Merge validated values back over the original config so non-validated
+  // fields (driver, connection, plugins, ...) survive intact. Zod-supplied
+  // defaults take precedence over the raw input where overlapping.
+  const merged = { ...config, ...validated };
+
   // Resolve defaults (reuses v2 mergeConfig)
-  const resolved = mergeConfig(config as any) as unknown as ResolvedMediaConfig;
+  const resolved = mergeConfig(merged as any) as unknown as ResolvedMediaConfig;
   resolved.connection = config.connection;
   resolved.tenant = resolveMediaTenant(config.tenant);
   resolved.schemaOptions = config.schemaOptions;
@@ -105,7 +138,7 @@ export async function createMedia(config: MediaConfig): Promise<MediaEngine> {
   const repositories = createMediaRepositories(models, {
     events,
     config: resolved,
-    driver: config.driver,
+    registry,
     processor,
     processorReady,
     logger: config.logger,
@@ -122,7 +155,8 @@ export async function createMedia(config: MediaConfig): Promise<MediaEngine> {
       Media: models.Media,
     }),
     config: Object.freeze(resolved),
-    driver: config.driver,
+    registry,
+    driver: registry.defaultDriver,
     bridges,
     async dispose(): Promise<void> {
       await events.close?.();

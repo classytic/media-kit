@@ -2,7 +2,7 @@
 
 Engine-factory media management for Mongoose — framework-agnostic, Arc-compatible events, pluggable storage, and a bridge-based extension surface for hosts to compose their own ImageKit-like stack.
 
-Built on [@classytic/mongokit](https://www.npmjs.com/package/@classytic/mongokit) ≥3.6.2. Zero runtime deps.
+Built on [@classytic/mongokit](https://www.npmjs.com/package/@classytic/mongokit) ≥3.13.0 and [@classytic/repo-core](https://www.npmjs.com/package/@classytic/repo-core) ≥0.4.0. Zero runtime deps.
 
 ```bash
 npm install @classytic/media-kit @classytic/mongokit mongoose zod
@@ -11,6 +11,17 @@ npm install @classytic/media-kit @classytic/mongokit mongoose zod
 Optional peers — install what you use: `sharp`, `@aws-sdk/client-s3`, `@google-cloud/storage`, `mime-types`.
 
 Requires Node ≥22, Mongoose ≥9.4.1, Zod ≥4.0.0.
+
+### Storage providers
+
+| Provider | Import | Peer dep | Notes |
+|---|---|---|---|
+| **S3** | `@classytic/media-kit/providers/s3` | `@aws-sdk/client-s3` | AWS S3 or any S3-compatible endpoint |
+| **GCS** | `@classytic/media-kit/providers/gcs` | `@google-cloud/storage` | Google Cloud Storage |
+| **Local** | `@classytic/media-kit/providers/local` | — | Filesystem (dev / self-hosted) |
+| **imgbb** | `@classytic/media-kit/providers/imgbb` | — | Free public image hosting; no extra dep |
+| **ImageKit** | `@classytic/media-kit/providers/imagekit` | — | Managed CDN; use with `processing: false` |
+| **Router** | `@classytic/media-kit/providers/router` | — | Route uploads across multiple drivers |
 
 ---
 
@@ -24,8 +35,7 @@ import mongoose from 'mongoose';
 const engine = await createMedia({
   connection: mongoose.connection,
   driver: new S3Provider({ bucket: 'my-bucket', region: 'us-east-1' }),
-  tenantFieldType: 'objectId',
-  multiTenancy: { enabled: true, required: true },
+  tenant: { enabled: true, fieldType: 'objectId', required: true },
   softDelete: { enabled: true, ttlDays: 30 },
   processing: { enabled: true, format: 'webp', quality: 80 },
 });
@@ -134,7 +144,7 @@ await engine.repositories.media.upload(
 
 // List-endpoint enrichment (1 batch call, no N+1)
 const page = await engine.repositories.media.getAll({ page: 1, limit: 20 });
-const sources = await engine.repositories.media.resolveSourcesMany(page.docs);
+const sources = await engine.repositories.media.resolveSourcesMany(page.data);
 ```
 
 ### `ScanBridge` — upload-time moderation
@@ -209,9 +219,9 @@ const result = await engine.repositories.media.applyTransforms(id, {
 
 ## Multi-tenancy
 
-Dynamic `tenantFieldType` drives both schema and plugin (via mongokit ≥3.6.2):
+Tenant configuration is a single `tenant` field on `MediaConfig` — accepts the canonical [`TenantConfig`](https://www.npmjs.com/package/@classytic/repo-core) from `@classytic/repo-core`, a boolean shorthand, or the legacy `{ tenantFieldType, multiTenant }` shape.
 
-| `tenantFieldType` | Schema | `$lookup` / `.populate()` | Use when |
+| `fieldType` | Schema | `$lookup` / `.populate()` | Use when |
 |---|---|---|---|
 | `'objectId'` | `Schema.Types.ObjectId, ref: 'Organization'` | Works | Better Auth, ObjectId orgs |
 | `'string'` (default) | `String` | N/A | UUID / slug auth systems |
@@ -220,12 +230,17 @@ Dynamic `tenantFieldType` drives both schema and plugin (via mongokit ≥3.6.2):
 await createMedia({
   connection,
   driver,
-  tenantFieldType: 'objectId',
-  multiTenancy: { enabled: true, field: 'organizationId', required: true },
+  tenant: {
+    enabled: true,
+    fieldType: 'objectId',
+    tenantField: 'organizationId',  // schema field — defaults to 'organizationId'
+    contextKey: 'organizationId',    // ctx key the plugin reads — defaults to 'organizationId'
+    required: true,
+  },
 });
 ```
 
-All CRUD ops auto-scope by `ctx.organizationId`. Cross-tenant mutations return "not found" (fail-safe).
+All CRUD ops auto-scope by `ctx.organizationId` (or whatever `contextKey` you configure). Cross-tenant mutations return "not found" (fail-safe).
 
 ---
 
@@ -273,8 +288,7 @@ export async function ensureMediaEngine() {
       engine = await createMedia({
         connection: mongoose.connection,
         driver: new S3Provider({ bucket: process.env.S3_BUCKET!, region: 'us-east-1' }),
-        tenantFieldType: 'objectId',
-        multiTenancy: { enabled: true, required: true },
+        tenant: { enabled: true, fieldType: 'objectId', required: true },
         softDelete: { enabled: true, ttlDays: 30 },
         processing: { enabled: true, format: 'webp' },
       });
