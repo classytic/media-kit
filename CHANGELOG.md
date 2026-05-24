@@ -3,11 +3,13 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.5.0] — 2026-05-24
+## [3.3.0] — 2026-05-24
 
-> Note: versions 3.3.0 and 3.4.0 were drafted but never published to npm.
-> Their content lands here alongside the new utilities and provider
-> hardening below.
+> Consolidates work previously drafted under 3.3.0 (imgbb / ImageKit
+> providers) and 3.4.0 (multi-provider routing, providerMetadata,
+> Cloudinary) — neither shipped to npm. Below: the new utilities +
+> provider hardening that triggered this release. See the unified
+> "Drafted 3.3 / 3.4 content" sections further down for the full set.
 
 ### Added — `lazy-secret` utility (`src/utils/lazy-secret.ts`)
 
@@ -47,9 +49,7 @@ existing URLs.
 
 Floor-only — no API breaks.
 
-## [3.4.0] — 2026-05-06
-
-### Added — Multi-provider routing, providerMetadata, expiresAt, Cloudinary
+### Drafted 3.4 content — Multi-provider routing, providerMetadata, expiresAt, Cloudinary
 
 #### Multi-provider routing (`DriverRegistry`)
 
@@ -144,9 +144,7 @@ const engine = await createMedia({
 
 ---
 
-## [3.3.0] — 2026-05-06
-
-### Added — imgbb and ImageKit storage providers
+### Drafted 3.3 content — imgbb and ImageKit storage providers
 
 Two new `StorageDriver` implementations ship as opt-in subpath imports — no new peer deps, no impact on existing builds.
 
