@@ -57,30 +57,26 @@ describe('Package Contents', () => {
     expect(peerDepsMeta['mongoose']).toBeUndefined();
     expect(peerDepsMeta['@classytic/mongokit']).toBeUndefined();
 
-    // mongokit must be >=3.13.0 — that release ships `claim()` (atomic
-    // CAS state transition with `where` for compound predicates) which
-    // media-kit's upload pipeline uses for race-safe pending →
-    // processing → ready transitions, plus `findOneAndUpdate` plugin-
-    // pipeline routing for tag/focal-point updates (avoids cross-tenant
-    // write surface). Also brings the LookupBuilder sanitization
-    // restoration + array-form `select` parity from 3.12 that media-kit
-    // relies on transitively via `lookupPopulate`.
-    expect(peerDeps['@classytic/mongokit']).toBe('>=3.13.0');
-    // primitives 0.4.0 ships the `assertAndClaim` surface that
-    // media-kit's upload pipeline (`presigned.ts`) uses to validate
-    // state-machine transitions before the database round-trip. The
-    // earlier `>=0.3.1` pin was wrong on two counts: (1) `0.3.1` was
-    // never published (only 0.1.0, 0.1.1, 0.2.0, 0.3.0, 0.4.0 exist),
-    // so the lower bound was unreachable; (2) `assertAndClaim` only
-    // landed in 0.4.0. Hosts on 0.3.x silently broke at runtime with
-    // an `ImportError` on first upload.
-    expect(peerDeps['@classytic/primitives']).toBe('>=0.4.0');
-    // repo-core 0.4.0 ships `StandardRepo.claim()` + the
-    // `ClaimTransition.where` compound-CAS predicate that the new
-    // upload-pipeline state-machine writes against. media-kit also
-    // resolves the canonical TenantConfig vocabulary via
-    // `resolveTenantConfig()` from `@classytic/repo-core/tenant`.
-    expect(peerDeps['@classytic/repo-core']).toBe('>=0.4.0');
+    // mongokit must be >=3.14.0 — that release tracks the kit ecosystem
+    // floor adopted by `@classytic/arc@2.17` and ships the soft-delete +
+    // TTL surface media-kit's lifecycle hooks depend on. Earlier floors
+    // (3.13.x) shipped `claim()` and the LookupBuilder restoration but
+    // missed the `softDeletePlugin({ ttlDays })` partial-filter wiring
+    // that media-kit's expiry pipeline now leverages.
+    expect(peerDeps['@classytic/mongokit']).toBe('>=3.14.0');
+    // primitives 0.6.0 is the canonical event-type floor the kit
+    // ecosystem agreed on with `@classytic/arc@2.16+`. 0.6 brings the
+    // `EventTransport` / `DomainEvent` / `EventMeta` typing media-kit
+    // relies on for arc-compatible event emission. Earlier floors
+    // (0.4.x) had a narrower `assertAndClaim` surface but missed the
+    // canonical event vocabulary kits now share.
+    expect(peerDeps['@classytic/primitives']).toBe('>=0.6.0');
+    // repo-core 0.5.0 publishes the canonical `DataAdapter` /
+    // `RepositoryLike` / `OpenApiSchemas` surface plus the
+    // `MinimalRepo & Partial<StandardRepo>` contract arc 2.17 develops
+    // against. Aligning the floor here keeps dev/peer expectations
+    // consistent across the kit ecosystem.
+    expect(peerDeps['@classytic/repo-core']).toBe('>=0.5.0');
   });
 
   it('should have no runtime dependencies (all are peer)', () => {

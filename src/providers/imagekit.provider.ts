@@ -37,6 +37,7 @@
 
 import { Readable } from 'node:stream';
 import type { FileStat, StorageDriver, WriteResult } from '../types.js';
+import { LazySecret, type SecretValue, validateSecretValue } from '../utils/lazy-secret.js';
 
 const UPLOAD_URL = 'https://upload.imagekit.io/api/v1/files/upload';
 const API_URL = 'https://api.imagekit.io/v1';
@@ -47,9 +48,16 @@ const SEP = '\n';
 export interface ImageKitProviderConfig {
   /** ImageKit public key */
   publicKey: string;
-  /** ImageKit private key (used for upload/delete auth) */
-  privateKey: string;
-  /** CDN URL endpoint, e.g. 'https://ik.imagekit.io/your-imagekit-id' */
+  /**
+   * ImageKit private key (used for upload/delete auth).
+   *
+   * Accepts a string OR a `() => string | Promise<string>` resolver. The
+   * resolver form defers credential resolution to the first upload, so
+   * environments that DON'T exercise the upload pipeline (test runners,
+   * dev previews, partial-deploy workers) can boot without the secret.
+   */
+  privateKey: SecretValue;
+  /** CDN URL endpoint, e.g. 'https://ik.imagekit.io/your-imagekit-id'. NOT a secret — kept eager because `getPublicUrl()` is synchronous. */
   urlEndpoint: string;
   /**
    * Default folder for uploads (e.g. 'shajghor/media').
@@ -114,23 +122,38 @@ function toBuffer(data: Buffer | NodeJS.ReadableStream): Promise<Buffer> {
 export class ImageKitProvider implements StorageDriver {
   readonly name = 'imagekit';
 
-  private readonly privateKey: string;
+  private readonly privateKeySecret: LazySecret;
   private readonly urlEndpoint: string;
   private readonly defaultFolder: string;
   private readonly useUniqueFileName: boolean;
-  private readonly authHeader: string;
+  /** Memoized basic-auth header — computed on first request that needs credentials. */
+  private cachedAuthHeader?: string;
 
   constructor(config: ImageKitProviderConfig) {
-    if (!config.privateKey) throw new Error('ImageKitProvider: privateKey is required');
+    // String form validated eagerly (preserves "fail at boot" UX); function
+    // form deferred to first use.
+    validateSecretValue(config.privateKey, 'ImageKitProvider: privateKey');
     if (!config.urlEndpoint) throw new Error('ImageKitProvider: urlEndpoint is required');
 
-    this.privateKey = config.privateKey;
+    this.privateKeySecret = new LazySecret(config.privateKey, 'ImageKitProvider: privateKey');
     this.urlEndpoint = config.urlEndpoint.replace(/\/+$/, '');
     this.defaultFolder = config.defaultFolder ?? '';
     this.useUniqueFileName = config.useUniqueFileName ?? true;
 
-    // Basic auth: privateKey + ':' (empty password), base64-encoded
-    this.authHeader = 'Basic ' + Buffer.from(this.privateKey + ':').toString('base64');
+    // Eager-string fast path: pre-compute auth header so existing hosts on
+    // the literal form pay zero overhead.
+    const literalPrivateKey = this.privateKeySecret.literalValue();
+    if (literalPrivateKey !== undefined) {
+      this.cachedAuthHeader = 'Basic ' + Buffer.from(literalPrivateKey + ':').toString('base64');
+    }
+  }
+
+  /** Resolve + cache the basic-auth header used for every Upload / API call. */
+  private async resolveAuthHeader(): Promise<string> {
+    if (this.cachedAuthHeader !== undefined) return this.cachedAuthHeader;
+    const privateKey = await this.privateKeySecret.resolve();
+    this.cachedAuthHeader = 'Basic ' + Buffer.from(privateKey + ':').toString('base64');
+    return this.cachedAuthHeader;
   }
 
   /**
@@ -153,9 +176,10 @@ export class ImageKitProvider implements StorageDriver {
     if (this.defaultFolder) form.append('folder', this.defaultFolder);
     form.append('useUniqueFileName', String(this.useUniqueFileName));
 
+    const authHeader = await this.resolveAuthHeader();
     const res = await fetch(UPLOAD_URL, {
       method: 'POST',
-      headers: { Authorization: this.authHeader },
+      headers: { Authorization: authHeader },
       body: form,
     });
 
@@ -205,9 +229,10 @@ export class ImageKitProvider implements StorageDriver {
   async delete(key: string): Promise<boolean> {
     const { fileId } = parseKey(key);
 
+    const authHeader = await this.resolveAuthHeader();
     const res = await fetch(`${API_URL}/files/${fileId}`, {
       method: 'DELETE',
-      headers: { Authorization: this.authHeader },
+      headers: { Authorization: authHeader },
     });
 
     // 404 = already gone — treat as success.
@@ -238,8 +263,9 @@ export class ImageKitProvider implements StorageDriver {
   async stat(key: string): Promise<FileStat> {
     const { fileId } = parseKey(key);
 
+    const authHeader = await this.resolveAuthHeader();
     const res = await fetch(`${API_URL}/files/${fileId}/details`, {
-      headers: { Authorization: this.authHeader },
+      headers: { Authorization: authHeader },
     });
 
     if (!res.ok) {
@@ -260,6 +286,7 @@ export class ImageKitProvider implements StorageDriver {
    */
   async *list(prefix: string): AsyncIterable<string> {
     const folder = prefix ? `/${prefix.replace(/^\//, '')}` : '/';
+    const authHeader = await this.resolveAuthHeader();
     let skip = 0;
     const limit = 100;
 
@@ -271,7 +298,7 @@ export class ImageKitProvider implements StorageDriver {
       });
 
       const res = await fetch(`${API_URL}/files?${params}`, {
-        headers: { Authorization: this.authHeader },
+        headers: { Authorization: authHeader },
       });
 
       if (!res.ok) break;

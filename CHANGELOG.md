@@ -3,6 +3,50 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0] — 2026-05-24
+
+> Note: versions 3.3.0 and 3.4.0 were drafted but never published to npm.
+> Their content lands here alongside the new utilities and provider
+> hardening below.
+
+### Added — `lazy-secret` utility (`src/utils/lazy-secret.ts`)
+
+Resolves provider credentials on first use instead of at construction
+time. Lets hosts build the engine + provider chain at startup without
+the secrets being available yet (CI, deferred config load, on-demand
+KMS unwrap). Throws a clear "secret X not resolved" error if a real
+call needs the value before it's wired.
+
+### Added — `cascade` utility (`src/utils/cascade.ts`)
+
+Helper that walks a provider chain on read/delete failures so a hosted
+URL that 404s from one backend can transparently fall through to the
+next. Useful when migrating between providers without breaking
+existing URLs.
+
+### Changed — Provider hardening (Cloudinary / ImageKit / imgbb)
+
+- All three providers now accept lazy-secret values for their
+  credential fields. Sync constructors stay sync; resolution happens
+  inside the first network call.
+- Cleaner error surfaces — credential-resolution failures throw
+  `MediaKitError('CREDENTIAL_NOT_RESOLVED', …)` instead of an opaque
+  HTTP failure deep inside the SDK call.
+- Test coverage added: `tests/unit/lazy-secret.test.ts`,
+  `tests/unit/provider-lazy-secrets.test.ts`,
+  `tests/integration/cascade.test.ts`.
+
+### Changed — peer dep floors
+
+- `@classytic/mongokit` `>=3.13.0` → `>=3.14.0` (compliance-grade
+  `purgeByField`).
+- `@classytic/primitives` `>=0.4.0` → `>=0.6.0` (new `phone` /
+  `status-history` / `condition` / `mixin` / `sla-policy` primitives).
+- `@classytic/repo-core` `>=0.4.0` → `>=0.5.0` (`PurgePort` + chunked
+  purge orchestrator).
+
+Floor-only — no API breaks.
+
 ## [3.4.0] — 2026-05-06
 
 ### Added — Multi-provider routing, providerMetadata, expiresAt, Cloudinary

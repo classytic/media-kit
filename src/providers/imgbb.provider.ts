@@ -29,13 +29,21 @@
 
 import { Readable } from 'node:stream';
 import type { FileStat, StorageDriver, WriteResult } from '../types.js';
+import { LazySecret, type SecretValue, validateSecretValue } from '../utils/lazy-secret.js';
 
 /** Separator that cannot appear in HTTP URLs. */
 const SEP = '\n';
 
 export interface ImgbbProviderConfig {
-  /** imgbb API key — https://api.imgbb.com/ */
-  apiKey: string;
+  /**
+   * imgbb API key — https://api.imgbb.com/
+   *
+   * Accepts a string OR a `() => string | Promise<string>` resolver. The
+   * resolver form defers credential resolution to the first upload, so
+   * environments that DON'T exercise the upload pipeline (test runners,
+   * dev previews, partial-deploy workers) can boot without the secret.
+   */
+  apiKey: SecretValue;
 }
 
 interface ImgbbUploadResponse {
@@ -72,11 +80,13 @@ async function toBuffer(data: Buffer | NodeJS.ReadableStream): Promise<Buffer> {
  */
 export class ImgbbProvider implements StorageDriver {
   readonly name = 'imgbb';
-  private readonly apiKey: string;
+  private readonly apiKeySecret: LazySecret;
 
   constructor(config: ImgbbProviderConfig) {
-    if (!config.apiKey) throw new Error('ImgbbProvider: apiKey is required');
-    this.apiKey = config.apiKey;
+    // String form validated eagerly (preserves "fail at boot" UX for
+    // misconfigured eager hosts); function form deferred to first use.
+    validateSecretValue(config.apiKey, 'ImgbbProvider: apiKey');
+    this.apiKeySecret = new LazySecret(config.apiKey, 'ImgbbProvider: apiKey');
   }
 
   /**
@@ -98,7 +108,8 @@ export class ImgbbProvider implements StorageDriver {
     body.set('image', base64);
     body.set('name', name);
 
-    const res = await fetch(`https://api.imgbb.com/1/upload?key=${this.apiKey}`, {
+    const apiKey = await this.apiKeySecret.resolve();
+    const res = await fetch(`https://api.imgbb.com/1/upload?key=${apiKey}`, {
       method: 'POST',
       body,
     });

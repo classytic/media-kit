@@ -38,16 +38,28 @@
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { FileStat, StorageDriver, WriteResult } from '../types.js';
+import { LazySecret, type SecretValue, validateSecretValue } from '../utils/lazy-secret.js';
 
 const SEP = '\n';
 
 export interface CloudinaryProviderConfig {
-  /** Cloudinary cloud name (e.g. 'my-cloud') */
+  /**
+   * Cloudinary cloud name (e.g. 'my-cloud'). NOT a secret — appears in every
+   * public CDN URL — kept as an eager string because `getPublicUrl()` is
+   * synchronous per the `StorageDriver` contract.
+   */
   cloudName: string;
-  /** Cloudinary API key (numeric string from dashboard) */
-  apiKey: string;
-  /** Cloudinary API secret */
-  apiSecret: string;
+  /**
+   * Cloudinary API key (numeric string from dashboard).
+   *
+   * Accepts a string OR a `() => string | Promise<string>` resolver. The
+   * resolver form defers credential resolution to the first upload, so
+   * environments that DON'T exercise the upload pipeline (test runners,
+   * dev previews, partial-deploy workers) can boot without the secret.
+   */
+  apiKey: SecretValue;
+  /** Cloudinary API secret. Same `SecretValue` rules as `apiKey`. */
+  apiSecret: SecretValue;
   /**
    * Default folder prefix for uploads (e.g. 'my-app/media').
    * Cloudinary prepends this to the public_id on upload.
@@ -145,29 +157,49 @@ export class CloudinaryProvider implements StorageDriver {
   readonly name = 'cloudinary';
 
   private readonly cloudName: string;
-  private readonly apiKey: string;
-  private readonly apiSecret: string;
+  private readonly apiKeySecret: LazySecret;
+  private readonly apiSecretSecret: LazySecret;
   private readonly folder: string;
   private readonly overwrite: boolean;
   private readonly secure: boolean;
   private readonly autoOptimize: boolean;
-  private readonly authHeader: string;
+  /** Memoized basic-auth header — computed on first request that needs credentials. */
+  private cachedAuthHeader?: string;
 
   constructor(config: CloudinaryProviderConfig) {
     if (!config.cloudName) throw new Error('CloudinaryProvider: cloudName is required');
-    if (!config.apiKey) throw new Error('CloudinaryProvider: apiKey is required');
-    if (!config.apiSecret) throw new Error('CloudinaryProvider: apiSecret is required');
+    // String form validated eagerly (preserves "fail at boot" UX); function
+    // form deferred to first use.
+    validateSecretValue(config.apiKey, 'CloudinaryProvider: apiKey');
+    validateSecretValue(config.apiSecret, 'CloudinaryProvider: apiSecret');
 
     this.cloudName = config.cloudName;
-    this.apiKey = config.apiKey;
-    this.apiSecret = config.apiSecret;
+    this.apiKeySecret = new LazySecret(config.apiKey, 'CloudinaryProvider: apiKey');
+    this.apiSecretSecret = new LazySecret(config.apiSecret, 'CloudinaryProvider: apiSecret');
     this.folder = config.folder?.replace(/\/+$/, '') ?? '';
     this.overwrite = config.overwrite ?? true;
     this.secure = config.secure ?? true;
     this.autoOptimize = config.autoOptimize ?? true;
 
-    // Basic auth for Admin API (apiKey:apiSecret)
-    this.authHeader = 'Basic ' + Buffer.from(`${this.apiKey}:${this.apiSecret}`).toString('base64');
+    // Eager-string fast path: pre-compute the auth header so existing
+    // hosts on the literal form pay zero overhead.
+    const literalKey = this.apiKeySecret.literalValue();
+    const literalSecret = this.apiSecretSecret.literalValue();
+    if (literalKey !== undefined && literalSecret !== undefined) {
+      this.cachedAuthHeader =
+        'Basic ' + Buffer.from(`${literalKey}:${literalSecret}`).toString('base64');
+    }
+  }
+
+  /** Resolve + cache the basic-auth header used for every Admin / Upload API call. */
+  private async resolveAuthHeader(): Promise<string> {
+    if (this.cachedAuthHeader !== undefined) return this.cachedAuthHeader;
+    const [apiKey, apiSecret] = await Promise.all([
+      this.apiKeySecret.resolve(),
+      this.apiSecretSecret.resolve(),
+    ]);
+    this.cachedAuthHeader = 'Basic ' + Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
+    return this.cachedAuthHeader;
   }
 
   // Upload API always uses 'auto' — Cloudinary detects resource_type from the file.
@@ -212,13 +244,17 @@ export class CloudinaryProvider implements StorageDriver {
       overwrite: String(this.overwrite),
     };
 
-    const signature = sign(signParams, this.apiSecret);
+    const [apiKey, apiSecret] = await Promise.all([
+      this.apiKeySecret.resolve(),
+      this.apiSecretSecret.resolve(),
+    ]);
+    const signature = sign(signParams, apiSecret);
 
     const form = new FormData();
     form.append('file', new Blob([new Uint8Array(buffer)], { type: contentType }));
     form.append('public_id', publicId);
     form.append('timestamp', timestamp);
-    form.append('api_key', this.apiKey);
+    form.append('api_key', apiKey);
     form.append('signature', signature);
     form.append('overwrite', String(this.overwrite));
 
@@ -272,12 +308,16 @@ export class CloudinaryProvider implements StorageDriver {
     // invalidate must be included in signParams — Cloudinary signs ALL sent params
     // (except api_key, file, resource_type). Omitting it causes 401 Invalid Signature.
     const signParams = { invalidate: 'true', public_id: publicId, timestamp };
-    const signature = sign(signParams, this.apiSecret);
+    const [apiKey, apiSecret] = await Promise.all([
+      this.apiKeySecret.resolve(),
+      this.apiSecretSecret.resolve(),
+    ]);
+    const signature = sign(signParams, apiSecret);
 
     const body = new URLSearchParams({
       public_id: publicId,
       timestamp,
-      api_key: this.apiKey,
+      api_key: apiKey,
       signature,
       invalidate: 'true',
     });
@@ -304,10 +344,11 @@ export class CloudinaryProvider implements StorageDriver {
   async exists(key: string): Promise<boolean> {
     const { publicId, resourceType } = parseKey(key);
     const encodedId = encodeURIComponent(publicId).replace(/%2F/g, '/');
+    const authHeader = await this.resolveAuthHeader();
 
     const res = await fetch(
       this.adminUrl(`/resources/${resourceType}/upload/${encodedId}`),
-      { headers: { Authorization: this.authHeader } },
+      { headers: { Authorization: authHeader } },
     );
 
     return res.ok;
@@ -319,10 +360,11 @@ export class CloudinaryProvider implements StorageDriver {
   async stat(key: string): Promise<FileStat> {
     const { publicId, resourceType } = parseKey(key);
     const encodedId = encodeURIComponent(publicId).replace(/%2F/g, '/');
+    const authHeader = await this.resolveAuthHeader();
 
     const res = await fetch(
       this.adminUrl(`/resources/${resourceType}/upload/${encodedId}`),
-      { headers: { Authorization: this.authHeader } },
+      { headers: { Authorization: authHeader } },
     );
 
     if (!res.ok) throw new Error(`Cloudinary stat failed (${res.status}): ${publicId}`);
@@ -349,6 +391,7 @@ export class CloudinaryProvider implements StorageDriver {
    * Yields composite keys (`publicId\nresourceType`) for each file.
    */
   async *list(prefix: string): AsyncIterable<string> {
+    const authHeader = await this.resolveAuthHeader();
     for (const resourceType of ['image', 'video', 'raw'] as const) {
       let nextCursor: string | undefined;
 
@@ -362,7 +405,7 @@ export class CloudinaryProvider implements StorageDriver {
 
         const res = await fetch(
           this.adminUrl(`/resources/${resourceType}?${params}`),
-          { headers: { Authorization: this.authHeader } },
+          { headers: { Authorization: authHeader } },
         );
 
         if (!res.ok) break;
@@ -440,7 +483,8 @@ export class CloudinaryProvider implements StorageDriver {
     const t = transform ? transform.replace(/^\/+|\/+$/g, '') + '/' : '';
 
     // Cloudinary signed URL signature: SHA-1 of transform + publicId + expireAt + secret
-    const toSign = `${t}${publicId}${expireAt}${this.apiSecret}`;
+    const apiSecret = await this.apiSecretSecret.resolve();
+    const toSign = `${t}${publicId}${expireAt}${apiSecret}`;
     const signature = createHash('sha1').update(toSign).digest('hex').slice(0, 8);
 
     const scheme = this.secure ? 'https' : 'http';

@@ -124,6 +124,8 @@ export * from './utils/folders.js';
 export * from './utils/mime.js';
 export * from './utils/hash.js';
 export * from './utils/alt-text.js';
+export { withMediaCascade } from './utils/cascade.js';
+export type { MediaCascadeOptions } from './utils/cascade.js';
 
 // ── Driver Registry (multi-provider) ────────────────────────
 export { DriverRegistry } from './providers/driver-registry.js';
