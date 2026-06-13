@@ -179,6 +179,47 @@ async function validateUrlSafety(url: string): Promise<string> {
 }
 
 /**
+ * Build a `dns.lookup`-compatible shim that always resolves to `resolvedIP`.
+ *
+ * Passed as the `lookup` option to http(s).get so the connection pins to the
+ * IP we already validated, closing the DNS-rebinding (TOCTOU) window between
+ * {@link validateUrlSafety} and the actual socket connect.
+ *
+ * Node's net layer invokes a custom `lookup` in one of two callback shapes:
+ *   - legacy `(err, address, family)` — when called without `{ all: true }`;
+ *   - `(err, [{ address, family }])` — when called WITH `{ all: true }`, which
+ *     is the default path since the autoSelectFamily change landed in Node 18+.
+ * We MUST branch on `options.all`: handing the legacy triple to an `all: true`
+ * caller makes Node read `.address` off the (undefined) array element and throw
+ * the misleading `Invalid IP address: undefined`, which previously crashed
+ * every importFromUrl on Node ≥18. Exported for regression testing.
+ */
+export function createPinnedLookup(resolvedIP: string): typeof dns.lookup {
+  const family = resolvedIP.includes(':') ? 6 : 4;
+  const lookup = (
+    _hostname: string,
+    options: unknown,
+    callback?: (err: NodeJS.ErrnoException | null, address: string, family: number) => void,
+  ): void => {
+    const cb = typeof options === 'function' ? options : callback;
+    if (!cb) return;
+    const wantsAll =
+      typeof options === 'object' && options !== null && (options as { all?: boolean }).all === true;
+    if (wantsAll) {
+      (
+        cb as unknown as (
+          err: NodeJS.ErrnoException | null,
+          addresses: Array<{ address: string; family: number }>,
+        ) => void
+      )(null, [{ address: resolvedIP, family }]);
+    } else {
+      (cb as (err: null, address: string, family: number) => void)(null, resolvedIP, family);
+    }
+  };
+  return lookup as typeof dns.lookup;
+}
+
+/**
  * Fetch a URL and return buffer, mime type, and filename.
  * Streams the response and checks Content-Length against size limit.
  * Includes SSRF protection: blocks private IPs on initial and redirect URLs.
@@ -199,26 +240,9 @@ async function fetchUrl(
     const parsedUrl = new URL(url);
     const transport = parsedUrl.protocol === 'https:' ? https : http;
 
-    // Pin resolved IP via custom lookup to prevent DNS rebinding between
-    // our validation and the actual connection (TOCTOU mitigation)
-    const pinnedLookup = (
-      _hostname: string,
-      options: unknown,
-      callback?: (err: NodeJS.ErrnoException | null, address: string, family: number) => void,
-    ) => {
-      const cb = typeof options === 'function' ? options : callback;
-      if (cb) {
-        (cb as (err: null, address: string, family: number) => void)(
-          null,
-          resolvedIP,
-          resolvedIP.includes(':') ? 6 : 4,
-        );
-      }
-    };
-
     const req = transport.get(
       url,
-      { timeout, lookup: pinnedLookup as typeof dns.lookup },
+      { timeout, lookup: createPinnedLookup(resolvedIP) },
       (res) => {
         // Handle redirects (resolve relative Location against current URL)
         if (

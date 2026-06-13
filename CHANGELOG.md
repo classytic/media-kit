@@ -3,6 +3,21 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.1] — 2026-06-14
+
+### Fixed — `importFromUrl` crashed with "Invalid IP address: undefined" on Node ≥18
+
+The DNS-rebinding guard pins the validated IP by passing a custom `lookup` to
+`http(s).get`. That shim only implemented the legacy `(err, address, family)`
+callback, but Node invokes a custom lookup with `{ all: true }` (the default
+since the autoSelectFamily change in Node 18+) and then expects an array
+`[{ address, family }]`. Given the legacy triple, Node read `.address` off an
+undefined array element and threw `URL import failed: Invalid IP address:
+undefined` — breaking **every** `importFromUrl` call on Node ≥18 (and the
+package requires Node ≥22). The shim now branches on `options.all` and returns
+the correct shape for each. Extracted as `createPinnedLookup` with regression
+tests covering both callback forms and IPv6.
+
 ## [3.3.0] — 2026-05-24
 
 > Consolidates work previously drafted under 3.3.0 (imgbb / ImageKit
