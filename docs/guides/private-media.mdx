@@ -1,0 +1,256 @@
+# Private Media
+
+Serve access-controlled files: private buckets, signed URLs, session auth,
+key rotation, revocation — and the right way to hand media to LLMs.
+
+## Overview
+
+Since 3.4.0 every media document carries a `visibility` field:
+
+- `'public'` (default) — exactly the pre-3.4.0 behavior. Public URLs, long-lived
+  public cache headers, zero changes for existing apps.
+- `'private'` — the serve pipeline (`AssetTransformService.handle()`) refuses to
+  send bytes unless the request carries a **valid HMAC signature** or the host's
+  **`authorize` callback** approves it. Denials are `403` with a JSON body
+  `{ error: { code } }` (`media.serve.forbidden` / `media.serve.link_expired`).
+
+> **Naming note:** the field is `visibility`, not `access`, and the subpath is
+> `/signing`, not `/access` — deliberately, to avoid collision with
+> `@classytic/access` (the entitlement engine). That package plugs in via the
+> `authorize` callback below; media-kit never imports it.
+
+## The private bucket + proxy pattern
+
+Keep the bucket itself private and serve everything through your API:
+
+```typescript
+import { createMedia } from '@classytic/media-kit';
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+
+const engine = await createMedia({
+  connection,
+  driver: new S3Provider({
+    bucket: 'my-private-bucket',   // block public access at the bucket level
+    region: 'us-east-1',
+    acl: 'private',                 // provider-level default ACL
+  }),
+  visibility: {
+    default: 'public',
+    byFolder: {
+      invoices: 'private',          // matches 'invoices' and 'invoices/2026/q1'
+      'user-uploads': 'private',
+    },
+  },
+  signing: {
+    secret: process.env.MEDIA_SIGNING_SECRET!,  // or a keyring, see rotation below
+    servePath: '/media/content',
+    defaultTtl: 3600,
+  },
+  authorize: async (req, media) => {
+    // Session path — see "Dual auth" below.
+    const user = req.principal as { organizationId?: string } | undefined;
+    return user?.organizationId === String(media.organizationId);
+  },
+});
+```
+
+Per-upload override always wins:
+
+```typescript
+await engine.repositories.media.upload({
+  buffer, filename: 'contract.pdf', mimeType: 'application/pdf',
+  visibility: 'private',
+});
+```
+
+`visibility: 'private'` uploads also pass a per-object `ACL: 'private'` to S3
+writes (`StorageWriteOptions.acl`). GCS has no per-object ACL under uniform
+bucket-level access — privacy there is bucket IAM, so use a private bucket.
+Buckets with S3 Object Ownership "Bucket owner enforced" reject ACLs entirely;
+in that (recommended) setup rely on the private bucket + this proxy.
+
+## Serving: one route, both auth modes
+
+The transform service is the single serve engine — plug it into any framework:
+
+```typescript
+// Fastify / arc-style custom route
+import { createAssetTransform } from '@classytic/media-kit/transforms';
+
+const transform = createAssetTransform({ media: engine });
+// ^ picks up engine.signing + engine.authorize automatically
+
+app.get('/media/content/:id/:variant?', async (req, reply) => {
+  const result = await transform.handle({
+    fileId: req.params.id,
+    variant: req.params.variant,
+    params: req.query,           // w/h/q/fit/format transforms
+    query: req.query,            // signed-URL fields (e, kid, v, sig, c.*)
+    principal: req.scope,        // arc RequestScope (or req.user) — opaque to media-kit
+    accept: req.headers.accept,
+    range: req.headers.range,
+  });
+  reply.status(result.status);
+  for (const [k, v] of Object.entries(result.headers)) reply.header(k, v);
+  return reply.send(result.stream);
+});
+```
+
+The gate runs **before any bytes are read from storage**:
+
+| Case | Result |
+|------|--------|
+| `visibility !== 'private'` | serve (public headers, unchanged) |
+| valid signature (incl. tokenVersion) | serve, `Cache-Control: private, max-age=min(remaining TTL, 3600)` |
+| no/invalid signature, `authorize` returns true | serve, `Cache-Control: private, no-store` |
+| authentic but expired signature | `403 { error: { code: 'media.serve.link_expired' } }` |
+| everything else (incl. `authorize` throwing) | `403 { error: { code: 'media.serve.forbidden' } }` |
+
+**Why two cache policies?** A signed URL *is* the credential — whoever holds it
+gets the bytes, so letting the holder's browser cache the response for at most
+the signature's own validity (capped at 1h so revocation has a bounded staleness
+horizon) leaks nothing and makes replays cheap. Session-authorized responses
+depend on ambient cookies, so they are `no-store`. Private responses never get
+`public`/`immutable` headers.
+
+**Fail-closed:** an `authorize` callback that throws is a denial (403), never a
+500 — an erroring authorizer must not leak bytes, and 500s would give probers an
+oracle for distinguishing "denied" from "host bug".
+
+## Dual auth — the "400 thumbnails" answer
+
+Don't sign URLs for your own UI. If a tenant admin opens a media library page
+with 400 private thumbnails, minting 400 signed URLs per page load is pointless
+work and produces uncacheable, ever-changing URLs. Use both modes for what
+they're good at:
+
+- **Session (`authorize`)** — your own frontend. The `<img>` tags point at
+  `/media/content/:id` with normal session cookies; `authorize` checks tenant
+  membership once per request. No URLs to mint, no expiry to manage.
+- **Signed URLs (`getSignedAssetUrl`)** — everything that *leaves* your session
+  boundary: embeds in emails, share links, webhooks, and LLM providers.
+
+```typescript
+// Share link / embed / LLM: mint explicitly
+const url = await engine.repositories.media.getSignedAssetUrl(mediaId, {
+  variant: 'thumbnail',            // optional — signature is bound to it
+  expiresIn: 7 * 86400,            // seconds; no 7-day cap (this is package HMAC, not SigV4)
+  claims: { uid: 'user_1' },       // optional binding claims — signed too
+});
+// → /media/content/665f.../thumbnail?e=1751...&kid=k1&v=0&sig=...
+```
+
+Why package HMAC instead of `driver.getSignedUrl()` (S3/GCS native)?
+Storage-native signing caps at 7 days (SigV4/V4), only exists on S3/GCS, and
+bypasses your permission layer. The HMAC proxy works on Local, Cloudinary,
+ImageKit and imgbb too, supports arbitrary TTLs, and every request still flows
+through your route. If you *do* want CDN offload, configure a `CdnBridge` —
+when present, `getSignedAssetUrl()` routes the minted URL through
+`bridges.cdn.transform(key, url, { signed: true, ... })` and the bridge wins
+(e.g. re-mint as a CloudFront signed URL).
+
+## Key rotation
+
+```typescript
+signing: {
+  keys: { k1: OLD_SECRET, k2: NEW_SECRET },   // keep N-1 old keys
+  currentKid: 'k2',                           // new URLs sign with k2
+  servePath: '/media/content',
+}
+```
+
+URLs carry the `kid` they were signed with; verification looks it up in the
+ring, so old URLs keep working until they expire. Drop `k1` from the ring once
+its longest-lived URLs are past their TTL — after that they fail with
+`unknown_kid`.
+
+## Revocation
+
+```typescript
+await engine.repositories.media.revokeAccess(mediaId);
+```
+
+`revokeAccess()` atomically `$inc`s the doc's `tokenVersion` (through the
+normal repository update pipeline, so tenant scoping and cache invalidation
+fire). Every signed URL embeds the version it was minted with and verification
+compares it against the doc — so **all** outstanding URLs for that doc die
+instantly (`version_mismatch` → 403). Re-mint after revoking to issue fresh
+access.
+
+## Media in LLM conversations
+
+LLM providers (Anthropic, OpenAI) fetch `url`-sourced images **server-side,
+anonymously** — no cookies, no headers — and they re-fetch on **every
+chat-history replay**. That shapes the three viable strategies:
+
+1. **Store the media `_id` in the transcript, inline base64 at request time**
+   (recommended default):
+
+   ```typescript
+   const { data, contentType } = await engine.repositories.media.getContextPayload(mediaId);
+   // → { type: 'image', source: { type: 'base64', media_type: contentType, data } }
+   ```
+
+   `getContextPayload()` streams from the driver with a hard cap (default 25MB,
+   413 `media.context.too_large` beyond), and downscales images whose long edge
+   exceeds `maxDimension` (default **1568px** — Anthropic's token sweet spot;
+   hard limits are 10MB and 8000px per image). The output is **byte-stable**
+   for unchanged sources, which keeps prompt caching effective. Works
+   regardless of visibility, and it's the only option on Bedrock/Vertex
+   (base64-only). Use `{ as: 'dataUrl' }` for OpenAI-style `image_url` inputs.
+
+2. **Provider file APIs** — upload once via Anthropic's Files API and reference
+   the `file_id` in the transcript. Best for large/re-used assets; ties the
+   transcript to one provider.
+
+3. **Long-lived signed URL** — `getSignedAssetUrl(id, { expiresIn: <weeks>,
+   claims: { conv: conversationId } })`. Only possible because package HMAC has
+   no 7-day cap. The URL must outlive the conversation: once it expires, every
+   subsequent replay of that history breaks.
+
+**Prompt-caching caveat:** never re-sign per message. A *changing* URL for the
+same image makes each history replay a cache miss on Anthropic's prompt cache.
+Byte-stable references — one long-lived URL minted once, or stable base64 —
+win on both cost and latency.
+
+## Composing with @classytic/access
+
+`authorize` is a bridge, not an import:
+
+```typescript
+import { access } from './access-engine.js';   // your @classytic/access instance
+
+const engine = await createMedia({
+  // ...
+  authorize: async (req, media) => {
+    const scope = req.principal as RequestScope | undefined;
+    if (!scope) return false;
+    const result = await access.check(scope, 'media.read', {
+      resourceId: String(media._id),
+      organizationId: String(media.organizationId ?? ''),
+    });
+    return result.allowed;
+  },
+});
+```
+
+Media-kit stays zero-dep; the entitlement engine stays swappable.
+
+## Standalone signer
+
+`@classytic/media-kit/signing` is pure `node:crypto` with no imports from the
+rest of the package — verify signatures in an edge worker or a separate service
+without pulling in mongoose:
+
+```typescript
+import { createUrlSigner } from '@classytic/media-kit/signing';
+
+const signer = createUrlSigner({ keys: { k1: SECRET }, currentKid: 'k1' });
+const { query, expiresAt } = signer.sign({ id, variant, expiresIn, claims, tokenVersion });
+const result = signer.verify({ id, variant, params, expectedTokenVersion });
+// result: { ok: true } | { ok: false, reason: 'expired' | 'bad_signature' | 'unknown_kid' | 'version_mismatch' | 'malformed' }
+```
+
+Every externally supplied parameter — id, variant, expiry, kid, tokenVersion,
+and all claims — is covered by the HMAC-SHA256 signature; comparison uses
+`crypto.timingSafeEqual`.

@@ -105,10 +105,7 @@ export function calculateFocalPointCrop(params: FocalPointCropParams): CropRegio
 export function isValidFocalPoint(fp: unknown): fp is FocalPoint {
   if (!fp || typeof fp !== 'object') return false;
   const { x, y } = fp as FocalPoint;
-  return (
-    typeof x === 'number' && typeof y === 'number' &&
-    x >= 0 && x <= 1 && y >= 0 && y <= 1
-  );
+  return typeof x === 'number' && typeof y === 'number' && x >= 0 && x <= 1 && y >= 0 && y <= 1;
 }
 
 /**

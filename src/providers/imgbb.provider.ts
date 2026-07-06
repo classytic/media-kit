@@ -209,5 +209,3 @@ export class ImgbbProvider implements StorageDriver {
     return parseKey(key).displayUrl;
   }
 }
-
-export default ImgbbProvider;

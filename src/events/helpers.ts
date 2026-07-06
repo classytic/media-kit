@@ -17,9 +17,7 @@ export function createMediaEvent<T>(
 ): DomainEvent<T> {
   return createPrimitiveEvent<T>(type, payload, {
     ...(ctx?.userId !== undefined ? { userId: String(ctx.userId) } : {}),
-    ...(ctx?.organizationId !== undefined
-      ? { organizationId: String(ctx.organizationId) }
-      : {}),
+    ...(ctx?.organizationId !== undefined ? { organizationId: String(ctx.organizationId) } : {}),
     ...(ctx?.correlationId !== undefined ? { correlationId: ctx.correlationId } : {}),
     ...meta,
   });

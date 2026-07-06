@@ -133,7 +133,9 @@ function sign(params: Record<string, string>, apiSecret: string): string {
     .filter((k) => params[k] !== '')
     .map((k) => `${k}=${params[k]}`)
     .join('&');
-  return createHash('sha1').update(str + apiSecret).digest('hex');
+  return createHash('sha1')
+    .update(str + apiSecret)
+    .digest('hex');
 }
 
 function toBuffer(data: Buffer | NodeJS.ReadableStream): Promise<Buffer> {
@@ -186,19 +188,15 @@ export class CloudinaryProvider implements StorageDriver {
     const literalKey = this.apiKeySecret.literalValue();
     const literalSecret = this.apiSecretSecret.literalValue();
     if (literalKey !== undefined && literalSecret !== undefined) {
-      this.cachedAuthHeader =
-        'Basic ' + Buffer.from(`${literalKey}:${literalSecret}`).toString('base64');
+      this.cachedAuthHeader = `Basic ${Buffer.from(`${literalKey}:${literalSecret}`).toString('base64')}`;
     }
   }
 
   /** Resolve + cache the basic-auth header used for every Admin / Upload API call. */
   private async resolveAuthHeader(): Promise<string> {
     if (this.cachedAuthHeader !== undefined) return this.cachedAuthHeader;
-    const [apiKey, apiSecret] = await Promise.all([
-      this.apiKeySecret.resolve(),
-      this.apiSecretSecret.resolve(),
-    ]);
-    this.cachedAuthHeader = 'Basic ' + Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
+    const [apiKey, apiSecret] = await Promise.all([this.apiKeySecret.resolve(), this.apiSecretSecret.resolve()]);
+    this.cachedAuthHeader = `Basic ${Buffer.from(`${apiKey}:${apiSecret}`).toString('base64')}`;
     return this.cachedAuthHeader;
   }
 
@@ -216,7 +214,7 @@ export class CloudinaryProvider implements StorageDriver {
     const scheme = this.secure ? 'https' : 'http';
     // f_auto: serve WebP/AVIF to supporting browsers; q_auto: Cloudinary picks
     // optimal quality per-image. Only applied to images — not video or raw.
-    const transforms = (this.autoOptimize && resourceType === 'image') ? 'f_auto,q_auto/' : '';
+    const transforms = this.autoOptimize && resourceType === 'image' ? 'f_auto,q_auto/' : '';
     return `${scheme}://res.cloudinary.com/${this.cloudName}/${resourceType}/upload/${transforms}${publicId}`;
   }
 
@@ -232,7 +230,8 @@ export class CloudinaryProvider implements StorageDriver {
     // Derive public_id from key — strip extension for non-raw (Cloudinary stores format separately).
     // We can't know the final resource_type before upload when using 'auto', so we strip any
     // image/video-like extension and keep for everything else.
-    const likelyRaw = !contentType.startsWith('image/') && !contentType.startsWith('video/') && !contentType.startsWith('audio/');
+    const likelyRaw =
+      !contentType.startsWith('image/') && !contentType.startsWith('video/') && !contentType.startsWith('audio/');
     const rawPublicId = likelyRaw ? key : key.replace(/\.[^./]+$/, '');
     const publicId = this.folder ? `${this.folder}/${rawPublicId}` : rawPublicId;
 
@@ -244,10 +243,7 @@ export class CloudinaryProvider implements StorageDriver {
       overwrite: String(this.overwrite),
     };
 
-    const [apiKey, apiSecret] = await Promise.all([
-      this.apiKeySecret.resolve(),
-      this.apiSecretSecret.resolve(),
-    ]);
+    const [apiKey, apiSecret] = await Promise.all([this.apiKeySecret.resolve(), this.apiSecretSecret.resolve()]);
     const signature = sign(signParams, apiSecret);
 
     const form = new FormData();
@@ -308,10 +304,7 @@ export class CloudinaryProvider implements StorageDriver {
     // invalidate must be included in signParams — Cloudinary signs ALL sent params
     // (except api_key, file, resource_type). Omitting it causes 401 Invalid Signature.
     const signParams = { invalidate: 'true', public_id: publicId, timestamp };
-    const [apiKey, apiSecret] = await Promise.all([
-      this.apiKeySecret.resolve(),
-      this.apiSecretSecret.resolve(),
-    ]);
+    const [apiKey, apiSecret] = await Promise.all([this.apiKeySecret.resolve(), this.apiSecretSecret.resolve()]);
     const signature = sign(signParams, apiSecret);
 
     const body = new URLSearchParams({
@@ -346,10 +339,9 @@ export class CloudinaryProvider implements StorageDriver {
     const encodedId = encodeURIComponent(publicId).replace(/%2F/g, '/');
     const authHeader = await this.resolveAuthHeader();
 
-    const res = await fetch(
-      this.adminUrl(`/resources/${resourceType}/upload/${encodedId}`),
-      { headers: { Authorization: authHeader } },
-    );
+    const res = await fetch(this.adminUrl(`/resources/${resourceType}/upload/${encodedId}`), {
+      headers: { Authorization: authHeader },
+    });
 
     return res.ok;
   }
@@ -362,10 +354,9 @@ export class CloudinaryProvider implements StorageDriver {
     const encodedId = encodeURIComponent(publicId).replace(/%2F/g, '/');
     const authHeader = await this.resolveAuthHeader();
 
-    const res = await fetch(
-      this.adminUrl(`/resources/${resourceType}/upload/${encodedId}`),
-      { headers: { Authorization: authHeader } },
-    );
+    const res = await fetch(this.adminUrl(`/resources/${resourceType}/upload/${encodedId}`), {
+      headers: { Authorization: authHeader },
+    });
 
     if (!res.ok) throw new Error(`Cloudinary stat failed (${res.status}): ${publicId}`);
 
@@ -375,7 +366,8 @@ export class CloudinaryProvider implements StorageDriver {
     const ext = json.format ? `.${json.format}` : '';
     return {
       size: json.bytes,
-      contentType: resourceType === 'raw' ? 'application/octet-stream' : `${resourceType}/${json.format || 'octet-stream'}`,
+      contentType:
+        resourceType === 'raw' ? 'application/octet-stream' : `${resourceType}/${json.format || 'octet-stream'}`,
       lastModified: json.created_at ? new Date(json.created_at) : undefined,
       etag: json.etag,
       metadata: {
@@ -403,10 +395,9 @@ export class CloudinaryProvider implements StorageDriver {
           ...(nextCursor && { next_cursor: nextCursor }),
         });
 
-        const res = await fetch(
-          this.adminUrl(`/resources/${resourceType}?${params}`),
-          { headers: { Authorization: authHeader } },
-        );
+        const res = await fetch(this.adminUrl(`/resources/${resourceType}?${params}`), {
+          headers: { Authorization: authHeader },
+        });
 
         if (!res.ok) break;
 
@@ -480,7 +471,7 @@ export class CloudinaryProvider implements StorageDriver {
   async getSignedUrl(key: string, expiresIn = 3600, transform?: string): Promise<string> {
     const { publicId, resourceType } = parseKey(key);
     const expireAt = Math.floor(Date.now() / 1000) + expiresIn;
-    const t = transform ? transform.replace(/^\/+|\/+$/g, '') + '/' : '';
+    const t = transform ? `${transform.replace(/^\/+|\/+$/g, '')}/` : '';
 
     // Cloudinary signed URL signature: SHA-1 of transform + publicId + expireAt + secret
     const apiSecret = await this.apiSecretSecret.resolve();
@@ -491,5 +482,3 @@ export class CloudinaryProvider implements StorageDriver {
     return `${scheme}://res.cloudinary.com/${this.cloudName}/${resourceType}/upload/s--${signature}--/${t}${publicId}?_a=BATAAB0`;
   }
 }
-
-export default CloudinaryProvider;

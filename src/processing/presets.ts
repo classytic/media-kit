@@ -21,15 +21,15 @@ export const IMAGE_WIDTHS = [64, 96, 128, 256, 384] as const;
 export function generateResponsiveVariants(
   originalWidth: number,
   widths: readonly number[] = DEVICE_WIDTHS,
-  options?: { format?: string; quality?: number },
+  options?: { format?: SizeVariant['format']; quality?: number },
 ): SizeVariant[] {
   return widths
-    .filter(w => w < originalWidth)   // Never upscale
-    .filter(w => w <= originalWidth * 0.9) // Skip if <10% reduction
-    .map(w => ({
+    .filter((w) => w < originalWidth) // Never upscale
+    .filter((w) => w <= originalWidth * 0.9) // Skip if <10% reduction
+    .map((w) => ({
       name: `w${w}`,
       width: w,
-      format: options?.format as any,
+      format: options?.format,
       quality: options?.quality,
       condition: (orig: { width: number }) => orig.width > w,
     }));
@@ -38,9 +38,7 @@ export function generateResponsiveVariants(
 /**
  * Resolve a responsive preset name to width array.
  */
-export function resolvePresetWidths(
-  preset: 'nextjs' | 'compact' | 'none' | number[],
-): readonly number[] | null {
+export function resolvePresetWidths(preset: 'nextjs' | 'compact' | 'none' | number[]): readonly number[] | null {
   if (preset === 'none') return null;
   if (preset === 'nextjs') return DEVICE_WIDTHS;
   if (preset === 'compact') return COMPACT_WIDTHS;
@@ -130,7 +128,7 @@ export const PROCESSING_PRESETS: Record<ProcessingPresetName, Partial<Processing
    * - No original variant stored
    * - Always processes for consistency
    */
-  'thumbnail': {
+  thumbnail: {
     maxWidth: 300,
     maxHeight: 300,
     format: 'webp',
@@ -146,9 +144,7 @@ export const PROCESSING_PRESETS: Record<ProcessingPresetName, Partial<Processing
  * Resolve a processing preset by name.
  * Returns undefined if preset name is not recognized.
  */
-export function resolveProcessingPreset(
-  name: ProcessingPresetName | undefined,
-): Partial<ProcessingConfig> | undefined {
+export function resolveProcessingPreset(name: ProcessingPresetName | undefined): Partial<ProcessingConfig> | undefined {
   if (!name) return undefined;
   return PROCESSING_PRESETS[name];
 }

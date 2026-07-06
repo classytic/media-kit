@@ -1,6 +1,6 @@
 {
   "name": "@classytic/media-kit",
-  "version": "3.3.1",
+  "version": "3.4.0",
   "description": "Engine-factory media management for Mongoose and Arc — arc-compatible events, dynamic multi-tenancy, pluggable storage drivers, smart pagination, image processing",
   "type": "module",
   "sideEffects": false,
@@ -48,6 +48,10 @@
       "types": "./dist/schemas.d.mts",
       "import": "./dist/schemas.mjs"
     },
+    "./signing": {
+      "types": "./dist/signing.d.mts",
+      "import": "./dist/signing.mjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -68,7 +72,10 @@
     "test:watch": "vitest --project unit --project integration",
     "test:cleanup": "npx tsx tests/cleanup-s3-test-files.ts",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build && npm run test && npm run typecheck",
+    "lint": "biome check src/",
+    "lint:fix": "biome check src/ --write",
+    "check": "biome ci src/ --diagnostic-level=error",
+    "prepublishOnly": "npm run check && npm run build && npm run typecheck && npm run test && npm run test:smoke",
     "publish:dry": "npm publish --dry-run --access public",
     "publish:npm": "npm publish --access public",
     "release": "npm run build && npm run test && npm run typecheck && npm publish --access public",
@@ -145,10 +152,11 @@
     "@arethetypeswrong/core": ">=0.18.2",
     "@aws-sdk/client-s3": ">=3.1014.0",
     "@aws-sdk/s3-request-presigner": ">=3.1014.0",
+    "@biomejs/biome": "^2.5.2",
     "@classytic/dev-tools": "^0.2.0",
-    "@classytic/mongokit": "^3.16.0",
+    "@classytic/mongokit": "^3.18.0",
     "@classytic/primitives": "^0.6.0",
-    "@classytic/repo-core": "^0.6.0",
+    "@classytic/repo-core": "^0.7.0",
     "@google-cloud/storage": ">=7.19.0",
     "@types/mime-types": ">=3.0.1",
     "@types/node": ">=22.0.0",

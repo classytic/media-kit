@@ -84,6 +84,53 @@ describe('createMedia() — Zod config validation', () => {
     });
     expect(engine.config.softDelete?.enabled).toBe(true);
     expect(engine.config.softDelete?.ttlDays).toBe(30); // schema default
+    expect(engine.config.softDelete?.ttlIndex).toBe(false); // TTL index is opt-in
+    await engine.dispose();
+  });
+
+  it('softDelete without ttlIndex creates NO TTL index (schema NOR collection — opt-in contract)', async () => {
+    const conn = await getConnection();
+    const engine = await createMedia({
+      connection: conn,
+      driver: new MemoryStorageDriver(),
+      softDelete: { enabled: true, ttlDays: 30 },
+    });
+    // Schema level (buildMediaSchema gate)
+    const ttl = engine.models.Media.schema
+      .indexes()
+      .filter(([, options]) => (options as Record<string, unknown> | undefined)?.expireAfterSeconds !== undefined);
+    expect(ttl).toHaveLength(0);
+    // Collection level — mongokit's softDeletePlugin({ ttlDays }) creates the
+    // TTL index directly on the collection; ttlDays must NOT be forwarded
+    // unless ttlIndex: true.
+    await engine.models.Media.init();
+    await new Promise((resolve) => setTimeout(resolve, 200)); // settle fire-and-forget createIndex
+    const collectionIndexes = await engine.models.Media.collection.indexes();
+    expect(collectionIndexes.filter((idx) => idx.expireAfterSeconds !== undefined)).toHaveLength(0);
+    await engine.dispose();
+  });
+
+  it('softDelete.ttlIndex: true creates the deletedAt TTL index (ttlDays window)', async () => {
+    const conn = await getConnection();
+    const engine = await createMedia({
+      connection: conn,
+      driver: new MemoryStorageDriver(),
+      softDelete: { enabled: true, ttlDays: 30, ttlIndex: true },
+    });
+    const ttl = engine.models.Media.schema
+      .indexes()
+      .filter(([, options]) => (options as Record<string, unknown> | undefined)?.expireAfterSeconds !== undefined);
+    expect(ttl).toHaveLength(1);
+    expect((ttl[0]![0] as Record<string, unknown>).deletedAt).toBe(1);
+    expect((ttl[0]![1] as Record<string, unknown>).expireAfterSeconds).toBe(30 * 86400);
+    // Collection level: schema index build (Model.init) + plugin createIndex
+    // converge on the same spec.
+    await engine.models.Media.init();
+    const collectionIndexes = await engine.models.Media.collection.indexes();
+    const ttlCollection = collectionIndexes.filter((idx) => idx.expireAfterSeconds !== undefined);
+    expect(ttlCollection).toHaveLength(1);
+    expect(ttlCollection[0]!.expireAfterSeconds).toBe(30 * 86400);
+    expect(ttlCollection[0]!.key).toEqual({ deletedAt: 1 });
     await engine.dispose();
   });
 

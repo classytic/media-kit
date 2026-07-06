@@ -16,10 +16,11 @@
  * ```
  */
 
+import type { Storage, Bucket, FileMetadata } from '@google-cloud/storage';
 import type { StorageDriver, WriteResult, FileStat, PresignedUploadResult, ResumableUploadSession } from '../types';
 import { withRetry, type RetryOptions } from '../utils/retry';
-import { Readable, pipeline } from 'stream';
-import { promisify } from 'util';
+import { pipeline } from 'node:stream';
+import { promisify } from 'node:util';
 
 const pipelineAsync = promisify(pipeline);
 
@@ -51,8 +52,8 @@ export interface GCSProviderConfig {
  */
 export class GCSProvider implements StorageDriver {
   readonly name = 'gcs';
-  private storage: any;
-  private bucketInstance: any;
+  private storage: Storage | null = null;
+  private bucketInstance: Bucket | null = null;
   private config: GCSProviderConfig;
 
   constructor(config: GCSProviderConfig) {
@@ -62,7 +63,7 @@ export class GCSProvider implements StorageDriver {
     };
   }
 
-  private async getStorage() {
+  private async getStorage(): Promise<Bucket> {
     if (!this.storage) {
       try {
         const { Storage } = await import('@google-cloud/storage');
@@ -76,11 +77,11 @@ export class GCSProvider implements StorageDriver {
         this.bucketInstance = this.storage.bucket(this.config.bucket);
       } catch {
         throw new Error(
-          '@google-cloud/storage is required for GCSProvider. Install it with: npm install @google-cloud/storage'
+          '@google-cloud/storage is required for GCSProvider. Install it with: npm install @google-cloud/storage',
         );
       }
     }
-    return this.bucketInstance;
+    return this.bucketInstance!;
   }
 
   /**
@@ -130,14 +131,18 @@ export class GCSProvider implements StorageDriver {
 
     if (Buffer.isBuffer(data)) {
       await withRetry(
-        () => file.save(data, {
-          metadata: {
-            contentType,
-          },
-        }),
-        this.getRetryOptions()
+        () =>
+          file.save(data, {
+            metadata: {
+              contentType,
+            },
+          }),
+        this.getRetryOptions(),
       );
     } else {
+      // Stream bodies are single-shot: after a failed pipeline the source
+      // stream is (partially) consumed, so a retry would upload truncated
+      // data. Buffers (above) are re-readable and safe to retry.
       const writable = file.createWriteStream({
         metadata: {
           contentType,
@@ -145,10 +150,7 @@ export class GCSProvider implements StorageDriver {
         resumable: false,
       });
 
-      await withRetry(
-        () => pipelineAsync(data as NodeJS.ReadableStream, writable),
-        this.getRetryOptions()
-      );
+      await pipelineAsync(data as NodeJS.ReadableStream, writable);
     }
 
     if (this.config.makePublic) {
@@ -190,8 +192,9 @@ export class GCSProvider implements StorageDriver {
     try {
       await withRetry(() => file.delete(), this.getRetryOptions());
       return true;
-    } catch (err: any) {
-      if (err?.code === 404 || err?.errors?.[0]?.reason === 'notFound') {
+    } catch (err: unknown) {
+      const e = err as { code?: unknown; errors?: Array<{ reason?: string }> };
+      if (e?.code === 404 || e?.errors?.[0]?.reason === 'notFound') {
         return false;
       }
       throw err;
@@ -218,15 +221,15 @@ export class GCSProvider implements StorageDriver {
     const actualKey = this.extractKey(key);
     const file = bucket.file(actualKey);
 
-    const result = await withRetry<[any]>(() => file.getMetadata(), this.getRetryOptions());
-    const metadata = result[0];
+    const result = await withRetry(() => file.getMetadata(), this.getRetryOptions());
+    const metadata: FileMetadata = result[0];
 
     return {
-      size: parseInt(metadata.size, 10) || 0,
+      size: parseInt(String(metadata.size ?? '0'), 10) || 0,
       contentType: metadata.contentType || 'application/octet-stream',
       lastModified: metadata.updated ? new Date(metadata.updated) : undefined,
       etag: metadata.etag,
-      metadata: metadata.metadata,
+      metadata: metadata.metadata as Record<string, string> | undefined,
     };
   }
 
@@ -235,13 +238,10 @@ export class GCSProvider implements StorageDriver {
    */
   async *list(prefix: string): AsyncIterable<string> {
     const bucket = await this.getStorage();
-    const [files] = await withRetry<[any[]]>(
-      () => bucket.getFiles({ prefix }),
-      this.getRetryOptions()
-    );
+    const [files] = await withRetry(() => bucket.getFiles({ prefix }), this.getRetryOptions());
 
     for (const file of files) {
-      yield file.name as string;
+      yield file.name;
     }
   }
 
@@ -389,7 +389,7 @@ export class GCSProvider implements StorageDriver {
         // 308 Resume Incomplete — parse Range header
         const range = response.headers.get('range');
         const match = range?.match(/bytes=(\d+)-(\d+)/);
-        return { uploadedBytes: match ? parseInt(match[2]!) + 1 : 0 };
+        return { uploadedBytes: match ? parseInt(match[2]!, 10) + 1 : 0 };
       }
 
       if (response.status === 200 || response.status === 201) {
@@ -403,5 +403,3 @@ export class GCSProvider implements StorageDriver {
     }
   }
 }
-
-export default GCSProvider;

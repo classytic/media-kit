@@ -96,9 +96,7 @@ export class LazySecret {
       try {
         const resolved = await resolver();
         if (!resolved) {
-          throw new Error(
-            `${this.label} resolver returned an empty value — credentials cannot be empty`,
-          );
+          throw new Error(`${this.label} resolver returned an empty value — credentials cannot be empty`);
         }
         this.cached = resolved;
         return resolved;
@@ -130,9 +128,7 @@ export function validateSecretValue(value: SecretValue | undefined | null, label
     return;
   }
   if (typeof value !== 'function') {
-    throw new Error(
-      `${label} must be a string or a () => string | Promise<string> resolver, got ${typeof value}`,
-    );
+    throw new Error(`${label} must be a string or a () => string | Promise<string> resolver, got ${typeof value}`);
   }
   // Function form — defer validation to first use.
 }

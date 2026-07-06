@@ -6,7 +6,7 @@
  * Re-exports relevant mongokit types for convenience.
  */
 
-import type { Document, Schema, Model, Types } from 'mongoose';
+import type { Document, Model, Types } from 'mongoose';
 
 // Repo-core-owned types — sourced from `@classytic/repo-core`. Mongokit
 // 3.12 dropped its re-exports of these so the org has one canonical home;
@@ -101,6 +101,19 @@ export interface PresignedUploadResult {
 }
 
 /**
+ * Per-write options passed to StorageDriver.write().
+ *
+ * Currently carries the per-object ACL for drivers that support one (S3).
+ * Drivers that don't (Local, GCS with uniform bucket-level access,
+ * Cloudinary/ImageKit/imgbb) simply ignore it — GCS in particular relies on
+ * bucket-level IAM for privacy, not per-object ACLs.
+ */
+export interface StorageWriteOptions {
+  /** Per-object ACL override (S3 only). Falls back to the provider-level `acl` config. */
+  acl?: 'private' | 'public-read' | 'authenticated-read' | undefined;
+}
+
+/**
  * Storage driver interface (Directus-inspired)
  *
  * Implement this for custom storage backends. Core methods are required;
@@ -112,8 +125,13 @@ export interface StorageDriver {
 
   // --- Core (required) ---
 
-  /** Write data to storage. Accepts Buffer or ReadableStream. */
-  write(key: string, data: Buffer | NodeJS.ReadableStream, contentType: string): Promise<WriteResult>;
+  /** Write data to storage. Accepts Buffer or ReadableStream. `options` is a per-write hint bag (ACL, ...) — drivers MAY ignore it. */
+  write(
+    key: string,
+    data: Buffer | NodeJS.ReadableStream,
+    contentType: string,
+    options?: StorageWriteOptions,
+  ): Promise<WriteResult>;
 
   /** Read a file as a stream. Supports optional byte-range for partial reads. */
   read(key: string, range?: { start: number; end: number }): Promise<NodeJS.ReadableStream>;
@@ -158,7 +176,11 @@ export interface StorageDriver {
   signUploadPart?(key: string, uploadId: string, partNumber: number, expiresIn?: number): Promise<SignedPartResult>;
 
   /** Complete a multipart upload by assembling parts */
-  completeMultipartUpload?(key: string, uploadId: string, parts: CompletedPart[]): Promise<{ etag: string; size: number }>;
+  completeMultipartUpload?(
+    key: string,
+    uploadId: string,
+    parts: CompletedPart[],
+  ): Promise<{ etag: string; size: number }>;
 
   /** Abort a multipart upload and clean up uploaded parts */
   abortMultipartUpload?(key: string, uploadId: string): Promise<void>;
@@ -166,7 +188,11 @@ export interface StorageDriver {
   // --- Resumable Upload (GCS-style) ---
 
   /** Create a resumable upload session (single URI, client pushes chunks via Content-Range) */
-  createResumableUpload?(key: string, contentType: string, options?: { size?: number }): Promise<ResumableUploadSession>;
+  createResumableUpload?(
+    key: string,
+    contentType: string,
+    options?: { size?: number },
+  ): Promise<ResumableUploadSession>;
 
   /** Abort a resumable upload by deleting the session */
   abortResumableUpload?(sessionUri: string): Promise<void>;
@@ -284,6 +310,8 @@ export interface BatchPresignInput {
   files: Array<{
     filename: string;
     contentType: string;
+    /** Declared size in bytes — checked against fileTypes.maxSize before signing */
+    size?: number;
   }>;
   /** Shared folder for all files */
   folder?: string;
@@ -407,9 +435,12 @@ export interface QualityMap {
  */
 export interface VideoAdapter {
   /** Extract a thumbnail frame. Returns buffer or null. */
-  extractThumbnail(filePath: string, options?: {
-    timestamp?: number;
-  }): Promise<{
+  extractThumbnail(
+    filePath: string,
+    options?: {
+      timestamp?: number;
+    },
+  ): Promise<{
     buffer: Buffer;
     mimeType: string;
     width: number;
@@ -445,7 +476,10 @@ export interface VideoAdapter {
  */
 export interface RawAdapter {
   /** Convert RAW buffer to a Sharp-processable format (TIFF/JPEG/PNG) */
-  convert(buffer: Buffer, mimeType: string): Promise<{
+  convert(
+    buffer: Buffer,
+    mimeType: string,
+  ): Promise<{
     buffer: Buffer;
     mimeType: string;
   }>;
@@ -575,7 +609,7 @@ export interface ImageAdapter {
   /** Check if image is already well-optimized (skip re-compression) */
   isOptimized?(buffer: Buffer, mimeType: string): Promise<boolean>;
   /** Extract image metadata (EXIF, ICC, etc.) */
-  extractMetadata?(buffer: Buffer): Promise<Record<string, any>>;
+  extractMetadata?(buffer: Buffer): Promise<Record<string, unknown>>;
 }
 
 /**
@@ -612,6 +646,21 @@ export interface ProcessedImage {
  * File status lifecycle (Directus/Mux pattern)
  */
 export type MediaStatus = 'pending' | 'processing' | 'ready' | 'error';
+
+/**
+ * Access visibility of a media document.
+ *
+ * - `'public'` — served with long-lived public cache headers, URL is stable
+ *   and unauthenticated (default; pre-3.4.0 behavior).
+ * - `'private'` — the serve pipeline (AssetTransformService) refuses to send
+ *   bytes unless the request carries a valid HMAC signature (`/signing`) or
+ *   the host's `authorize` callback approves it.
+ *
+ * Deliberately named `visibility` (NOT `access`) to avoid concept collision
+ * with `@classytic/access`, the org's entitlement engine — which plugs in via
+ * the `authorize` callback, never via imports.
+ */
+export type MediaVisibility = 'public' | 'private';
 
 /**
  * EXIF metadata extracted from images
@@ -664,6 +713,20 @@ export interface IMedia {
   status: MediaStatus;
   /** Error message if status === 'error' */
   errorMessage?: string;
+
+  // --- Access control ---
+
+  /**
+   * Access visibility. Default `'public'`. Optional in the type because
+   * documents created before 3.4.0 lack the field — absent means public.
+   */
+  visibility?: MediaVisibility;
+  /**
+   * Signed-URL revocation counter (default 0). `revokeAccess()` increments it,
+   * instantly invalidating every outstanding signed URL minted for this doc
+   * (signatures embed the version; verify checks it against this value).
+   */
+  tokenVersion?: number;
 
   // --- Organization ---
 
@@ -821,8 +884,24 @@ export interface DeduplicationConfig {
 export interface SoftDeleteConfig {
   /** Enable soft deletes (default: false) */
   enabled: boolean;
-  /** Auto-purge TTL in days (default: 30). Set 0 to disable auto-purge. */
+  /**
+   * Purge window in days (default: 30). Used as the default cutoff for
+   * `purgeDeleted()` — soft-deleted docs older than this are eligible for
+   * purge. Set 0 to disable the default cutoff. Also feeds the optional
+   * MongoDB TTL index when `ttlIndex: true`.
+   */
   ttlDays?: number;
+  /**
+   * Create a MongoDB TTL index on `deletedAt` so Mongo itself removes
+   * soft-deleted DOCUMENTS after `ttlDays` (default: false).
+   *
+   * WARNING: Mongo's TTL sweeper deletes the document only, with NO hooks —
+   * the storage object (S3/GCS/local file) and its variants are NOT deleted
+   * and are orphaned forever. Only enable this when a bucket lifecycle rule
+   * (or acceptable orphaning) covers the blobs. The supported cleanup path
+   * is a `purgeDeleted()` cron, which removes storage + DB together.
+   */
+  ttlIndex?: boolean | undefined;
 }
 
 /**
@@ -856,6 +935,65 @@ export interface ImportOptions {
 }
 
 /**
+ * Default-visibility policy for new uploads.
+ *
+ * Precedence at upload time (first match wins):
+ *   1. explicit per-upload `visibility` option
+ *   2. `byFolder` rule — longest matching folder prefix (a rule for
+ *      `'invoices'` also covers `'invoices/2026'`)
+ *   3. `default`
+ *   4. `'public'`
+ */
+export interface VisibilityConfig {
+  /** Fallback visibility when no folder rule matches (default: 'public'). */
+  default?: MediaVisibility | undefined;
+  /** Folder-path → visibility rules. Longest prefix (by path segment) wins. */
+  byFolder?: Record<string, MediaVisibility> | undefined;
+}
+
+/**
+ * HMAC URL-signing configuration for private media serving.
+ *
+ * Constructing the engine with this config creates ONE `UrlSigner`
+ * (see `@classytic/media-kit/signing`) shared by the repository
+ * (`getSignedAssetUrl()`) and the transform service (verification).
+ *
+ * Why not storage-native presigning? S3/GCS presigned GETs cap at 7 days and
+ * only exist on S3/GCS. The HMAC proxy works on every driver and supports
+ * arbitrary TTLs — required for URLs handed to LLM providers, which re-fetch
+ * them anonymously on every chat-history replay.
+ */
+export interface MediaSigningConfig {
+  /** Keyring: kid → secret. Keep N-1 old keys during rotation. */
+  keys?: Record<string, string> | undefined;
+  /** Single-secret convenience (kid `k1`). Mutually exclusive with `keys`. */
+  secret?: string | undefined;
+  /** Kid used for new signatures. Required with a multi-key ring. */
+  currentKid?: string | undefined;
+  /** Default TTL in seconds for minted URLs (default: 3600). */
+  defaultTtl?: number | undefined;
+  /**
+   * Path (or absolute URL) of the host route that fronts
+   * `AssetTransformService.handle()` — e.g. `'/media/content'`.
+   * `getSignedAssetUrl()` mints `${servePath}/${id}[/variant]?<signed query>`.
+   */
+  servePath: string;
+}
+
+/**
+ * Host authorization callback for serving PRIVATE media without a signature
+ * (session-based access — e.g. a tenant admin browsing their own library).
+ *
+ * This is the bridge point for entitlement engines: a host using
+ * `@classytic/access` implements this callback with `access.check(...)` —
+ * media-kit never imports that package.
+ *
+ * Contract: return `true` to allow. Returning `false`, or THROWING, denies
+ * with 403 (fail-closed — an erroring authorizer must never leak bytes).
+ */
+export type ServeAuthorize = (request: TransformRequest, media: IMediaDocument) => boolean | Promise<boolean>;
+
+/**
  * Main media-kit configuration
  */
 export interface MediaKitConfig {
@@ -883,6 +1021,10 @@ export interface MediaKitConfig {
   plugins?: import('@classytic/mongokit').PluginType[];
   /** Pagination configuration for the repository */
   pagination?: import('@classytic/mongokit').PaginationConfig;
+  /** Default-visibility policy for new uploads (folder rules win over default). */
+  visibility?: VisibilityConfig;
+  /** HMAC URL-signing config — enables `getSignedAssetUrl()` + signed private serving. */
+  signing?: MediaSigningConfig;
 }
 
 /**
@@ -955,6 +1097,11 @@ export interface UploadInput {
   provider?: string;
   /** Expiry timestamp. When set, the asset will be eligible for purgeExpired() cleanup. */
   expiresAt?: Date;
+  /**
+   * Access visibility for this upload. Overrides the engine's
+   * `visibility.byFolder` / `visibility.default` policy. Default: 'public'.
+   */
+  visibility?: MediaVisibility;
 }
 
 /**
@@ -975,7 +1122,11 @@ export interface ConfirmUploadInput {
   alt?: string;
   /** Title */
   title?: string;
-  /** Override public URL */
+  /**
+   * @deprecated Ignored since 3.4.0 — the stored URL is always derived from
+   * the storage driver. When provided it is only validated (absolute http(s),
+   * origin must match the storage origin) and rejected with a 400 otherwise.
+   */
   url?: string;
   /** Hash strategy: 'skip' (placeholder, default), 'etag' (use storage ETag), 'sha256' (stream file — expensive). Only use 'sha256' with deduplication enabled. */
   hashStrategy?: HashStrategy;
@@ -985,6 +1136,13 @@ export interface ConfirmUploadInput {
   process?: boolean;
   /** Expiry timestamp for the confirmed asset. Eligible for purgeExpired() cleanup. */
   expiresAt?: Date;
+  /**
+   * Access visibility for the confirmed asset. Overrides the engine's
+   * `visibility.byFolder` / `visibility.default` policy. Default: 'public'.
+   * Note: presigned PUTs write with the provider-level ACL — for strictly
+   * private objects use a private bucket (recommended for private serving).
+   */
+  visibility?: MediaVisibility;
 }
 
 /**
@@ -1215,12 +1373,26 @@ export interface TransformParams {
 export interface TransformRequest {
   /** File ID or storage key */
   fileId: string;
+  /** Variant name from the request path (serves that variant's bytes; signed URLs bind it). */
+  variant?: string | undefined;
   /** Transform parameters */
   params: TransformParams;
   /** Accept header for content negotiation */
   accept?: string;
   /** Range header for partial content */
   range?: string;
+  /**
+   * Decoded query params of the incoming request. Carries the signed-URL
+   * fields (`e`, `kid`, `v`, `sig`, `c.*`) when present — required for
+   * signature verification of private media.
+   */
+  query?: Record<string, string> | undefined;
+  /**
+   * Opaque host session/user object (e.g. `req.user`, arc's `req.scope`).
+   * Media-kit never inspects it — it is handed verbatim to the host's
+   * `authorize` callback for private, unsigned requests.
+   */
+  principal?: unknown | undefined;
 }
 
 /**
@@ -1250,4 +1422,3 @@ export interface TransformCache {
   /** Invalidate all transforms for a file */
   invalidate(fileId: string): Promise<void>;
 }
-

@@ -12,6 +12,10 @@ on the fly -- with automatic caching so each combination is only computed once.
 This is ideal for responsive images, `<picture>` elements, and CDN edge delivery
 where the final dimensions or format depend on the client.
 
+> **Private files:** since 3.4.0 the same service enforces `visibility: 'private'`
+> (signed URLs / `authorize` callback) before serving any bytes — see
+> [Private Media](./private-media.mdx).
+
 ## Setup
 
 Install Sharp (required for image transforms):

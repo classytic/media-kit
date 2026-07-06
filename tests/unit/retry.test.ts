@@ -21,14 +21,17 @@ describe('isRetryableError', () => {
     expect(isRetryableError(new Error('Slow down'))).toBe(true);
   });
 
-  it('should return true for server errors', () => {
+  it('should return true for server errors (structured status, not message substrings)', () => {
     expect(isRetryableError(new Error('service unavailable'))).toBe(true);
     expect(isRetryableError(new Error('internal server error'))).toBe(true);
-    expect(isRetryableError(new Error('HTTP 500'))).toBe(true);
-    expect(isRetryableError(new Error('HTTP 502'))).toBe(true);
-    expect(isRetryableError(new Error('HTTP 503'))).toBe(true);
-    expect(isRetryableError(new Error('HTTP 504'))).toBe(true);
-    expect(isRetryableError(new Error('Error 429: Too many requests'))).toBe(true);
+    // Bare digit substrings ("HTTP 500") are no longer matched — use the
+    // structured status shapes instead.
+    expect(isRetryableError(Object.assign(new Error('HTTP 500'), { statusCode: 500 }))).toBe(true);
+    expect(isRetryableError(Object.assign(new Error('HTTP 502'), { status: 502 }))).toBe(true);
+    expect(isRetryableError(Object.assign(new Error('HTTP 504'), { code: 504 }))).toBe(true);
+    expect(
+      isRetryableError(Object.assign(new Error('Too many requests'), { statusCode: 429 })),
+    ).toBe(true);
   });
 
   it('should return false for non-retryable errors', () => {
@@ -36,6 +39,32 @@ describe('isRetryableError', () => {
     expect(isRetryableError(new Error('Access denied'))).toBe(false);
     expect(isRetryableError(new Error('Invalid argument'))).toBe(false);
     expect(isRetryableError(new Error('Validation failed'))).toBe(false);
+  });
+
+  it('prefers structured signals over message text', () => {
+    // Node syscall codes are retryable regardless of message
+    expect(isRetryableError(Object.assign(new Error('boom'), { code: 'ECONNRESET' }))).toBe(true);
+    expect(isRetryableError(Object.assign(new Error('boom'), { code: 'ETIMEDOUT' }))).toBe(true);
+    expect(isRetryableError(Object.assign(new Error('boom'), { code: 'EPIPE' }))).toBe(true);
+
+    // AWS SDK v3 shapes
+    expect(
+      isRetryableError(Object.assign(new Error('boom'), { $metadata: { httpStatusCode: 503 } })),
+    ).toBe(true);
+    expect(isRetryableError(Object.assign(new Error('boom'), { $retryable: { throttling: true } }))).toBe(true);
+
+    // A present non-retryable status is authoritative — even a "network"-y message must not override it
+    expect(
+      isRetryableError(Object.assign(new Error('network object missing'), { statusCode: 404 })),
+    ).toBe(false);
+    expect(
+      isRetryableError(Object.assign(new Error('denied'), { $metadata: { httpStatusCode: 403 } })),
+    ).toBe(false);
+  });
+
+  it('does not retry when a filename merely contains "500"', () => {
+    expect(isRetryableError(new Error("Failed to process 'IMG_500.jpg'"))).toBe(false);
+    expect(isRetryableError(new Error('uploads/500-panorama.png missing'))).toBe(false);
   });
 });
 

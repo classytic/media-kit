@@ -26,7 +26,11 @@ import type {
   ConcurrencyConfig,
   MediaCacheConfig,
   MediaKitLogger,
+  VisibilityConfig,
+  MediaSigningConfig,
+  ServeAuthorize,
 } from '../types.js';
+import type { UrlSigner } from '../signing/index.js';
 
 // ── MediaConfig (input to createMedia) ───────────────────────
 
@@ -111,6 +115,28 @@ export interface MediaConfig {
   pagination?: PaginationConfig;
 
   /**
+   * Default-visibility policy for new uploads. Per-upload `visibility`
+   * overrides `byFolder` rules, which override `default` ('public').
+   */
+  visibility?: VisibilityConfig;
+
+  /**
+   * HMAC URL-signing config. When set, createMedia() constructs ONE
+   * `UrlSigner` shared by `repositories.media.getSignedAssetUrl()` and the
+   * `AssetTransformService` (which picks it up from the engine automatically).
+   */
+  signing?: MediaSigningConfig;
+
+  /**
+   * Host authorization callback for private media served WITHOUT a valid
+   * signature (session access). Threaded to `AssetTransformService` via the
+   * engine. Return `true` to allow; `false` or a throw denies with 403
+   * (fail-closed). This is the bridge point for `@classytic/access`:
+   * implement it with `access.check(...)` — media-kit never imports it.
+   */
+  authorize?: ServeAuthorize;
+
+  /**
    * Schema extension point — add fields/indexes without forking.
    */
   schemaOptions?: {
@@ -169,6 +195,16 @@ export interface MediaEngine {
 
   /** Bridges passed in config (frozen). */
   readonly bridges: Readonly<MediaBridges>;
+
+  /**
+   * Shared HMAC URL signer — present when `signing` was configured.
+   * `AssetTransformService` reads it from here (via MediaTransformSource)
+   * unless explicitly overridden in its own config.
+   */
+  readonly signing?: UrlSigner | undefined;
+
+  /** Host authorize callback — passed through for the transform service. */
+  readonly authorize?: ServeAuthorize | undefined;
 
   /** Release resources. Safe to call multiple times. */
   dispose(): Promise<void>;

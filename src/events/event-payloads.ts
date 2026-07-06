@@ -60,6 +60,12 @@ export interface AssetImportedPayload {
 export interface AssetPurgedPayload {
   count: number;
   olderThan?: Date;
+  /**
+   * Which sweep produced the purge. Absent on events from `purgeDeleted()`
+   * (pre-3.4.0 emitters never stamped it); `'stale_pending'` on events from
+   * `purgeStalePending()`.
+   */
+  reason?: 'stale_pending' | undefined;
 }
 
 // ── Tag payloads ──────────────────────────────────────────

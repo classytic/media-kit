@@ -55,6 +55,20 @@ describe('Zod schemas', () => {
       expect(parsed.softDelete?.ttlDays).toBe(60);
     });
 
+    it('defaults softDelete.ttlIndex to false (TTL index is opt-in)', () => {
+      const parsed = mediaConfigSchema.parse({
+        softDelete: { enabled: true, ttlDays: 30 },
+      });
+      expect(parsed.softDelete?.ttlIndex).toBe(false);
+    });
+
+    it('accepts softDelete.ttlIndex: true', () => {
+      const parsed = mediaConfigSchema.parse({
+        softDelete: { enabled: true, ttlDays: 30, ttlIndex: true },
+      });
+      expect(parsed.softDelete?.ttlIndex).toBe(true);
+    });
+
     it('rejects negative ttlDays', () => {
       expect(() =>
         mediaConfigSchema.parse({ softDelete: { enabled: true, ttlDays: -1 } }),

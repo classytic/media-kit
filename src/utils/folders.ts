@@ -57,7 +57,7 @@ export function buildFolderTree(folders: FolderStats[]): FolderTree {
       const parentPath = parts.slice(0, -1).join('/');
       const parent = ensureNode(parentPath);
       // Only add if not already a child (idempotent)
-      if (!parent.children.some(c => c.path === path)) {
+      if (!parent.children.some((c) => c.path === path)) {
         parent.children.push(node);
       }
     }
@@ -75,9 +75,8 @@ export function buildFolderTree(folders: FolderStats[]): FolderTree {
     node.stats.count += item.count;
     node.stats.size += item.totalSize;
     if (item.latestUpload) {
-      node.latestUpload = !node.latestUpload || item.latestUpload > node.latestUpload
-        ? item.latestUpload
-        : node.latestUpload;
+      node.latestUpload =
+        !node.latestUpload || item.latestUpload > node.latestUpload ? item.latestUpload : node.latestUpload;
     }
   }
 
@@ -99,9 +98,8 @@ export function buildFolderTree(folders: FolderStats[]): FolderTree {
 
     // Propagate latest upload
     if (node.latestUpload) {
-      parent.latestUpload = !parent.latestUpload || node.latestUpload > parent.latestUpload
-        ? node.latestUpload
-        : parent.latestUpload;
+      parent.latestUpload =
+        !parent.latestUpload || node.latestUpload > parent.latestUpload ? node.latestUpload : parent.latestUpload;
     }
   }
 
@@ -168,9 +166,8 @@ export function getDirectChildren(folders: FolderStats[], parentPath: string): F
       node.stats.count += item.count;
       node.stats.size += item.totalSize;
       if (item.latestUpload) {
-        node.latestUpload = !node.latestUpload || item.latestUpload > node.latestUpload
-          ? item.latestUpload
-          : node.latestUpload;
+        node.latestUpload =
+          !node.latestUpload || item.latestUpload > node.latestUpload ? item.latestUpload : node.latestUpload;
       }
       continue;
     }
@@ -197,9 +194,8 @@ export function getDirectChildren(folders: FolderStats[], parentPath: string): F
     node.stats.count += item.count;
     node.stats.size += item.totalSize;
     if (item.latestUpload) {
-      node.latestUpload = !node.latestUpload || item.latestUpload > node.latestUpload
-        ? item.latestUpload
-        : node.latestUpload;
+      node.latestUpload =
+        !node.latestUpload || item.latestUpload > node.latestUpload ? item.latestUpload : node.latestUpload;
     }
   }
 
@@ -219,7 +215,7 @@ export function getDirectChildren(folders: FolderStats[], parentPath: string): F
 export function renameFolderPaths(
   paths: string[],
   oldPrefix: string,
-  newPrefix: string
+  newPrefix: string,
 ): Array<{ oldPath: string; newPath: string }> {
   const results: Array<{ oldPath: string; newPath: string }> = [];
 

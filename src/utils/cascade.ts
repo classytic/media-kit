@@ -116,10 +116,7 @@ function collectMediaIds(doc: Record<string, unknown>, fields: readonly string[]
  * Fire `repository.hardDelete` for every media id referenced by `doc`.
  * Errors are routed through `options.onError`.
  */
-async function cascadeForDoc(
-  doc: Record<string, unknown>,
-  options: MediaCascadeOptions,
-): Promise<void> {
+async function cascadeForDoc(doc: Record<string, unknown>, options: MediaCascadeOptions): Promise<void> {
   const ids = collectMediaIds(doc, options.fields);
   if (ids.length === 0) return;
 
@@ -132,10 +129,10 @@ async function cascadeForDoc(
       await options.repository.hardDelete(id, ctx);
     } catch (err) {
       if (onError === 'throw') throw err;
-      logger.warn?.(
-        '[media-kit/cascade] Failed to hardDelete media during owner cascade',
-        { mediaId: id, error: err instanceof Error ? err.message : String(err) },
-      );
+      logger.warn?.('[media-kit/cascade] Failed to hardDelete media during owner cascade', {
+        mediaId: id,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 }
@@ -158,9 +155,7 @@ const STASH_KEY = '_mediaCascadeDocs';
  */
 export function withMediaCascade(schema: Schema, options: MediaCascadeOptions): void {
   if (!options.fields || options.fields.length === 0) {
-    throw new Error(
-      '[media-kit/cascade] `withMediaCascade` requires at least one field name in `options.fields`.',
-    );
+    throw new Error('[media-kit/cascade] `withMediaCascade` requires at least one field name in `options.fields`.');
   }
   if (!options.repository || typeof options.repository.hardDelete !== 'function') {
     throw new Error(
@@ -171,7 +166,7 @@ export function withMediaCascade(schema: Schema, options: MediaCascadeOptions): 
   // ── findOneAndDelete (query middleware) ──
   // The post hook receives the deleted doc directly as the first arg; no
   // pre-stash needed.
-  schema.post('findOneAndDelete', async function (doc) {
+  schema.post('findOneAndDelete', async (doc) => {
     if (doc) await cascadeForDoc(doc as Record<string, unknown>, options);
   });
 
@@ -185,9 +180,7 @@ export function withMediaCascade(schema: Schema, options: MediaCascadeOptions): 
     (this as unknown as Record<string, unknown>)[STASH_KEY] = found ? [found] : [];
   });
   schema.post('deleteOne', { document: false, query: true }, async function () {
-    const docs = (this as unknown as Record<string, unknown>)[STASH_KEY] as
-      | Record<string, unknown>[]
-      | undefined;
+    const docs = (this as unknown as Record<string, unknown>)[STASH_KEY] as Record<string, unknown>[] | undefined;
     if (!docs) return;
     for (const doc of docs) await cascadeForDoc(doc, options);
   });
@@ -205,9 +198,7 @@ export function withMediaCascade(schema: Schema, options: MediaCascadeOptions): 
     (this as unknown as Record<string, unknown>)[STASH_KEY] = Array.isArray(found) ? found : [];
   });
   schema.post('deleteMany', async function () {
-    const docs = (this as unknown as Record<string, unknown>)[STASH_KEY] as
-      | Record<string, unknown>[]
-      | undefined;
+    const docs = (this as unknown as Record<string, unknown>)[STASH_KEY] as Record<string, unknown>[] | undefined;
     if (!docs) return;
     for (const doc of docs) await cascadeForDoc(doc, options);
   });

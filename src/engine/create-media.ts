@@ -33,7 +33,7 @@
 
 import type { MediaConfig, MediaEngine, ResolvedMediaConfig } from './engine-types.js';
 import type { EventTransport } from '@classytic/primitives/events';
-import type { ImageAdapter } from '../types.js';
+import type { ImageAdapter, MediaKitConfig } from '../types.js';
 import { InProcessMediaBus } from '../events/in-process-bus.js';
 import { createMediaModels } from '../models/create-models.js';
 import { resolveMediaTenant } from '../models/inject-tenant.js';
@@ -42,6 +42,7 @@ import { DriverRegistry } from '../providers/driver-registry.js';
 import { ImageProcessor } from '../processing/image.js';
 import { mergeConfig } from '../config.js';
 import { mediaConfigSchema } from '../validators/media-config.schema.js';
+import { createUrlSigner, type UrlSigner } from '../signing/index.js';
 
 export async function createMedia(config: MediaConfig): Promise<MediaEngine> {
   // Validate required fields
@@ -76,6 +77,8 @@ export async function createMedia(config: MediaConfig): Promise<MediaEngine> {
     concurrency: config.concurrency,
     schemaOptions: config.schemaOptions,
     suppressWarnings: config.suppressWarnings,
+    visibility: config.visibility,
+    signing: config.signing,
   });
 
   // Merge validated values back over the original config so non-validated
@@ -84,13 +87,26 @@ export async function createMedia(config: MediaConfig): Promise<MediaEngine> {
   const merged = { ...config, ...validated };
 
   // Resolve defaults (reuses v2 mergeConfig)
-  const resolved = mergeConfig(merged as any) as unknown as ResolvedMediaConfig;
+  const resolved = mergeConfig(merged as Partial<MediaKitConfig>) as unknown as ResolvedMediaConfig;
   resolved.connection = config.connection;
   resolved.tenant = resolveMediaTenant(config.tenant);
   resolved.schemaOptions = config.schemaOptions;
 
   // Resolve event transport (default: in-process bus)
   const events: EventTransport = config.eventTransport ?? new InProcessMediaBus({ logger: config.logger });
+
+  // Construct ONE UrlSigner shared by the repository (getSignedAssetUrl)
+  // and the transform service (signature verification via engine.signing).
+  // createUrlSigner fail-fasts on bad keyrings (no keys, missing currentKid).
+  let signer: UrlSigner | undefined;
+  if (config.signing) {
+    signer = createUrlSigner({
+      keys: config.signing.keys,
+      secret: config.signing.secret,
+      currentKid: config.signing.currentKid,
+      defaultTtl: config.signing.defaultTtl,
+    });
+  }
 
   // Initialize image processor
   let processor: ImageProcessor | ImageAdapter | null = null;
@@ -107,23 +123,22 @@ export async function createMedia(config: MediaConfig): Promise<MediaEngine> {
     });
     processor = sharpProcessor;
 
-    processorReady = sharpProcessor.waitUntilReady().then((available) => {
-      if (!available) {
+    processorReady = sharpProcessor
+      .waitUntilReady()
+      .then((available) => {
+        if (!available) {
+          processor = null;
+          if (!resolved.suppressWarnings) {
+            config.logger?.warn?.('Image processing disabled: sharp not available. Install with: npm install sharp');
+          }
+        }
+      })
+      .catch(() => {
         processor = null;
         if (!resolved.suppressWarnings) {
-          config.logger?.warn?.(
-            'Image processing disabled: sharp not available. Install with: npm install sharp',
-          );
+          config.logger?.warn?.('Image processing disabled: sharp not available. Install with: npm install sharp');
         }
-      }
-    }).catch(() => {
-      processor = null;
-      if (!resolved.suppressWarnings) {
-        config.logger?.warn?.(
-          'Image processing disabled: sharp not available. Install with: npm install sharp',
-        );
-      }
-    });
+      });
   } else {
     processorReady = Promise.resolve();
   }
@@ -143,6 +158,7 @@ export async function createMedia(config: MediaConfig): Promise<MediaEngine> {
     processorReady,
     logger: config.logger,
     bridges,
+    signing: signer,
   });
 
   // Build and freeze engine
@@ -158,6 +174,8 @@ export async function createMedia(config: MediaConfig): Promise<MediaEngine> {
     registry,
     driver: registry.defaultDriver,
     bridges,
+    signing: signer,
+    authorize: config.authorize,
     async dispose(): Promise<void> {
       await events.close?.();
     },
@@ -165,5 +183,3 @@ export async function createMedia(config: MediaConfig): Promise<MediaEngine> {
 
   return engine;
 }
-
-export default createMedia;

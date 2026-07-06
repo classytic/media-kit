@@ -255,6 +255,46 @@ const count = await media.purgeDeleted(new Date('2024-01-01'));
 
 ---
 
+### `purgeStalePending(olderThan?, context?)`
+
+Purge stale `status: 'pending'` rows left behind by crashed or abandoned uploads. `upload()` creates the DB row as `'pending'` before writing to storage and flips it to `'ready'` at the end -- a crash in between strands the row forever. This sweep hard-deletes (storage + DB) every pending row created before the cutoff.
+
+```typescript
+// Purge pending rows older than 24 hours (default — STALE_PENDING_MAX_AGE_MS)
+const count = await media.purgeStalePending();
+
+// Aggressive 1-hour window
+const count = await media.purgeStalePending(new Date(Date.now() - 3600_000));
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `olderThan` | `Date` | Cutoff date (defaults to 24 hours ago -- a genuinely in-flight upload never lives that long) |
+
+**Returns:** `Promise<number>` -- count of purged records
+
+Cron-safe and idempotent. A missing storage object (crash before the write) is tolerated -- the DB row is still removed. Emits `media:asset.purged` with `reason: 'stale_pending'`.
+
+> Abandoned **presigned** uploads are the opposite shape: an unconfirmed bucket object with NO DB row (`confirmUpload()` creates the row), invisible to any DB-driven sweep. Use a storage-lifecycle rule on the upload prefix instead (S3: `AbortIncompleteMultipartUpload` + expiration rule scoped to the presign folder; GCS: lifecycle age rule). media-kit deliberately does not implement bucket GC.
+
+---
+
+### Cleanup & data hygiene
+
+Three code-driven sweeps remove storage + DB together -- schedule each as a cron:
+
+| Sweep | Targets | Recommendation |
+|-------|---------|----------------|
+| `purgeDeleted()` | Soft-deleted docs past `softDelete.ttlDays` (default 30d) | Daily cron |
+| `purgeExpired()` | Docs whose `expiresAt` has passed | Hourly/daily cron |
+| `purgeStalePending()` | Crashed/abandoned uploads stuck in `'pending'` (>24h) | Daily cron |
+
+Since 3.4.0 the soft-delete Mongo TTL index is **opt-in** (`softDelete.ttlIndex: true`, default `false`): Mongo's TTL sweeper deletes the document with no hooks, so the storage blob would be orphaned. Only enable it when a bucket lifecycle rule (or acceptable orphaning) covers the blobs.
+
+---
+
 ### `importFromUrl(url, options?, context?)`
 
 Import a file from a remote URL. Streams the response, detects filename and MIME type from headers, and runs through the standard upload flow.
@@ -410,15 +450,17 @@ const result = await media.move(['id1', 'id2'], 'products/archived');
 
 ---
 
-### `getSignedUploadUrl(filename, contentType, options?)`
+### `getSignedUploadUrl(filename, contentType, options?, context?)`
 
 Generate a presigned upload URL for direct browser-to-cloud uploads. The driver must support `getSignedUploadUrl`.
 
 ```typescript
-const result = await media.getSignedUploadUrl('photo.jpg', 'image/jpeg', {
-  folder: 'uploads',
-  expiresIn: 3600,
-});
+const result = await media.getSignedUploadUrl(
+  'photo.jpg',
+  'image/jpeg',
+  { folder: 'uploads', expiresIn: 3600 },
+  { organizationId },
+);
 // { uploadUrl, key, publicUrl, expiresIn, headers? }
 ```
 
@@ -430,10 +472,13 @@ const result = await media.getSignedUploadUrl('photo.jpg', 'image/jpeg', {
 | `contentType` | `string` | MIME type |
 | `options.folder` | `string` | Target folder (defaults to `folders.defaultFolder`) |
 | `options.expiresIn` | `number` | Expiration in seconds (default: driver-specific) |
+| `context` | `MediaContext` | Tenant context — when it carries `organizationId`, the minted key embeds a `__t-<orgId>` tenant-binding segment |
 
 **Returns:** `Promise<PresignedUploadResult>`
 
 **Events:** `before:presignedUpload`, `after:presignedUpload`
+
+> **Tenant-bound keys.** Under a tenant context, keys are minted as `<folder>/__t-<orgId>/<timestamp>-<random>-<name>.<ext>` and `confirmUpload()` / `completeMultipartUpload()` only accept them from the SAME tenant (403 `media.confirm.tenant_mismatch` otherwise — including a segmentless key submitted under a tenant, or an org key submitted tenantless). A leaked unconfirmed key is unusable to anyone but the tenant it was minted for. Same applies to `generateBatchPutUrls()` and `initiateMultipartUpload()`, which also accept a trailing `context`. Single-tenant hosts (no `organizationId`) mint segmentless keys — unchanged behavior.
 
 ---
 
@@ -456,18 +501,67 @@ const file = await media.confirmUpload({
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `key` | `string` | Yes | Storage key from the presigned upload |
+| `key` | `string` | Yes | Storage key from the presigned upload — must match the minted shape AND the caller's tenant binding (see `getSignedUploadUrl`) |
 | `filename` | `string` | Yes | Original filename |
 | `mimeType` | `string` | Yes | MIME type |
 | `size` | `number` | Yes | File size in bytes |
 | `folder` | `string` | No | Target folder (derived from key if omitted) |
 | `alt` | `string` | No | Alt text |
 | `title` | `string` | No | Display title |
-| `url` | `string` | No | Override public URL |
+| `url` | `string` | No | Deprecated (3.4.0) — validated then ignored; URL is always derived from the storage driver |
 
 **Returns:** `Promise<IMediaDocument>`
 
 **Events:** `before:confirmUpload`, `after:confirmUpload`
+
+---
+
+### `getSignedAssetUrl(idOrDoc, options?, context?)`
+
+*Since 3.4.0.* Mint an HMAC-signed serve URL for an asset:
+`${servePath}/${id}[/variant]?e=...&kid=...&v=...&sig=...`. Requires the engine
+`signing` config (`{ keys | secret, servePath, currentKid?, defaultTtl? }`) —
+throws a typed `HttpError` (`code: 'media.signing.not_configured'`) otherwise.
+When a `CdnBridge` is configured, the minted URL is routed through
+`bridges.cdn.transform(key, url, { signed: true, ... })` and the bridge wins.
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `variant` | `string` | Bind the signature to a specific variant |
+| `expiresIn` | `number` | TTL in seconds (default: `signing.defaultTtl`, no 7-day cap) |
+| `claims` | `Record<string, string>` | Extra signed claims (`c.<key>=<value>` params) |
+
+**Returns:** `Promise<string>`
+
+See [Private Media](../guides/private-media.mdx).
+
+---
+
+### `revokeAccess(idOrDoc, context?)`
+
+*Since 3.4.0.* Atomically `$inc` the doc's `tokenVersion`, instantly
+invalidating every outstanding signed URL for the asset (verification compares
+the URL's embedded version to the doc's current value → `version_mismatch`).
+Routed through the normal repository update pipeline so tenant scoping and
+cache invalidation fire.
+
+**Returns:** `Promise<IMediaDocument>` (the updated doc)
+
+---
+
+### `getContextPayload(idOrDoc, options?, context?)`
+
+*Since 3.4.0.* Load an asset's bytes for LLM context — streams from the driver
+with a hard byte cap and optionally downscales images for token efficiency.
+Works regardless of `visibility` (server-side read).
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `as` | `'base64' \| 'dataUrl' \| 'buffer'` | `'base64'` | Output encoding |
+| `maxDimension` | `number` | `1568` | Downscale long edge above this (needs sharp; Anthropic sweet spot) |
+| `maxBytes` | `number` | `26214400` (25MB) | Hard cap — beyond it throws 413 `media.context.too_large` |
+
+**Returns:** `Promise<{ data: string | Buffer; contentType: string; bytes: number }>`
 
 ---
 

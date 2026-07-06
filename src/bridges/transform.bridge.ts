@@ -73,10 +73,7 @@ export interface TransformOpContext {
   userId?: string;
 }
 
-export type TransformOp = (
-  input: TransformOpInput,
-  ctx: TransformOpContext,
-) => Promise<TransformOpOutput>;
+export type TransformOp = (input: TransformOpInput, ctx: TransformOpContext) => Promise<TransformOpOutput>;
 
 export interface TransformBridge {
   /**

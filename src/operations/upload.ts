@@ -14,7 +14,6 @@ import type {
   EventResult,
   EventError,
 } from '../types';
-import type { MediaRepository } from '../repositories/media.repository';
 import { computeFileHash } from '../utils/hash';
 import { isImage } from '../utils/mime';
 import { normalizeFolderPath } from '../utils/folders';
@@ -173,8 +172,7 @@ async function performUpload(
   if (!alt && isImage(mimeType)) {
     const generateAltConfig = deps.config.processing?.generateAlt;
     if (generateAltConfig) {
-      const enabled =
-        typeof generateAltConfig === 'boolean' ? generateAltConfig : generateAltConfig.enabled;
+      const enabled = typeof generateAltConfig === 'boolean' ? generateAltConfig : generateAltConfig.enabled;
 
       if (enabled) {
         if (typeof generateAltConfig === 'object') {

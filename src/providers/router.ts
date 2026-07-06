@@ -28,7 +28,15 @@
  * ```
  */
 
-import type { StorageDriver, WriteResult, FileStat, PresignedUploadResult, SignedPartResult, CompletedPart, ResumableUploadSession } from '../types';
+import type {
+  StorageDriver,
+  WriteResult,
+  FileStat,
+  PresignedUploadResult,
+  SignedPartResult,
+  CompletedPart,
+  ResumableUploadSession,
+} from '../types';
 
 /**
  * A single routing rule
@@ -74,7 +82,7 @@ export class StorageRouter implements StorageDriver {
     if (!defaultDriver) {
       throw new Error(
         `StorageRouter: default driver '${config.default}' not found in drivers. ` +
-        `Available: ${Object.keys(this.drivers).join(', ')}`,
+          `Available: ${Object.keys(this.drivers).join(', ')}`,
       );
     }
     this.defaultDriver = defaultDriver;
@@ -84,13 +92,11 @@ export class StorageRouter implements StorageDriver {
       if (!this.drivers[rule.driver]) {
         throw new Error(
           `StorageRouter: route references driver '${rule.driver}' which is not in drivers. ` +
-          `Available: ${Object.keys(this.drivers).join(', ')}`,
+            `Available: ${Object.keys(this.drivers).join(', ')}`,
         );
       }
       if (!rule.prefix && !rule.match) {
-        throw new Error(
-          `StorageRouter: route for driver '${rule.driver}' must have either 'prefix' or 'match'`,
-        );
+        throw new Error(`StorageRouter: route for driver '${rule.driver}' must have either 'prefix' or 'match'`);
       }
     }
   }
@@ -104,7 +110,7 @@ export class StorageRouter implements StorageDriver {
       if (rule.prefix && key.startsWith(rule.prefix)) {
         return this.drivers[rule.driver]!;
       }
-      if (rule.match && rule.match(key)) {
+      if (rule.match?.(key)) {
         return this.drivers[rule.driver]!;
       }
     }
@@ -117,9 +123,7 @@ export class StorageRouter implements StorageDriver {
   getDriver(name: string): StorageDriver {
     const driver = this.drivers[name];
     if (!driver) {
-      throw new Error(
-        `StorageRouter: driver '${name}' not found. Available: ${Object.keys(this.drivers).join(', ')}`,
-      );
+      throw new Error(`StorageRouter: driver '${name}' not found. Available: ${Object.keys(this.drivers).join(', ')}`);
     }
     return driver;
   }
@@ -226,7 +230,12 @@ export class StorageRouter implements StorageDriver {
     return driver.createMultipartUpload(key, contentType);
   }
 
-  async signUploadPart(key: string, uploadId: string, partNumber: number, expiresIn?: number): Promise<SignedPartResult> {
+  async signUploadPart(
+    key: string,
+    uploadId: string,
+    partNumber: number,
+    expiresIn?: number,
+  ): Promise<SignedPartResult> {
     const driver = this.resolve(key);
     if (!driver.signUploadPart) {
       throw new Error(`Driver '${driver.name}' does not support multipart part signing`);
@@ -234,7 +243,11 @@ export class StorageRouter implements StorageDriver {
     return driver.signUploadPart(key, uploadId, partNumber, expiresIn);
   }
 
-  async completeMultipartUpload(key: string, uploadId: string, parts: CompletedPart[]): Promise<{ etag: string; size: number }> {
+  async completeMultipartUpload(
+    key: string,
+    uploadId: string,
+    parts: CompletedPart[],
+  ): Promise<{ etag: string; size: number }> {
     const driver = this.resolve(key);
     if (!driver.completeMultipartUpload) {
       throw new Error(`Driver '${driver.name}' does not support multipart completion`);
@@ -254,7 +267,11 @@ export class StorageRouter implements StorageDriver {
   // RESUMABLE UPLOAD METHODS (GCS-style)
   // ============================================
 
-  async createResumableUpload(key: string, contentType: string, options?: { size?: number }): Promise<ResumableUploadSession> {
+  async createResumableUpload(
+    key: string,
+    contentType: string,
+    options?: { size?: number },
+  ): Promise<ResumableUploadSession> {
     const driver = this.resolve(key);
     if (!driver.createResumableUpload) {
       throw new Error(`Driver '${driver.name}' does not support resumable uploads`);
@@ -282,5 +299,3 @@ export class StorageRouter implements StorageDriver {
     return driver.getResumableUploadStatus(sessionUri);
   }
 }
-
-export default StorageRouter;

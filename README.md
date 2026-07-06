@@ -81,7 +81,7 @@ The package **owns its models** — you pass a `connection`, not a model. One `c
 | Inherited from mongokit | Domain verbs added |
 |---|---|
 | `getById`, `getAll`, `getByQuery`, `count`, `exists`, `aggregate` | `upload`, `uploadMany`, `replace` |
-| `create`, `update`, `delete`, `restore` (via softDelete) | `hardDelete`, `hardDeleteMany`, `purgeDeleted` |
+| `create`, `update`, `delete`, `restore` (via softDelete) | `hardDelete`, `hardDeleteMany`, `purgeDeleted`, `purgeStalePending` |
 | `getDeleted`, soft-delete TTL, keyset pagination | `move`, `importFromUrl`, `addTags`, `removeTags` |
 | Transactions, plugins, hooks, QueryParser | `setFocalPoint`, folder operations, presigned URLs |
 | | Bridge verbs: `resolveSource`, `getAssetUrl`, `applyTransforms` |
@@ -390,7 +390,57 @@ softDelete: { enabled: true, ttlDays: 30 }
 - `repo.getDeleted()` → trash bin
 - `repo.purgeDeleted(olderThan)` → GC soft-deleted + storage
 
-TTL index auto-purges after `ttlDays`.
+`ttlDays` (default 30) is `purgeDeleted()`'s default cutoff — run it on a cron.
+A Mongo TTL index on `deletedAt` is available behind `ttlIndex: true` but OFF by
+default: Mongo's TTL sweeper deletes the document with no hooks, orphaning the
+storage blob. Only enable it when a bucket lifecycle rule covers the blobs.
+
+---
+
+## Cleanup & data hygiene
+
+Three code-driven sweeps remove storage + DB together — schedule each as a cron:
+
+- `purgeDeleted(olderThan?)` — soft-deleted docs past `softDelete.ttlDays` (default 30d). Daily cron.
+- `purgeExpired(before?)` — docs whose `expiresAt` has passed. Hourly/daily cron depending on how tight your expiry semantics are.
+- `purgeStalePending(olderThan?)` — `status: 'pending'` rows left by crashed/abandoned uploads, older than 24h by default (`STALE_PENDING_MAX_AGE_MS`). Daily cron; tolerates missing storage objects.
+
+Deliberately NOT swept: abandoned **presigned** uploads. An unconfirmed presigned
+upload leaves an object in the bucket with NO DB row (`confirmUpload()` creates the
+row), so no DB-driven sweep can see it. The correct remedy is a storage-lifecycle
+rule on the upload prefix — S3: `AbortIncompleteMultipartUpload` + an expiration
+rule scoped to the presign folder; GCS: a lifecycle age rule. media-kit deliberately
+does not implement bucket GC.
+
+Since 3.5.0 the soft-delete Mongo TTL index is opt-in (`softDelete.ttlIndex: true`)
+because Mongo TTL deletion fires without hooks and orphans the storage blob — see
+[Soft delete](#soft-delete) above.
+
+---
+
+## Private media
+
+Since 3.5.0, docs carry `visibility: 'public' | 'private'` (default `'public'` — zero
+change for existing apps). Private files are only served when the request has a valid
+HMAC-signed URL (zero-dep `/signing` subpath, works on every driver, no 7-day cap) or
+when your `authorize` callback approves the session — plug `@classytic/access` or any
+entitlement check there.
+
+```ts
+const engine = await createMedia({
+  connection, driver,
+  visibility: { byFolder: { invoices: 'private' } },
+  signing: { secret: process.env.MEDIA_SIGNING_SECRET, servePath: '/media/content' },
+  authorize: async (req, media) => canRead(req.principal, media),   // session path
+});
+
+const url = await engine.repositories.media.getSignedAssetUrl(id, { expiresIn: 604800 });
+await engine.repositories.media.revokeAccess(id);                   // kill all signed URLs
+const { data } = await engine.repositories.media.getContextPayload(id); // base64 for LLMs
+```
+
+Full guide — private buckets, dual auth, key rotation, LLM/chat-history strategies,
+prompt-caching caveats: [docs/guides/private-media.mdx](./docs/guides/private-media.mdx).
 
 ---
 
@@ -440,6 +490,7 @@ import { GCSProvider } from '@classytic/media-kit/providers/gcs';
 import { LocalProvider } from '@classytic/media-kit/providers/local';
 import { StorageRouter } from '@classytic/media-kit/providers/router';
 import { AssetTransformService } from '@classytic/media-kit/transforms';
+import { createUrlSigner } from '@classytic/media-kit/signing';          // zero-dep HMAC URL signing
 import { uploadInputSchema, mediaConfigSchema } from '@classytic/media-kit/schemas';  // Zod v4 → OpenAPI
 ```
 
@@ -447,7 +498,7 @@ import { uploadInputSchema, mediaConfigSchema } from '@classytic/media-kit/schem
 
 ## Testing
 
-Four tiers per [testing-infrastructure](../../sniffer/testing-infrastructure.md):
+Four test tiers:
 
 ```bash
 npm test              # unit + integration (CI default)

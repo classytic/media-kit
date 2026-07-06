@@ -1,5 +1,5 @@
 /**
- * @classytic/media-kit v3.0.0
+ * @classytic/media-kit
  *
  * Production-grade media management for Mongoose powered by @classytic/mongokit.
  * Engine-factory pattern — package owns its models, exposes repository as the API surface,
@@ -37,7 +37,7 @@
  */
 
 // ── Engine factory ───────────────────────────────────────────
-export { createMedia, default } from './engine/create-media.js';
+export { createMedia } from './engine/create-media.js';
 export type {
   MediaConfig,
   MediaEngine,
@@ -46,7 +46,7 @@ export type {
 } from './engine/engine-types.js';
 
 // ── Repository (API surface) ─────────────────────────────────
-export { MediaRepository } from './repositories/media.repository.js';
+export { MediaRepository, STALE_PENDING_MAX_AGE_MS } from './repositories/media.repository.js';
 export type { MediaRepositoryDeps } from './repositories/media.repository.js';
 export { createMediaRepositories } from './repositories/create-repositories.js';
 export type { MediaRepositories, CreateRepositoriesDeps } from './repositories/create-repositories.js';
@@ -130,9 +130,23 @@ export type { MediaCascadeOptions } from './utils/cascade.js';
 // ── Driver Registry (multi-provider) ────────────────────────
 export { DriverRegistry } from './providers/driver-registry.js';
 
+// ── URL Signing (also available standalone via ./signing) ───
+export { createUrlSigner } from './signing/index.js';
+export type {
+  UrlSigner,
+  UrlSignerOptions,
+  SignUrlInput,
+  SignUrlResult,
+  VerifyUrlInput,
+  VerifyUrlResult,
+  VerifyFailureReason,
+} from './signing/index.js';
+export { resolveVisibility } from './utils/visibility.js';
+
 // ── Types — Storage Driver ───────────────────────────────────
 export type {
   StorageDriver,
+  StorageWriteOptions,
   WriteResult,
   FileStat,
   PresignedUploadResult,
@@ -165,6 +179,7 @@ export type {
   IMediaDocument,
   MediaModel,
   MediaStatus,
+  MediaVisibility,
   ExifMetadata,
 } from './types.js';
 
@@ -176,6 +191,9 @@ export type {
   SoftDeleteConfig,
   ConcurrencyConfig,
   MediaKitLogger,
+  VisibilityConfig,
+  MediaSigningConfig,
+  ServeAuthorize,
 } from './types.js';
 
 // ── Types — Operations ──────────────────────────────────────

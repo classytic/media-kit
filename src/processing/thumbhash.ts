@@ -32,44 +32,40 @@
  * @license MIT
  */
 function rgbaToThumbHash(w: number, h: number, rgba: Uint8Array): Uint8Array {
-  let { PI, round, max, cos, abs } = Math;
+  const { PI, round, max, cos, abs } = Math;
   let alphaCount = 0;
-  let isLandscape = w > h;
-  let lx = max(1, round(isLandscape ? 7 : (7 * w) / h));
-  let ly = max(1, round(isLandscape ? (7 * h) / w : 7));
-  let l: number[] = []; // luminance
-  let p: number[] = []; // yellow - blue
-  let q: number[] = []; // red - green
-  let a: number[] = []; // alpha
+  const isLandscape = w > h;
+  const lx = max(1, round(isLandscape ? 7 : (7 * w) / h));
+  const ly = max(1, round(isLandscape ? (7 * h) / w : 7));
+  const l: number[] = []; // luminance
+  const p: number[] = []; // yellow - blue
+  const q: number[] = []; // red - green
+  const a: number[] = []; // alpha
 
   // Extract channel values
   for (let i = 0, j = 0; i < w * h; i++, j += 4) {
-    let alpha = rgba[j + 3]! / 255;
+    const alpha = rgba[j + 3]! / 255;
     alphaCount += alpha;
-    let r = (alpha / 255) * rgba[j]!;
-    let g = (alpha / 255) * rgba[j + 1]!;
-    let b = (alpha / 255) * rgba[j + 2]!;
+    const r = (alpha / 255) * rgba[j]!;
+    const g = (alpha / 255) * rgba[j + 1]!;
+    const b = (alpha / 255) * rgba[j + 2]!;
     l.push((r + g + b) / 3);
     p.push((r + g) / 2 - b);
     q.push(r - g);
     a.push(alpha);
   }
 
-  let hasAlpha = alphaCount < w * h;
-  let lLimit = hasAlpha ? 5 : 7;
-  let lCount = max(3, lx) * max(3, ly);
-  let aCount = max(3, lx) * max(3, ly);
+  const hasAlpha = alphaCount < w * h;
+  const _lLimit = hasAlpha ? 5 : 7;
+  const _lCount = max(3, lx) * max(3, ly);
+  const _aCount = max(3, lx) * max(3, ly);
 
   // DCT per channel
-  function encode(
-    channel: number[],
-    nx: number,
-    ny: number
-  ): [number, number[], number] {
+  function encode(channel: number[], nx: number, ny: number): [number, number[], number] {
     let dc = 0;
-    let ac: number[] = [];
+    const ac: number[] = [];
     let scale = 0;
-    let fx: number[] = [];
+    const fx: number[] = [];
     for (let cy = 0; cy < ny; cy++) {
       for (let cx = 0; cx * ny < nx * (ny - cy); cx++) {
         let f = 0;
@@ -77,7 +73,7 @@ function rgbaToThumbHash(w: number, h: number, rgba: Uint8Array): Uint8Array {
           fx[x] = cos((PI / w) * cx * (x + 0.5));
         }
         for (let y = 0; y < h; y++) {
-          let fy = cos((PI / h) * cy * (y + 0.5));
+          const fy = cos((PI / h) * cy * (y + 0.5));
           for (let x = 0; x < w; x++) {
             f += channel[y * w + x]! * fx[x]! * fy;
           }
@@ -95,30 +91,28 @@ function rgbaToThumbHash(w: number, h: number, rgba: Uint8Array): Uint8Array {
     return [dc, ac, scale];
   }
 
-  let [lDC, lAC, lScale] = encode(l, max(3, lx), max(3, ly));
-  let [pDC, pAC, pScale] = encode(p, 3, 3);
-  let [qDC, qAC, qScale] = encode(q, 3, 3);
-  let [aDC, aAC, aScale] = hasAlpha
-    ? encode(a, 5, 5)
-    : ([0, [], 0] as [number, number[], number]);
+  const [lDC, lAC, lScale] = encode(l, max(3, lx), max(3, ly));
+  const [pDC, pAC, pScale] = encode(p, 3, 3);
+  const [qDC, qAC, qScale] = encode(q, 3, 3);
+  const [aDC, aAC, aScale] = hasAlpha ? encode(a, 5, 5) : ([0, [], 0] as [number, number[], number]);
 
   // Write header
-  let isLandscapeVal = w > h;
-  let header24 =
+  const isLandscapeVal = w > h;
+  const header24 =
     round(63 * lDC) |
     (round(31.5 + 31.5 * pDC) << 6) |
     (round(31.5 + 31.5 * qDC) << 12) |
     (round(31 * lScale) << 18) |
     ((hasAlpha ? 1 : 0) << 23);
-  let header16 =
+  const header16 =
     (isLandscapeVal ? ly : lx) |
     (round(63 * pScale) << 3) |
     (round(63 * qScale) << 9) |
     ((isLandscapeVal ? 1 : 0) << 15);
 
-  let acStart = hasAlpha ? 6 : 5;
-  let acCount = lAC.length + pAC.length + qAC.length + aAC.length;
-  let hash = new Uint8Array(acStart + (acCount + 1) / 2);
+  const acStart = hasAlpha ? 6 : 5;
+  const acCount = lAC.length + pAC.length + qAC.length + aAC.length;
+  const hash = new Uint8Array(acStart + (acCount + 1) / 2);
   hash[0] = header24 & 255;
   hash[1] = (header24 >> 8) & 255;
   hash[2] = (header24 >> 16) & 255;
@@ -128,9 +122,9 @@ function rgbaToThumbHash(w: number, h: number, rgba: Uint8Array): Uint8Array {
 
   // Write AC components
   let acIndex = 0;
-  let allAC = [...lAC, ...pAC, ...qAC, ...aAC];
+  const allAC = [...lAC, ...pAC, ...qAC, ...aAC];
   for (let i = 0; i < allAC.length; i++) {
-    let value = round(15 * allAC[i]!);
+    const value = round(15 * allAC[i]!);
     if (acIndex & 1) {
       hash[acStart + (acIndex >> 1)]! |= value << 4;
     } else {
@@ -163,8 +157,8 @@ function rgbaToThumbHash(w: number, h: number, rgba: Uint8Array): Uint8Array {
  * ```
  */
 export async function generateThumbHash(
-  sharp: any,
-  buffer: Buffer
+  sharp: import('./image.js').SharpModule,
+  buffer: Buffer,
 ): Promise<string | null> {
   try {
     const { data, info } = await sharp(buffer)

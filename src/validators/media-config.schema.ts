@@ -27,6 +27,10 @@ export const tenantSchema = z.union([
 export const softDeleteSchema = z.object({
   enabled: z.boolean(),
   ttlDays: z.number().int().min(0).optional().default(30),
+  // Opt-in Mongo TTL index on deletedAt — deletes DOCUMENTS without hooks,
+  // orphaning storage blobs. Default false; purgeDeleted() cron is the
+  // supported cleanup path.
+  ttlIndex: z.boolean().optional().default(false),
 });
 
 export const fileTypesSchema = z.object({
@@ -51,12 +55,35 @@ export const concurrencySchema = z.object({
   maxConcurrent: z.number().int().min(1).optional().default(5),
 });
 
-export const schemaOptionsSchema = z.object({
-  extraFields: z.record(z.string(), z.unknown()).optional(),
-  extraIndexes: z.array(z.record(z.string(), z.union([z.literal(1), z.literal(-1), z.literal('text')]))).optional(),
-  collection: z.string().optional().default('media'),
-  optimizedIndexes: z.boolean().optional().default(false),
-}).optional();
+export const visibilityConfigSchema = z.object({
+  default: z.enum(['public', 'private']).optional(),
+  byFolder: z.record(z.string(), z.enum(['public', 'private'])).optional(),
+});
+
+/**
+ * HMAC signing config. Exactly one of `keys` / `secret`; `servePath` is
+ * required — it prefixes every URL `getSignedAssetUrl()` mints.
+ */
+export const signingConfigSchema = z
+  .object({
+    keys: z.record(z.string().min(1), z.string().min(1)).optional(),
+    secret: z.string().min(1).optional(),
+    currentKid: z.string().min(1).optional(),
+    defaultTtl: z.number().int().min(1).optional(),
+    servePath: z.string().min(1),
+  })
+  .refine((v) => (v.keys === undefined) !== (v.secret === undefined), {
+    message: 'signing requires exactly one of `keys` or `secret`',
+  });
+
+export const schemaOptionsSchema = z
+  .object({
+    extraFields: z.record(z.string(), z.unknown()).optional(),
+    extraIndexes: z.array(z.record(z.string(), z.union([z.literal(1), z.literal(-1), z.literal('text')]))).optional(),
+    collection: z.string().optional().default('media'),
+    optimizedIndexes: z.boolean().optional().default(false),
+  })
+  .optional();
 
 /**
  * Top-level config schema.
@@ -73,6 +100,8 @@ export const mediaConfigSchema = z.object({
   concurrency: concurrencySchema.optional(),
   schemaOptions: schemaOptionsSchema,
   suppressWarnings: z.boolean().optional().default(false),
+  visibility: visibilityConfigSchema.optional(),
+  signing: signingConfigSchema.optional(),
 });
 
 export type MediaConfigValidated = z.infer<typeof mediaConfigSchema>;

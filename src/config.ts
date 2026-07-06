@@ -51,6 +51,9 @@ const DEFAULT_CONFIG: Omit<MediaKitConfig, 'driver'> = {
   softDelete: {
     enabled: false,
     ttlDays: 30,
+    // TTL index is opt-in: Mongo TTL deletion fires without hooks, orphaning
+    // the storage blob. purgeDeleted() cron is the supported cleanup path.
+    ttlIndex: false,
   },
   concurrency: {
     maxConcurrent: 5,
@@ -77,8 +80,11 @@ function mergeQuality(
  * Merge user config with defaults.
  * If a processing preset is specified, it's applied between defaults and user overrides:
  *   defaults → preset → user overrides (user wins)
+ *
+ * Accepts a partial config so the v3 engine (which uses `providers` instead
+ * of a required `driver`) can reuse the same merge logic.
  */
-export function mergeConfig(config: MediaKitConfig): MediaKitConfig {
+export function mergeConfig(config: Partial<MediaKitConfig>): MediaKitConfig {
   // Resolve processing preset if specified
   const presetConfig = resolveProcessingPreset(config.processing?.preset);
 

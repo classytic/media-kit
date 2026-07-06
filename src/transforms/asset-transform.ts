@@ -36,8 +36,12 @@ import type {
   ImageAdapter,
   IMediaDocument,
   StorageDriver,
+  ServeAuthorize,
 } from '../types';
+import type { UrlSigner } from '../signing/index';
+import type { SharpModule, SharpInstanceSource } from '../processing/image';
 import { calculateFocalPointCrop } from '../processing/focal-point';
+import { contentDispositionAttachment } from '../utils/content-disposition';
 
 /**
  * Minimal structural type — accepts either a MediaEngine or a raw repo+driver pair.
@@ -52,6 +56,10 @@ export interface MediaTransformSource {
   };
   /** v2 legacy — direct getById on the kit. Prefer .repositories.media.getById. */
   getById?(id: string): Promise<IMediaDocument | null>;
+  /** Shared URL signer — MediaEngine exposes it when `signing` is configured. */
+  readonly signing?: UrlSigner | undefined;
+  /** Host authorize callback — MediaEngine exposes it when configured. */
+  readonly authorize?: ServeAuthorize | undefined;
 }
 
 /**
@@ -70,24 +78,48 @@ export interface AssetTransformConfig {
   allowedFormats?: string[];
   /** Optional: reuse the ImageProcessor for shared Sharp config */
   processor?: ImageAdapter;
+  /**
+   * URL signer used to verify signed requests for `visibility: 'private'`
+   * assets. Defaults to the engine's shared signer (`media.signing`).
+   */
+  signing?: UrlSigner | undefined;
+  /**
+   * Host authorization callback for private assets served WITHOUT a valid
+   * signature (session access — e.g. an admin's own media library, where
+   * per-URL signing of 400 thumbnails would be pointless). Defaults to the
+   * engine's `authorize`. Return `true` to allow; `false` or a throw denies
+   * with 403 (fail-closed). Plug entitlement engines (e.g. @classytic/access
+   * `check()`) here — media-kit never imports them.
+   */
+  authorize?: ServeAuthorize | undefined;
 }
+
+/** Deny codes returned in the 403 JSON body: `{ error: { code } }`. */
+type ServeDenyCode = 'media.serve.forbidden' | 'media.serve.link_expired';
+
+/** Result of the private-media gate. */
+type GateResult = { allowed: true; cacheControl: string | null } | { allowed: false; code: ServeDenyCode };
+
+const FIT_MODES = ['cover', 'contain', 'fill', 'inside', 'outside'] as const;
+const FORMAT_MODES = ['webp', 'avif', 'jpeg', 'png', 'auto'] as const;
 
 /**
  * Parse transform params from query string values
  */
-function parseParams(raw: Record<string, any>): TransformParams {
+function parseParams(raw: TransformParams | Record<string, unknown>): TransformParams {
+  const r = raw as Record<string, unknown>;
   const params: TransformParams = {};
 
-  if (raw.w) params.w = Math.max(1, parseInt(String(raw.w), 10) || 0);
-  if (raw.h) params.h = Math.max(1, parseInt(String(raw.h), 10) || 0);
-  if (raw.q) params.q = Math.max(1, Math.min(100, parseInt(String(raw.q), 10) || 80));
-  if (raw.fit && ['cover', 'contain', 'fill', 'inside', 'outside'].includes(raw.fit)) {
-    params.fit = raw.fit;
+  if (r.w) params.w = Math.max(1, parseInt(String(r.w), 10) || 0);
+  if (r.h) params.h = Math.max(1, parseInt(String(r.h), 10) || 0);
+  if (r.q) params.q = Math.max(1, Math.min(100, parseInt(String(r.q), 10) || 80));
+  if (typeof r.fit === 'string' && (FIT_MODES as readonly string[]).includes(r.fit)) {
+    params.fit = r.fit as TransformParams['fit'];
   }
-  if (raw.format && ['webp', 'avif', 'jpeg', 'png', 'auto'].includes(raw.format)) {
-    params.format = raw.format;
+  if (typeof r.format === 'string' && (FORMAT_MODES as readonly string[]).includes(r.format)) {
+    params.format = r.format as TransformParams['format'];
   }
-  if (raw.download !== undefined) params.download = true;
+  if (r.download !== undefined) params.download = true;
 
   return params;
 }
@@ -147,6 +179,8 @@ export class AssetTransformService {
   private maxWidth: number;
   private maxHeight: number;
   private config: AssetTransformConfig;
+  private signing: UrlSigner | undefined;
+  private authorize: ServeAuthorize | undefined;
 
   constructor(config: AssetTransformConfig) {
     this.config = config;
@@ -154,10 +188,22 @@ export class AssetTransformService {
     this.cache = config.cache;
     this.maxWidth = config.maxWidth || 4096;
     this.maxHeight = config.maxHeight || 4096;
+    // Explicit service config wins; otherwise pick up the engine's shared
+    // signer / authorize so `createAssetTransform({ media: engine })` is
+    // fully wired with zero extra host code.
+    this.signing = config.signing ?? config.media.signing;
+    this.authorize = config.authorize ?? config.media.authorize;
   }
 
   /**
    * Handle a transform request. Framework-agnostic.
+   *
+   * Private media: when the doc has `visibility: 'private'`, the request must
+   * carry a valid HMAC signature (`request.query`) or be approved by the
+   * host's `authorize` callback BEFORE any bytes are read from storage.
+   * Denials return a 403 response with a JSON body `{ error: { code } }` —
+   * `media.serve.link_expired` for authentically-signed-but-expired URLs,
+   * `media.serve.forbidden` for everything else.
    */
   async handle(request: TransformRequest): Promise<TransformResponse> {
     const { fileId, accept, range } = request;
@@ -170,27 +216,50 @@ export class AssetTransformService {
     // Fetch file metadata from DB — prefer v3 engine shape, fall back to v2
     const file = this.media.repositories
       ? await this.media.repositories.media.getById(fileId)
-      : await this.media.getById!(fileId);
+      : await this.media.getById?.(fileId);
     if (!file) {
       throw new Error(`File not found: ${fileId}`);
     }
 
-    const isImage = file.mimeType.startsWith('image/');
+    // --- Auth gate: BEFORE any bytes are read or cache is consulted ---
+    const gate = await this.gate(request, file);
+    if (!gate.allowed) {
+      return this.deny(gate.code);
+    }
+    // Non-null for private files: overrides every public Cache-Control below.
+    const cacheControl = gate.cacheControl;
+
+    // --- Variant resolution: serve a specific variant's bytes when requested ---
+    let serveTarget: { key: string; mimeType: string; size: number; filename: string } = file;
+    if (request.variant) {
+      const variant = (file.variants ?? []).find((v) => v.name === request.variant);
+      if (!variant) {
+        throw new Error(`Variant not found: ${request.variant} (file ${fileId})`);
+      }
+      serveTarget = variant;
+    }
+
+    const isImage = serveTarget.mimeType.startsWith('image/');
     const hasTransforms = params.w || params.h || params.format || params.q;
 
     // --- Non-image or no transforms: proxy raw file ---
     if (!isImage || !hasTransforms) {
-      return this.serveRaw(file.key, file.mimeType, file.size, range, params.download);
+      return this.serveRaw(
+        serveTarget.key,
+        serveTarget.mimeType,
+        serveTarget.size,
+        range,
+        params.download,
+        cacheControl,
+      );
     }
 
     // --- Image transform ---
-    const format = params.format === 'auto'
-      ? resolveFormat(accept)
-      : (params.format || 'jpeg');
+    const format = params.format === 'auto' ? resolveFormat(accept) : params.format || 'jpeg';
 
-    const cacheKey = buildCacheKey(fileId, params, format);
+    const cacheKey = buildCacheKey(request.variant ? `${fileId}-${request.variant}` : fileId, params, format);
 
-    // Check cache
+    // Check cache (auth already passed — private hits still get private headers)
     if (this.cache) {
       const cached = await this.cache.get(cacheKey);
       if (cached) {
@@ -199,15 +268,25 @@ export class AssetTransformService {
           contentType: cached.contentType,
           status: 200,
           headers: {
-            'Cache-Control': 'public, max-age=31536000, immutable',
-            'Vary': 'Accept',
+            'Cache-Control': cacheControl ?? 'public, max-age=31536000, immutable',
+            Vary: 'Accept',
           },
         };
       }
     }
 
     // Process image
-    const transformed = await this.transformImage(file, params, format);
+    const transformed = await this.transformImage(
+      {
+        key: serveTarget.key,
+        mimeType: serveTarget.mimeType,
+        focalPoint: file.focalPoint,
+        width: file.width,
+        height: file.height,
+      },
+      params,
+      format,
+    );
 
     // Cache result
     if (this.cache) {
@@ -215,7 +294,7 @@ export class AssetTransformService {
       this.cache.set(cacheKey, transformed.buffer, transformed.contentType).catch(() => {});
     }
 
-    const { Readable } = await import('stream');
+    const { Readable } = await import('node:stream');
     const stream = Readable.from(transformed.buffer);
 
     return {
@@ -224,33 +303,116 @@ export class AssetTransformService {
       contentLength: transformed.buffer.length,
       status: 200,
       headers: {
-        'Cache-Control': 'public, max-age=31536000, immutable',
+        'Cache-Control': cacheControl ?? 'public, max-age=31536000, immutable',
         'Content-Length': String(transformed.buffer.length),
-        'Vary': 'Accept',
-        ...(params.download ? { 'Content-Disposition': `attachment; filename="${file.filename}"` } : {}),
+        Vary: 'Accept',
+        ...(params.download ? { 'Content-Disposition': contentDispositionAttachment(serveTarget.filename) } : {}),
       },
     };
   }
 
   /**
-   * Serve raw file (no transform) — supports range requests
+   * Private-media gate. Runs BEFORE any storage read.
+   *
+   * Decision order:
+   *   1. `visibility !== 'private'` → allow (zero behavior change for
+   *      existing/public media — headers stay public).
+   *   2. Valid signature (verified against the doc's current tokenVersion)
+   *      → allow with `private, max-age=min(remaining TTL, 3600)`. Rationale:
+   *      a signed URL IS the credential — anyone holding the URL gets the
+   *      bytes anyway, so letting the holder's browser/proxy cache it for
+   *      (at most) the signature's own validity window leaks nothing and
+   *      keeps LLM/embed replays cheap. Capped at 1h so revocation
+   *      (tokenVersion bump) has a bounded staleness horizon.
+   *   3. `authorize` callback approves → allow with `private, no-store`:
+   *      session-authorized responses depend on ambient credentials
+   *      (cookies), so shared caches must never store them.
+   *   4. Otherwise deny 403 — `link_expired` only when an authentic
+   *      signature had merely expired, `forbidden` for everything else.
+   *
+   * An `authorize` callback that THROWS is treated as a denial (fail-closed,
+   * same stance as arc's `isRevoked`): an erroring authorizer must never
+   * leak private bytes, and a 500 here would turn transient host bugs into
+   * a probe-friendly oracle.
+   */
+  private async gate(request: TransformRequest, file: IMediaDocument): Promise<GateResult> {
+    if (file.visibility !== 'private') {
+      return { allowed: true, cacheControl: null };
+    }
+
+    let signatureExpired = false;
+
+    if (this.signing && request.query?.sig) {
+      const result = this.signing.verify({
+        id: request.fileId,
+        variant: request.variant,
+        params: request.query,
+        expectedTokenVersion: file.tokenVersion ?? 0,
+      });
+      if (result.ok) {
+        const expiry = Number.parseInt(request.query.e ?? '0', 10);
+        const remaining = expiry - Math.floor(Date.now() / 1000);
+        const maxAge = Math.max(0, Math.min(remaining, 3600));
+        return { allowed: true, cacheControl: `private, max-age=${maxAge}` };
+      }
+      signatureExpired = result.reason === 'expired';
+    }
+
+    if (this.authorize) {
+      try {
+        if (await this.authorize(request, file)) {
+          return { allowed: true, cacheControl: 'private, no-store' };
+        }
+      } catch {
+        // Fail-closed: an erroring authorizer denies, it never serves.
+      }
+    }
+
+    return { allowed: false, code: signatureExpired ? 'media.serve.link_expired' : 'media.serve.forbidden' };
+  }
+
+  /**
+   * Build a 403 denial response with a JSON body `{ error: { code } }`.
+   * Returned (not thrown) so hosts that pipe `handle()` results verbatim get
+   * correct denial semantics with zero extra error mapping.
+   */
+  private async deny(code: ServeDenyCode): Promise<TransformResponse> {
+    const body = Buffer.from(JSON.stringify({ error: { code } }));
+    const { Readable } = await import('node:stream');
+    return {
+      stream: Readable.from(body),
+      contentType: 'application/json',
+      contentLength: body.length,
+      status: 403,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': String(body.length),
+        'Cache-Control': 'private, no-store',
+      },
+    };
+  }
+
+  /**
+   * Serve raw file (no transform) — supports range requests.
+   * `cacheControl` (set for private files) replaces the public default.
    */
   private async serveRaw(
     key: string,
     contentType: string,
     fileSize: number,
     rangeHeader?: string,
-    download?: boolean
+    download?: boolean,
+    cacheControl?: string | null,
   ): Promise<TransformResponse> {
     const headers: Record<string, string> = {
       'Content-Type': contentType,
       'Accept-Ranges': 'bytes',
-      'Cache-Control': 'public, max-age=86400',
+      'Cache-Control': cacheControl ?? 'public, max-age=86400',
     };
 
     if (download) {
       const filename = key.split('/').pop() || 'download';
-      headers['Content-Disposition'] = `attachment; filename="${filename}"`;
+      headers['Content-Disposition'] = contentDispositionAttachment(filename);
     }
 
     // Range request (HTTP 206)
@@ -295,13 +457,13 @@ export class AssetTransformService {
   private async transformImage(
     file: { key: string; mimeType: string; focalPoint?: FocalPoint; width?: number; height?: number },
     params: TransformParams,
-    format: string
+    format: string,
   ): Promise<{ buffer: Buffer; contentType: string }> {
-    let sharp: any;
+    let sharp: SharpModule;
     try {
       // Prefer shared processor's Sharp instance (respects concurrency/cache config)
       if (this.config.processor && 'getSharpInstance' in this.config.processor) {
-        sharp = await (this.config.processor as any).getSharpInstance();
+        sharp = await (this.config.processor as ImageAdapter & SharpInstanceSource).getSharpInstance();
       } else {
         sharp = (await import('sharp')).default;
       }
@@ -347,9 +509,15 @@ export class AssetTransformService {
     // Format conversion
     const quality = params.q || 82;
     switch (format) {
-      case 'webp': instance = instance.webp({ quality }); break;
-      case 'avif': instance = instance.avif({ quality }); break;
-      case 'jpeg': instance = instance.jpeg({ quality }); break;
+      case 'webp':
+        instance = instance.webp({ quality });
+        break;
+      case 'avif':
+        instance = instance.avif({ quality });
+        break;
+      case 'jpeg':
+        instance = instance.jpeg({ quality });
+        break;
       case 'png': {
         const compressionLevel = Math.round(9 - (quality / 100) * 9);
         instance = instance.png({ compressionLevel, palette: quality < 100 });

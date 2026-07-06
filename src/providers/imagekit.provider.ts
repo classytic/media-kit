@@ -144,7 +144,7 @@ export class ImageKitProvider implements StorageDriver {
     // the literal form pay zero overhead.
     const literalPrivateKey = this.privateKeySecret.literalValue();
     if (literalPrivateKey !== undefined) {
-      this.cachedAuthHeader = 'Basic ' + Buffer.from(literalPrivateKey + ':').toString('base64');
+      this.cachedAuthHeader = `Basic ${Buffer.from(`${literalPrivateKey}:`).toString('base64')}`;
     }
   }
 
@@ -152,7 +152,7 @@ export class ImageKitProvider implements StorageDriver {
   private async resolveAuthHeader(): Promise<string> {
     if (this.cachedAuthHeader !== undefined) return this.cachedAuthHeader;
     const privateKey = await this.privateKeySecret.resolve();
-    this.cachedAuthHeader = 'Basic ' + Buffer.from(privateKey + ':').toString('base64');
+    this.cachedAuthHeader = `Basic ${Buffer.from(`${privateKey}:`).toString('base64')}`;
     return this.cachedAuthHeader;
   }
 
@@ -321,9 +321,7 @@ export class ImageKitProvider implements StorageDriver {
    */
   getPublicUrl(key: string): string {
     const { filePath } = parseKey(key);
-    const path = filePath.startsWith('/') ? filePath : '/' + filePath;
+    const path = filePath.startsWith('/') ? filePath : `/${filePath}`;
     return this.urlEndpoint + path;
   }
 }
-
-export default ImageKitProvider;

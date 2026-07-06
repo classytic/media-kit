@@ -7,7 +7,8 @@
  * focal points, tags, soft deletes, and multi-tenancy.
  */
 
-import mongoose, { Schema } from 'mongoose';
+import type mongoose from 'mongoose';
+import { Schema } from 'mongoose';
 import type { ResolvedTenantConfig } from '@classytic/repo-core/tenant';
 import type { IMediaDocument } from '../types.js';
 import { injectTenantField } from './inject-tenant.js';
@@ -17,7 +18,17 @@ export interface MediaSchemaConfig {
   tenant?: ResolvedTenantConfig;
   softDelete?: {
     enabled: boolean;
+    /** Purge window in days — `purgeDeleted()`'s default cutoff; also feeds the TTL index when `ttlIndex: true`. */
     ttlDays?: number;
+    /**
+     * Create a MongoDB TTL index on `deletedAt` (default: false).
+     *
+     * WARNING: Mongo's TTL sweeper deletes the DOCUMENT with no hooks — the
+     * storage blob is NOT deleted and is orphaned forever. Only enable when a
+     * bucket lifecycle rule (or acceptable orphaning) covers the blobs. The
+     * supported cleanup path is a `purgeDeleted()` cron (storage + DB).
+     */
+    ttlIndex?: boolean | undefined;
   };
   extraFields?: Record<string, mongoose.SchemaDefinitionProperty>;
   extraIndexes?: Array<Record<string, 1 | -1 | 'text'>>;
@@ -57,6 +68,23 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
       index: true,
     },
     errorMessage: { type: String },
+
+    // --- Access control ---
+    // 'public' (default) serves exactly as pre-3.4.0. 'private' makes the
+    // AssetTransformService demand a valid HMAC signature or an authorize()
+    // approval before sending bytes. Docs created before 3.4.0 lack the
+    // field — reads treat absent as public.
+    visibility: {
+      type: String,
+      enum: ['public', 'private'],
+      default: 'public',
+      required: true,
+      index: true,
+    },
+    // Signed-URL revocation counter. revokeAccess() $inc's it; every
+    // outstanding signed URL (which embeds the version it was minted with)
+    // stops verifying immediately.
+    tokenVersion: { type: Number, default: 0, required: true },
 
     // --- Organization ---
     folder: { type: String, default: 'general', required: true, index: true },
@@ -161,12 +189,22 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
     schema.index({ deletedAt: 1, status: 1, createdAt: -1 });
   }
 
-  // Soft delete TTL index
-  if (softDelete.enabled && softDelete.ttlDays && softDelete.ttlDays > 0) {
-    schema.index({ deletedAt: 1 }, {
-      expireAfterSeconds: softDelete.ttlDays * 86400,
-      partialFilterExpression: { deletedAt: { $type: 'date' } },
-    });
+  // Soft delete TTL index — OPT-IN (`ttlIndex: true`). Mongo's TTL sweeper
+  // removes documents with no hooks, so the storage blob would be orphaned;
+  // the default cleanup path is a purgeDeleted() cron (storage + DB).
+  if (softDelete.enabled && softDelete.ttlIndex === true && softDelete.ttlDays && softDelete.ttlDays > 0) {
+    schema.index(
+      { deletedAt: 1 },
+      {
+        // Explicit name: the path-level `deletedAt: { index: true }` above
+        // auto-names its index `deletedAt_1`; an unnamed TTL index on the
+        // same key would collide with it (IndexOptionsConflict) and never
+        // build. The distinct name + partial filter let both coexist.
+        name: 'media_deletedAt_ttl',
+        expireAfterSeconds: softDelete.ttlDays * 86400,
+        partialFilterExpression: { deletedAt: { $type: 'date' } },
+      },
+    );
   }
 
   // Custom indexes

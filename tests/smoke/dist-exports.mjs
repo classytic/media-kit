@@ -28,6 +28,7 @@ const EXPECTED_MAIN = [
   'createMedia',
   // Repository
   'MediaRepository',
+  'STALE_PENDING_MAX_AGE_MS',
   'createMediaRepositories',
   // Models
   'createMediaModels',
@@ -54,6 +55,9 @@ const EXPECTED_MAIN = [
   'resolveProcessingPreset',
   // Query (re-export from mongokit)
   'QueryParser',
+  // URL signing (also standalone via ./signing)
+  'createUrlSigner',
+  'resolveVisibility',
 ];
 
 for (const name of EXPECTED_MAIN) {
@@ -125,6 +129,20 @@ const transforms = await import('../../dist/transforms.mjs').catch((err) => FAIL
 assert.ok(transforms.AssetTransformService, 'AssetTransformService missing');
 OK('./transforms — AssetTransformService exported');
 
+// ── Subpath: signing (zero-dep HMAC URL signer) ────────────────
+const signing = await import('../../dist/signing.mjs').catch((err) => FAIL(`signing import failed: ${err.message}`));
+assert.ok(signing.createUrlSigner, 'createUrlSigner missing');
+{
+  const signer = signing.createUrlSigner({ secret: 'smoke-secret' });
+  const { query, expiresAt } = signer.sign({ id: 'smoke-id', expiresIn: 60 });
+  assert.ok(query.includes('sig='), 'signed query must include sig=');
+  assert.ok(expiresAt > Math.floor(Date.now() / 1000), 'expiresAt must be in the future');
+  const params = Object.fromEntries(new URLSearchParams(query));
+  assert.deepEqual(signer.verify({ id: 'smoke-id', params }), { ok: true });
+  assert.equal(signer.verify({ id: 'other-id', params }).ok, false);
+}
+OK('./signing — createUrlSigner sign/verify round-trip');
+
 // ── Subpath: schemas (Zod validators) ──────────────────────────
 const schemas = await import('../../dist/schemas.mjs').catch((err) => FAIL(`schemas import failed: ${err.message}`));
 assert.ok(schemas.mediaConfigSchema, 'mediaConfigSchema missing');
@@ -150,12 +168,18 @@ assert.equal(
 );
 OK('package.json — ESM-only, sideEffects:false, no runtime deps');
 
-// Mongokit peer dep is >=3.11.0 (required for UpdatePatch rename + class-level bulk ops)
+// Mongokit peer floor must be at least 3.13.0 (UpdatePatch rename +
+// class-level bulk ops). Parse the range floor instead of string-matching a
+// specific version so legitimate floor bumps don't break the smoke test.
+const mongokitPeer = pkg.peerDependencies?.['@classytic/mongokit'] ?? '';
+const mongokitFloor = mongokitPeer.match(/>=\s*(\d+)\.(\d+)\.(\d+)/);
 assert.ok(
-  pkg.peerDependencies?.['@classytic/mongokit']?.includes('3.13'),
-  `mongokit peer must be >=3.13.0, got: ${pkg.peerDependencies?.['@classytic/mongokit']}`,
+  mongokitFloor &&
+    (Number(mongokitFloor[1]) > 3 ||
+      (Number(mongokitFloor[1]) === 3 && Number(mongokitFloor[2]) >= 13)),
+  `mongokit peer floor must be >=3.13.0, got: ${mongokitPeer}`,
 );
-OK('package.json — @classytic/mongokit peer dep >=3.13.0');
+OK(`package.json — @classytic/mongokit peer dep ${mongokitPeer} (floor >=3.13.0)`);
 
 // Zod peer is >=4.0.0
 assert.ok(
@@ -175,6 +199,7 @@ const distStats = [
   'dist/providers/gcs.mjs',
   'dist/schemas.mjs',
   'dist/transforms.mjs',
+  'dist/signing.mjs',
 ];
 let totalMjsBytes = 0;
 for (const rel of distStats) {

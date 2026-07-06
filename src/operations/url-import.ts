@@ -3,18 +3,11 @@
  * Includes SSRF protection: private IP blocking, DNS rebinding prevention via IP pinning.
  */
 
-import http from 'http';
-import https from 'https';
-import dns from 'dns';
+import http from 'node:http';
+import https from 'node:https';
+import dns from 'node:dns';
 import type { OperationDeps } from './types';
-import type {
-  ImportOptions,
-  OperationContext,
-  UploadInput,
-  IMediaDocument,
-  EventContext,
-  EventError,
-} from '../types';
+import type { ImportOptions, OperationContext, UploadInput, IMediaDocument, EventContext } from '../types';
 import { getMimeType } from '../utils/mime';
 import { upload } from './upload';
 import { log } from './helpers';
@@ -44,7 +37,15 @@ export async function importFromUrl(
     const maxSize = options?.maxSize || deps.config.fileTypes?.maxSize || 100 * 1024 * 1024;
     const timeout = options?.timeout || 30000;
 
-    const { buffer, mimeType, filename: detectedFilename } = await fetchUrl(url, maxSize, timeout);
+    // Fetch + buffer inside the upload semaphore so N concurrent imports
+    // hold at most `concurrency.maxConcurrent` in-flight download buffers.
+    // The slot is released before upload() re-acquires its own — holding it
+    // across both phases would self-deadlock at maxConcurrent = 1.
+    const {
+      buffer,
+      mimeType,
+      filename: detectedFilename,
+    } = await deps.uploadSemaphore.run(() => fetchUrl(url, maxSize, timeout));
 
     // Determine final filename
     const filename = options?.filename || detectedFilename;
@@ -145,9 +146,7 @@ async function validateUrlSafety(url: string): Promise<string> {
 
   // Only allow http/https
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(
-      `URL import failed: unsupported protocol '${parsed.protocol}' — only http/https allowed`,
-    );
+    throw new Error(`URL import failed: unsupported protocol '${parsed.protocol}' — only http/https allowed`);
   }
 
   // Block known internal hostnames
@@ -164,15 +163,11 @@ async function validateUrlSafety(url: string): Promise<string> {
 
   // Resolve hostname and check if IP is private (fail-closed: DNS errors block the request)
   const { address } = await dns.promises.lookup(hostname).catch((err) => {
-    throw new Error(
-      `URL import failed: DNS resolution failed for '${hostname}' — ${err.code || err.message}`,
-    );
+    throw new Error(`URL import failed: DNS resolution failed for '${hostname}' — ${err.code || err.message}`);
   });
 
   if (isPrivateIP(address)) {
-    throw new Error(
-      `URL import failed: hostname '${hostname}' resolves to private IP '${address}'`,
-    );
+    throw new Error(`URL import failed: hostname '${hostname}' resolves to private IP '${address}'`);
   }
 
   return address;
@@ -203,8 +198,7 @@ export function createPinnedLookup(resolvedIP: string): typeof dns.lookup {
   ): void => {
     const cb = typeof options === 'function' ? options : callback;
     if (!cb) return;
-    const wantsAll =
-      typeof options === 'object' && options !== null && (options as { all?: boolean }).all === true;
+    const wantsAll = typeof options === 'object' && options !== null && (options as { all?: boolean }).all === true;
     if (wantsAll) {
       (
         cb as unknown as (
@@ -240,102 +234,86 @@ async function fetchUrl(
     const parsedUrl = new URL(url);
     const transport = parsedUrl.protocol === 'https:' ? https : http;
 
-    const req = transport.get(
-      url,
-      { timeout, lookup: createPinnedLookup(resolvedIP) },
-      (res) => {
-        // Handle redirects (resolve relative Location against current URL)
-        if (
-          res.statusCode &&
-          res.statusCode >= 300 &&
-          res.statusCode < 400 &&
-          res.headers.location
-        ) {
-          if (redirectDepth >= MAX_REDIRECTS) {
-            reject(
-              new Error(`URL import failed: too many redirects (>${MAX_REDIRECTS}) for ${url}`),
-            );
-            return;
+    const req = transport.get(url, { timeout, lookup: createPinnedLookup(resolvedIP) }, (res) => {
+      // Handle redirects (resolve relative Location against current URL)
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        if (redirectDepth >= MAX_REDIRECTS) {
+          reject(new Error(`URL import failed: too many redirects (>${MAX_REDIRECTS}) for ${url}`));
+          return;
+        }
+        const resolvedUrl = new URL(res.headers.location, url).href;
+        fetchUrl(resolvedUrl, maxSize, timeout, redirectDepth + 1)
+          .then(resolve)
+          .catch(reject);
+        return;
+      }
+
+      if (!res.statusCode || res.statusCode >= 400) {
+        reject(new Error(`URL import failed: HTTP ${res.statusCode} for ${url}`));
+        return;
+      }
+
+      // Check Content-Length before downloading
+      const contentLength = parseInt(res.headers['content-length'] || '0', 10);
+      if (contentLength > 0 && contentLength > maxSize) {
+        const maxMB = Math.round(maxSize / 1024 / 1024);
+        res.destroy();
+        reject(
+          new Error(
+            `URL import failed: file size ${Math.round(contentLength / 1024 / 1024)}MB exceeds limit of ${maxMB}MB`,
+          ),
+        );
+        return;
+      }
+
+      // Extract MIME type from Content-Type header
+      const contentTypeHeader = res.headers['content-type'] || '';
+      const detectedMimeType = contentTypeHeader.split(';')[0]?.trim() || 'application/octet-stream';
+
+      // Extract filename from Content-Disposition or URL path
+      let detectedFilename = 'imported-file';
+      const disposition = res.headers['content-disposition'];
+      if (disposition) {
+        const filenameMatch = disposition.match(/filename\*?=['"]?(?:UTF-8'')?([^;\r\n"']+)/i);
+        if (filenameMatch) {
+          detectedFilename = decodeURIComponent(filenameMatch[1]!.replace(/['"]/g, ''));
+        }
+      }
+      if (detectedFilename === 'imported-file') {
+        const urlPath = parsedUrl.pathname;
+        const pathSegments = urlPath.split('/').filter(Boolean);
+        if (pathSegments.length > 0) {
+          const lastSegment = pathSegments[pathSegments.length - 1]!;
+          if (lastSegment.includes('.')) {
+            detectedFilename = decodeURIComponent(lastSegment);
           }
-          const resolvedUrl = new URL(res.headers.location, url).href;
-          fetchUrl(resolvedUrl, maxSize, timeout, redirectDepth + 1)
-            .then(resolve)
-            .catch(reject);
-          return;
         }
+      }
 
-        if (!res.statusCode || res.statusCode >= 400) {
-          reject(new Error(`URL import failed: HTTP ${res.statusCode} for ${url}`));
-          return;
-        }
+      // Buffer the response with size checks
+      const chunks: Buffer[] = [];
+      let totalSize = 0;
 
-        // Check Content-Length before downloading
-        const contentLength = parseInt(res.headers['content-length'] || '0', 10);
-        if (contentLength > 0 && contentLength > maxSize) {
+      res.on('data', (chunk: Buffer) => {
+        totalSize += chunk.length;
+        if (totalSize > maxSize) {
           const maxMB = Math.round(maxSize / 1024 / 1024);
           res.destroy();
-          reject(
-            new Error(
-              `URL import failed: file size ${Math.round(contentLength / 1024 / 1024)}MB exceeds limit of ${maxMB}MB`,
-            ),
-          );
+          reject(new Error(`URL import failed: download exceeded size limit of ${maxMB}MB`));
           return;
         }
+        chunks.push(chunk);
+      });
 
-        // Extract MIME type from Content-Type header
-        const contentTypeHeader = res.headers['content-type'] || '';
-        const detectedMimeType =
-          contentTypeHeader.split(';')[0]!.trim() || 'application/octet-stream';
+      res.on('end', () => {
+        const responseBuffer = Buffer.concat(chunks);
+        resolve({ buffer: responseBuffer, mimeType: detectedMimeType, filename: detectedFilename });
+      });
 
-        // Extract filename from Content-Disposition or URL path
-        let detectedFilename = 'imported-file';
-        const disposition = res.headers['content-disposition'];
-        if (disposition) {
-          const filenameMatch = disposition.match(
-            /filename\*?=['"]?(?:UTF-8'')?([^;\r\n"']+)/i,
-          );
-          if (filenameMatch) {
-            detectedFilename = decodeURIComponent(filenameMatch[1]!.replace(/['"]/g, ''));
-          }
-        }
-        if (detectedFilename === 'imported-file') {
-          const urlPath = parsedUrl.pathname;
-          const pathSegments = urlPath.split('/').filter(Boolean);
-          if (pathSegments.length > 0) {
-            const lastSegment = pathSegments[pathSegments.length - 1]!;
-            if (lastSegment.includes('.')) {
-              detectedFilename = decodeURIComponent(lastSegment);
-            }
-          }
-        }
-
-        // Buffer the response with size checks
-        const chunks: Buffer[] = [];
-        let totalSize = 0;
-
-        res.on('data', (chunk: Buffer) => {
-          totalSize += chunk.length;
-          if (totalSize > maxSize) {
-            const maxMB = Math.round(maxSize / 1024 / 1024);
-            res.destroy();
-            reject(
-              new Error(`URL import failed: download exceeded size limit of ${maxMB}MB`),
-            );
-            return;
-          }
-          chunks.push(chunk);
-        });
-
-        res.on('end', () => {
-          const responseBuffer = Buffer.concat(chunks);
-          resolve({ buffer: responseBuffer, mimeType: detectedMimeType, filename: detectedFilename });
-        });
-
-        res.on('error', (err) => {
-          reject(new Error(`URL import failed: ${err.message}`));
-        });
-      },
-    );
+      res.on('error', (err) => {
+        reject(new Error(`URL import failed: ${err.message}`));
+      });
+    });
 
     req.on('timeout', () => {
       req.destroy();

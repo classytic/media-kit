@@ -22,7 +22,7 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
-import type { StorageDriver, WriteResult, FileStat, PresignedUploadResult } from '../types';
+import type { StorageDriver, WriteResult, FileStat } from '../types';
 import { getMimeType } from '../utils/mime';
 
 /**
@@ -65,7 +65,7 @@ export class LocalProvider implements StorageDriver {
    * Write data to the local filesystem.
    * Creates parent directories automatically.
    */
-  async write(key: string, data: Buffer | NodeJS.ReadableStream, contentType: string): Promise<WriteResult> {
+  async write(key: string, data: Buffer | NodeJS.ReadableStream, _contentType: string): Promise<WriteResult> {
     const filePath = this.resolvePath(key);
     const dir = path.dirname(filePath);
 
@@ -81,9 +81,17 @@ export class LocalProvider implements StorageDriver {
       };
     }
 
-    // Stream write
+    // Stream write — on pipeline failure, remove the partial file so a
+    // broken source stream can't leave truncated garbage on disk.
     const writeStream = createWriteStream(filePath);
-    await pipeline(data, writeStream);
+    try {
+      await pipeline(data, writeStream);
+    } catch (err) {
+      await fs.unlink(filePath).catch(() => {
+        /* best-effort cleanup */
+      });
+      throw err;
+    }
 
     const stat = await fs.stat(filePath);
     return {
@@ -163,7 +171,7 @@ export class LocalProvider implements StorageDriver {
 
     let entries: string[];
     try {
-      entries = await fs.readdir(dirPath, { recursive: true }) as string[];
+      entries = (await fs.readdir(dirPath, { recursive: true })) as string[];
     } catch (err: unknown) {
       // Directory doesn't exist — no files to list
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -242,17 +250,4 @@ export class LocalProvider implements StorageDriver {
     const normalizedKey = key.replace(/\\/g, '/');
     return `${this.baseUrl}/${normalizedKey}`;
   }
-
-  /**
-   * Extract storage key from URL or key.
-   * Handles full URLs (matching baseUrl) and plain keys.
-   */
-  private extractKey(keyOrUrl: string): string {
-    if (keyOrUrl.startsWith(this.baseUrl)) {
-      return keyOrUrl.slice(this.baseUrl.length + 1); // +1 for the slash
-    }
-    return keyOrUrl;
-  }
 }
-
-export default LocalProvider;

@@ -19,7 +19,16 @@
  * ```
  */
 
-import type { StorageDriver, WriteResult, FileStat, PresignedUploadResult, SignedPartResult, CompletedPart } from '../types';
+import type { S3Client, GetObjectCommandInput, PutObjectCommandInput } from '@aws-sdk/client-s3';
+import type {
+  StorageDriver,
+  StorageWriteOptions,
+  WriteResult,
+  FileStat,
+  PresignedUploadResult,
+  SignedPartResult,
+  CompletedPart,
+} from '../types';
 import { withRetry, type RetryOptions } from '../utils/retry';
 
 /**
@@ -50,7 +59,7 @@ export interface S3ProviderConfig {
  */
 export class S3Provider implements StorageDriver {
   readonly name = 's3';
-  private client: any;
+  private client: S3Client | null = null;
   private config: S3ProviderConfig;
   private sdkAvailable = false;
   private initError: Error | null = null;
@@ -79,19 +88,19 @@ export class S3Provider implements StorageDriver {
       });
 
       this.sdkAvailable = true;
-    } catch (error) {
+    } catch {
       this.initError = new Error(
-        '@aws-sdk/client-s3 is required for S3Provider. Install it with: npm install @aws-sdk/client-s3'
+        '@aws-sdk/client-s3 is required for S3Provider. Install it with: npm install @aws-sdk/client-s3',
       );
       throw this.initError;
     }
   }
 
-  private async getClient() {
+  private async getClient(): Promise<S3Client> {
     if (!this.client) {
       await this.initClient();
     }
-    return this.client;
+    return this.client!;
   }
 
   /**
@@ -109,23 +118,43 @@ export class S3Provider implements StorageDriver {
   /**
    * Write data to S3 with automatic retry on transient failures.
    * Accepts Buffer or ReadableStream. The key is provided by the caller.
+   *
+   * Retry applies only to Buffer bodies — a Buffer is re-readable, so the
+   * PutObjectCommand is rebuilt fresh inside the retry closure per attempt.
+   * Stream bodies are single-shot: after a failed attempt the stream is
+   * (partially) consumed, and re-sending it would upload truncated/empty
+   * data, so streams get exactly one attempt.
+   *
+   * `options.acl` sets a per-object ACL (e.g. 'private' for
+   * `visibility: 'private'` uploads), overriding the provider-level `acl`
+   * config for this write only. Note: buckets with Object Ownership
+   * "Bucket owner enforced" reject ACLs entirely — leave both unset and use
+   * a private bucket + bucket policy instead (recommended).
    */
-  async write(key: string, data: Buffer | NodeJS.ReadableStream, contentType: string): Promise<WriteResult> {
+  async write(
+    key: string,
+    data: Buffer | NodeJS.ReadableStream,
+    contentType: string,
+    options?: StorageWriteOptions,
+  ): Promise<WriteResult> {
     const { PutObjectCommand } = await import('@aws-sdk/client-s3');
     const client = await this.getClient();
 
-    const command = new PutObjectCommand({
-      Bucket: this.config.bucket,
-      Key: key,
-      Body: data as any,
-      ContentType: contentType,
-      ...(this.config.acl && { ACL: this.config.acl }),
-    });
+    const effectiveAcl = options?.acl ?? this.config.acl;
+    const buildCommand = () =>
+      new PutObjectCommand({
+        Bucket: this.config.bucket,
+        Key: key,
+        Body: data as PutObjectCommandInput['Body'],
+        ContentType: contentType,
+        ...(effectiveAcl && { ACL: effectiveAcl }),
+      });
 
-    await withRetry(
-      () => client.send(command),
-      this.getRetryOptions()
-    );
+    if (Buffer.isBuffer(data)) {
+      await withRetry(() => client.send(buildCommand()), this.getRetryOptions());
+    } else {
+      await client.send(buildCommand());
+    }
 
     const url = this.getPublicUrl(key);
 
@@ -156,7 +185,7 @@ export class S3Provider implements StorageDriver {
 
     const actualKey = this.extractKey(key);
 
-    const commandInput: any = {
+    const commandInput: GetObjectCommandInput = {
       Bucket: this.config.bucket,
       Key: actualKey,
     };
@@ -167,8 +196,8 @@ export class S3Provider implements StorageDriver {
 
     const command = new GetObjectCommand(commandInput);
 
-    const response: any = await withRetry(() => client.send(command), this.getRetryOptions());
-    return response.Body as NodeJS.ReadableStream;
+    const response = await withRetry(() => client.send(command), this.getRetryOptions());
+    return response.Body as unknown as NodeJS.ReadableStream;
   }
 
   /**
@@ -185,10 +214,7 @@ export class S3Provider implements StorageDriver {
       Key: actualKey,
     });
 
-    await withRetry(
-      () => client.send(command),
-      this.getRetryOptions()
-    );
+    await withRetry(() => client.send(command), this.getRetryOptions());
     return true;
   }
 
@@ -202,13 +228,16 @@ export class S3Provider implements StorageDriver {
     const actualKey = this.extractKey(key);
 
     try {
-      await client.send(new HeadObjectCommand({
-        Bucket: this.config.bucket,
-        Key: actualKey,
-      }));
+      await client.send(
+        new HeadObjectCommand({
+          Bucket: this.config.bucket,
+          Key: actualKey,
+        }),
+      );
       return true;
-    } catch (err: any) {
-      if (err.name === 'NotFound' || err.$metadata?.httpStatusCode === 404) {
+    } catch (err: unknown) {
+      const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+      if (e.name === 'NotFound' || e.$metadata?.httpStatusCode === 404) {
         return false;
       }
       throw err;
@@ -223,12 +252,15 @@ export class S3Provider implements StorageDriver {
     const client = await this.getClient();
 
     const actualKey = this.extractKey(key);
-    const response: any = await withRetry(
-      () => client.send(new HeadObjectCommand({
-        Bucket: this.config.bucket,
-        Key: actualKey,
-      })),
-      this.getRetryOptions()
+    const response = await withRetry(
+      () =>
+        client.send(
+          new HeadObjectCommand({
+            Bucket: this.config.bucket,
+            Key: actualKey,
+          }),
+        ),
+      this.getRetryOptions(),
     );
 
     return {
@@ -257,7 +289,7 @@ export class S3Provider implements StorageDriver {
         ContinuationToken: continuationToken,
       });
 
-      const response: any = await withRetry(() => client.send(command), this.getRetryOptions());
+      const response = await withRetry(() => client.send(command), this.getRetryOptions());
 
       if (response.Contents) {
         for (const object of response.Contents) {
@@ -384,7 +416,7 @@ export class S3Provider implements StorageDriver {
       ...(this.config.acl && { ACL: this.config.acl }),
     });
 
-    const response: any = await client.send(command);
+    const response = await client.send(command);
     return { uploadId: response.UploadId! };
   }
 
@@ -392,12 +424,7 @@ export class S3Provider implements StorageDriver {
    * Generate a presigned URL for uploading a single part.
    * Client PUTs the chunk data to the returned URL, then sends back the ETag from the response.
    */
-  async signUploadPart(
-    key: string,
-    uploadId: string,
-    partNumber: number,
-    expiresIn = 3600,
-  ): Promise<SignedPartResult> {
+  async signUploadPart(key: string, uploadId: string, partNumber: number, expiresIn = 3600): Promise<SignedPartResult> {
     const { UploadPartCommand } = await import('@aws-sdk/client-s3');
     const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
     const client = await this.getClient();
@@ -438,7 +465,7 @@ export class S3Provider implements StorageDriver {
       },
     });
 
-    const response: any = await client.send(command);
+    const response = await client.send(command);
     const fileStat = await this.stat(actualKey);
     return { etag: response.ETag || '', size: fileStat.size };
   }
@@ -486,5 +513,3 @@ export class S3Provider implements StorageDriver {
     return keyOrUrl;
   }
 }
-
-export default S3Provider;

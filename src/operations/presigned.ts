@@ -18,30 +18,123 @@ import type {
   BatchPresignInput,
   BatchPresignResult,
 } from '../types';
+import { createError } from '@classytic/repo-core/errors';
 import { computeFileHash } from '../utils/hash';
 import { isAllowedMimeType, isImage } from '../utils/mime';
 import { normalizeFolderPath } from '../utils/folders';
 import { assertAndClaim } from '@classytic/primitives/state-machine';
 import { MEDIA_MACHINE } from '../models/media-state-machine.js';
-import { log, requireTenant, generateKey, generateTitle } from './helpers';
+import {
+  log,
+  requireTenant,
+  generateScopedKey,
+  generateTitle,
+  assertGeneratedKeyShape,
+  tenantKeySegment,
+} from './helpers';
 import { processImage } from './process-image';
+import { resolveVisibility } from '../utils/visibility';
+
+/**
+ * Enforce the engine's upload policy (allowed MIME types + max size) before
+ * signing. Presigned URLs bypass upload()'s buffer checks entirely, so the
+ * policy must gate at signing time; `size` is the client-declared size and
+ * is re-checked from storage at confirm time.
+ */
+function enforcePresignPolicy(deps: OperationDeps, contentType: string, size?: number): void {
+  const { allowed = [], maxSize } = deps.config.fileTypes || {};
+
+  if (allowed.length > 0 && !isAllowedMimeType(contentType, allowed)) {
+    throw new Error(`File type '${contentType}' is not allowed. Allowed: ${allowed.join(', ')}`);
+  }
+
+  if (maxSize && size && size > maxSize) {
+    const maxMB = Math.round(maxSize / 1024 / 1024);
+    throw new Error(`File size exceeds limit of ${maxMB}MB`);
+  }
+}
+
+/**
+ * Validate a client-supplied `url` against the driver-derived public URL.
+ * The stored URL is ALWAYS derived server-side — this check only surfaces
+ * forged/malformed input loudly instead of silently ignoring it.
+ * Throws a 400 HttpError (`code: 'media.confirm.invalid_url'`).
+ */
+function assertClientUrlMatchesDriver(clientUrl: string, derivedUrl: string, key: string): void {
+  const fail = (reason: string): never => {
+    const err = createError(400, `Invalid url for key '${key}': ${reason}`);
+    err.code = 'media.confirm.invalid_url';
+    throw err;
+  };
+
+  let parsedOrNull: URL | null = null;
+  try {
+    parsedOrNull = new URL(clientUrl);
+  } catch {
+    parsedOrNull = null;
+  }
+  if (!parsedOrNull) fail('not an absolute URL');
+  const parsed = parsedOrNull as URL;
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    fail(`unsupported scheme '${parsed.protocol}'`);
+  }
+
+  // Drivers with relative public URLs (e.g. LocalProvider baseUrl '/uploads')
+  // can't be origin-compared — scheme validation above still applies.
+  let derived: URL | null = null;
+  try {
+    derived = new URL(derivedUrl);
+  } catch {
+    derived = null;
+  }
+  if (derived && parsed.origin !== derived.origin) {
+    fail(`origin '${parsed.origin}' does not match storage origin '${derived.origin}'`);
+  }
+}
+
+/**
+ * Verify a client-submitted key's tenant binding against the caller's scope.
+ * Keys minted by generateScopedKey() under a tenant context carry a
+ * `__t-<orgId>` segment; confirm-time requires an exact match BOTH ways:
+ * a tenant-scoped caller can only claim keys minted for that tenant, and a
+ * tenantless caller can only claim segmentless keys. Runs before any DB
+ * lookup so it cannot leak whether a key exists.
+ * Throws a 403 HttpError (`code: 'media.confirm.tenant_mismatch'`).
+ */
+function assertTenantBinding(tenantSegment: string | undefined, organizationId: unknown): void {
+  const expected =
+    organizationId !== undefined && organizationId !== null && organizationId !== ''
+      ? tenantKeySegment(organizationId)
+      : undefined;
+  if (tenantSegment !== expected) {
+    const err = createError(403, 'Storage key is not bound to this tenant scope');
+    err.code = 'media.confirm.tenant_mismatch';
+    throw err;
+  }
+}
 
 /**
  * Generate a presigned upload URL for direct browser → cloud uploads.
  * After the client PUTs the file, call confirmUpload() to register it in the DB.
+ * Tenant-scoped calls mint tenant-bound keys — see generateScopedKey().
  */
 export async function getSignedUploadUrl(
   deps: OperationDeps,
   filename: string,
   contentType: string,
-  options: { folder?: string; expiresIn?: number } = {},
+  options: { folder?: string; expiresIn?: number; size?: number } = {},
+  context?: OperationContext,
 ): Promise<PresignedUploadResult> {
   if (!deps.driver.getSignedUploadUrl) {
     throw new Error(`Driver '${deps.driver.name}' does not support presigned uploads`);
   }
 
+  // Same MIME/size gate as upload() — reject before signing anything
+  enforcePresignPolicy(deps, contentType, options.size);
+
+  const organizationId = requireTenant(deps, context);
   const folder = normalizeFolderPath(options.folder || deps.config.folders?.defaultFolder || 'uploads');
-  const key = generateKey(filename, folder);
+  const key = generateScopedKey(filename, folder, organizationId);
 
   const eventData = { filename, contentType, folder, key };
 
@@ -102,6 +195,27 @@ export async function confirmUpload(
       throw new Error(`File size exceeds limit of ${maxMB}MB`);
     }
 
+    // Never trust the client-submitted key. It must have exactly the shape
+    // getSignedUploadUrl()'s generateScopedKey() produced (folder prefix +
+    // optional tenant segment + random basename) — anything else (traversal,
+    // URLs, hand-crafted paths) is rejected before any storage call.
+    const keyShape = assertGeneratedKeyShape(input.key);
+
+    // Tenant binding: the key must have been minted FOR this caller's scope.
+    // Closes the leaked-unconfirmed-key hole — knowing another tenant's key
+    // is not enough to claim it. Checked before any DB/storage call.
+    assertTenantBinding(keyShape.tenantSegment, organizationId);
+
+    // Ownership guard: a key already registered to ANY media record (any
+    // tenant, incl. soft-deleted) can't be confirmed again. Without this, a
+    // caller who learns another tenant's key could register it under their
+    // own tenant and later hardDelete() the other tenant's storage object.
+    if (await deps.repository.isKeyRegistered(input.key)) {
+      const err = createError(403, `Storage key '${input.key}' is already registered to an existing media record`);
+      err.code = 'media.confirm.key_in_use';
+      throw err;
+    }
+
     // Verify the file actually exists in storage
     const exists = await deps.driver.exists(input.key);
     if (!exists) {
@@ -114,7 +228,7 @@ export async function confirmUpload(
     const stat = await deps.driver.stat(input.key).catch((err: Error) => {
       throw new Error(
         `Cannot verify uploaded file metadata for key '${input.key}': ${err.message}. ` +
-        `Refusing to trust client-provided metadata.`,
+          `Refusing to trust client-provided metadata.`,
       );
     });
 
@@ -167,12 +281,18 @@ export async function confirmUpload(
       hash = computeFileHash(Buffer.from(`${input.key}:${actualSize}`));
     }
 
-    // Determine folder from key
-    const keyParts = input.key.split('/');
-    const folder = input.folder || (keyParts.length > 1 ? keyParts.slice(0, -1).join('/') : 'uploads');
+    // Determine folder from the key WITHOUT the tenant segment — the segment
+    // is a key-format detail and must not leak into the doc's `folder` field
+    // (visibility.byFolder rules and folder listings operate on it).
+    const folder = input.folder || keyShape.folder || 'uploads';
 
-    // Build public URL
-    const url = input.url || deps.driver.getPublicUrl(input.key);
+    // Build public URL — ALWAYS derived from the driver. A client-supplied
+    // `url` is validated (absolute http(s), matching storage origin) purely
+    // to reject forged input loudly, then discarded.
+    const url = deps.driver.getPublicUrl(input.key);
+    if (input.url !== undefined) {
+      assertClientUrlMatchesDriver(input.url, url, input.key);
+    }
 
     // Generate title
     const title = input.title || generateTitle(input.filename);
@@ -190,6 +310,9 @@ export async function confirmUpload(
         status: 'ready',
         folder,
         alt: input.alt,
+        // Same precedence as upload(): explicit input > byFolder rule > default.
+        visibility: resolveVisibility(deps.config.visibility, folder, input.visibility),
+        tokenVersion: 0,
         variants: [],
         tags: [],
         metadata: {},
@@ -273,7 +396,9 @@ export async function confirmUpload(
             to: 'ready',
             options: context as Record<string, unknown>,
           });
-        } catch { /* ignore revert failure */ }
+        } catch {
+          /* ignore revert failure */
+        }
         log(deps, 'warn', 'Post-confirm processing failed (file still available)', {
           key: input.key,
           error: (processError as Error).message,
@@ -317,12 +442,15 @@ export async function confirmUpload(
 export async function initiateMultipartUpload(
   deps: OperationDeps,
   input: InitiateMultipartInput,
+  context?: OperationContext,
 ): Promise<MultipartUploadSession> {
+  const organizationId = requireTenant(deps, context);
+
   if (!deps.driver.createMultipartUpload) {
     // Fall back to GCS resumable if available
     if (deps.driver.createResumableUpload) {
       const folder = normalizeFolderPath(input.folder || deps.config.folders?.defaultFolder || 'uploads');
-      const key = generateKey(input.filename, folder);
+      const key = generateScopedKey(input.filename, folder, organizationId);
       const result = await deps.driver.createResumableUpload(key, input.contentType);
       return {
         type: 'resumable',
@@ -337,7 +465,7 @@ export async function initiateMultipartUpload(
   }
 
   const folder = normalizeFolderPath(input.folder || deps.config.folders?.defaultFolder || 'uploads');
-  const key = generateKey(input.filename, folder);
+  const key = generateScopedKey(input.filename, folder, organizationId);
 
   await deps.events.emit('before:multipartUpload', { data: input, timestamp: new Date() });
 
@@ -399,9 +527,7 @@ export async function signUploadParts(
   if (!deps.driver.signUploadPart) {
     throw new Error(`Driver '${deps.driver.name}' does not support part signing`);
   }
-  return Promise.all(
-    partNumbers.map((pn) => deps.driver.signUploadPart!(key, uploadId, pn, expiresIn)),
-  );
+  return Promise.all(partNumbers.map((pn) => deps.driver.signUploadPart!(key, uploadId, pn, expiresIn)));
 }
 
 /**
@@ -438,12 +564,21 @@ export async function completeMultipartUpload(
       throw new Error(`File size exceeds limit of ${maxMB}MB`);
     }
 
+    // Same key defenses as confirmUpload(): the client-submitted key must
+    // have the minted shape, be bound to this caller's tenant scope, and not
+    // already belong to a media record. Storage additionally binds key ↔
+    // uploadId, but the DB row below is created from the raw input — these
+    // checks are what keep it trustworthy.
+    const keyShape = assertGeneratedKeyShape(input.key);
+    assertTenantBinding(keyShape.tenantSegment, organizationId);
+    if (await deps.repository.isKeyRegistered(input.key)) {
+      const err = createError(403, `Storage key '${input.key}' is already registered to an existing media record`);
+      err.code = 'media.confirm.key_in_use';
+      throw err;
+    }
+
     // Assemble parts in storage
-    const { etag, size } = await deps.driver.completeMultipartUpload(
-      input.key,
-      input.uploadId,
-      input.parts,
-    );
+    const { etag, size } = await deps.driver.completeMultipartUpload(input.key, input.uploadId, input.parts);
 
     // Use actual size from storage (more reliable than client-reported)
     const actualSize = size || input.size;
@@ -457,7 +592,8 @@ export async function completeMultipartUpload(
     // Hash from ETag (zero cost — already computed by S3 during multipart)
     const hash = etag || computeFileHash(Buffer.from(`${input.key}:${actualSize}`));
 
-    const folder = input.folder || input.key.split('/').slice(0, -1).join('/') || 'uploads';
+    // Folder from the key WITHOUT the tenant segment (same as confirmUpload)
+    const folder = input.folder || keyShape.folder || 'uploads';
     const url = deps.driver.getPublicUrl(input.key);
     const title = input.title || generateTitle(input.filename);
 
@@ -475,6 +611,9 @@ export async function completeMultipartUpload(
         status: 'ready',
         folder,
         alt: input.alt,
+        // Same precedence as upload()/confirmUpload(): byFolder rule > default.
+        visibility: resolveVisibility(deps.config.visibility, folder),
+        tokenVersion: 0,
         variants: [],
         tags: [],
         metadata: {},
@@ -547,7 +686,9 @@ export async function completeMultipartUpload(
             to: 'ready',
             options: context as Record<string, unknown>,
           });
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
         log(deps, 'warn', 'Post-multipart processing failed (file still available)', {
           key: input.key,
           error: (processError as Error).message,
@@ -575,11 +716,7 @@ export async function completeMultipartUpload(
 /**
  * Abort a multipart upload and clean up parts in storage.
  */
-export async function abortMultipartUpload(
-  deps: OperationDeps,
-  key: string,
-  uploadId: string,
-): Promise<void> {
+export async function abortMultipartUpload(deps: OperationDeps, key: string, uploadId: string): Promise<void> {
   if (!deps.driver.abortMultipartUpload) {
     throw new Error(`Driver '${deps.driver.name}' does not support multipart abort`);
   }
@@ -594,16 +731,23 @@ export async function abortMultipartUpload(
 export async function generateBatchPutUrls(
   deps: OperationDeps,
   input: BatchPresignInput,
+  context?: OperationContext,
 ): Promise<BatchPresignResult> {
   if (!deps.driver.getSignedUploadUrl) {
     throw new Error(`Driver '${deps.driver.name}' does not support presigned uploads`);
   }
 
+  // Same MIME/size gate as upload() — reject the whole batch before signing
+  for (const file of input.files) {
+    enforcePresignPolicy(deps, file.contentType, file.size);
+  }
+
+  const organizationId = requireTenant(deps, context);
   const folder = normalizeFolderPath(input.folder || deps.config.folders?.defaultFolder || 'uploads');
 
   const uploads = await Promise.all(
     input.files.map((file) => {
-      const key = generateKey(file.filename, folder);
+      const key = generateScopedKey(file.filename, folder, organizationId);
       return deps.driver.getSignedUploadUrl!(key, file.contentType, input.expiresIn);
     }),
   );

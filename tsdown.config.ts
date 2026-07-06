@@ -12,6 +12,7 @@ export default defineConfig({
     'providers/router': 'src/providers/router.ts',
     transforms: 'src/transforms/index.ts',
     schemas: 'src/validators/index.ts',
+    signing: 'src/signing/index.ts',
   },
   format: ['esm'],
   dts: true,

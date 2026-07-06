@@ -3,7 +3,8 @@
  * Pure functions that read from OperationDeps but don't call other operations.
  */
 
-import crypto from 'crypto';
+import crypto from 'node:crypto';
+import { createError } from '@classytic/repo-core/errors';
 import type { OperationDeps, ConfigOnlyDeps } from './types';
 import type {
   OperationContext,
@@ -72,14 +73,8 @@ export function getContentType(deps: ConfigOnlyDeps, folder: string): string {
 /**
  * Get aspect ratio preset for a content type.
  */
-export function getAspectRatio(
-  deps: ConfigOnlyDeps,
-  contentType: string,
-): AspectRatioPreset | undefined {
-  return (
-    deps.config.processing?.aspectRatios?.[contentType] ||
-    deps.config.processing?.aspectRatios?.default
-  );
+export function getAspectRatio(deps: ConfigOnlyDeps, contentType: string): AspectRatioPreset | undefined {
+  return deps.config.processing?.aspectRatios?.[contentType] || deps.config.processing?.aspectRatios?.default;
 }
 
 /**
@@ -96,6 +91,97 @@ export function generateKey(filename: string, folder: string): string {
 }
 
 /**
+ * Reserved tenant-scope key segment. `__`-prefixed segments are this
+ * package's internal namespace (same convention as `__transforms/` and the
+ * `__original` variant) — host folders must not use the prefix, so a
+ * `__t-<id>` segment in a key is unambiguously a tenant binding, never a
+ * folder name (`products/t-shirts` stays a plain folder).
+ */
+const TENANT_SEGMENT_PREFIX = '__t-';
+const TENANT_SEGMENT_SHAPE = /^__t-[a-zA-Z0-9_-]+$/;
+
+/** Sanitized `__t-<organizationId>` segment (ObjectId hex / UUIDs pass through unchanged). */
+export function tenantKeySegment(organizationId: unknown): string {
+  return `${TENANT_SEGMENT_PREFIX}${String(organizationId).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+}
+
+/**
+ * Generate a storage key for CLIENT-COMPLETED upload flows (presign,
+ * multipart, resumable). When the caller context carries a tenant, the key
+ * embeds a `__t-<orgId>` segment so confirm-time can verify the key was
+ * minted FOR that tenant — a leaked unconfirmed key cannot be claimed by
+ * anyone else. Without a tenant the format is identical to generateKey().
+ */
+export function generateScopedKey(filename: string, folder: string, organizationId?: unknown): string {
+  if (organizationId === undefined || organizationId === null || organizationId === '') {
+    return generateKey(filename, folder);
+  }
+  return generateKey(filename, `${folder}/${tenantKeySegment(organizationId)}`);
+}
+
+/**
+ * Basename shape produced by {@link generateKey}:
+ * `<ms-timestamp>-<12 hex chars>-<sanitized name>.<ext>`.
+ * Name/ext segments are restricted to the sanitizer charset ([a-zA-Z0-9._-]).
+ */
+const GENERATED_KEY_BASENAME = /^\d{13,}-[0-9a-f]{12}-[a-zA-Z0-9._-]*\.[a-zA-Z0-9_-]+$/;
+
+/** Result of {@link assertGeneratedKeyShape} — the extracted tenant binding, if any. */
+export interface GeneratedKeyShape {
+  /** Full `__t-<orgId>` segment when the key was minted tenant-scoped, else undefined. */
+  tenantSegment: string | undefined;
+  /** Folder path with the tenant segment (if any) stripped — safe for the doc's `folder` field. */
+  folder: string;
+}
+
+/**
+ * Assert that a client-submitted storage key has exactly the shape this
+ * package's {@link generateScopedKey} produces under a normalized folder
+ * prefix, and extract its tenant binding.
+ *
+ * confirmUpload() must never trust a raw client key — without this check a
+ * caller could register (and later hard-delete or read through transforms)
+ * arbitrary storage objects, including paths outside the presign folder
+ * space. Throws a 400 HttpError (`code: 'media.confirm.invalid_key'`).
+ *
+ * A `__t-` segment is accepted ONLY in the position generateScopedKey mints
+ * it (immediately before the basename) and only in the sanitizer charset —
+ * anywhere else is a hand-crafted key.
+ */
+export function assertGeneratedKeyShape(key: string): GeneratedKeyShape {
+  const fail = (reason: string): never => {
+    const err = createError(400, `Invalid storage key '${key}': ${reason}`);
+    err.code = 'media.confirm.invalid_key';
+    throw err;
+  };
+
+  if (key.includes('\\') || key.includes('://')) fail('malformed path');
+  const segments = key.split('/');
+  if (segments.length < 2) fail('missing folder prefix');
+  // Empty segments cover leading/trailing/duplicate slashes (non-normalized
+  // folder); '.'/'..' segments are path traversal.
+  if (segments.some((s) => s === '' || s === '.' || s === '..')) fail('path traversal or non-normalized folder');
+  const basename = segments[segments.length - 1]!;
+  if (!GENERATED_KEY_BASENAME.test(basename)) fail('basename does not match the generated-key format');
+
+  const maybeTenant = segments.length >= 3 ? segments[segments.length - 2]! : undefined;
+  const tenantSegment =
+    maybeTenant !== undefined && maybeTenant.startsWith(TENANT_SEGMENT_PREFIX) ? maybeTenant : undefined;
+  if (tenantSegment !== undefined && !TENANT_SEGMENT_SHAPE.test(tenantSegment)) {
+    fail('malformed tenant segment');
+  }
+  // The tenant segment position is the ONLY place the reserved prefix may
+  // appear; a folder path segment using it is a forgery attempt.
+  const folderSegments = segments.slice(0, tenantSegment !== undefined ? -2 : -1);
+  if (folderSegments.some((s) => s.startsWith(TENANT_SEGMENT_PREFIX))) {
+    fail('reserved tenant segment in folder path');
+  }
+  if (tenantSegment !== undefined && folderSegments.length === 0) fail('missing folder prefix');
+
+  return { tenantSegment, folder: folderSegments.join('/') };
+}
+
+/**
  * Auto-generate a human-readable title from a filename.
  */
 export function generateTitle(filename: string): string {
@@ -106,12 +192,7 @@ export function generateTitle(filename: string): string {
 /**
  * Validate file buffer, filename, and MIME type against config rules.
  */
-export function validateFile(
-  deps: ConfigOnlyDeps,
-  buffer: Buffer,
-  filename: string,
-  mimeType: string,
-): void {
+export function validateFile(deps: ConfigOnlyDeps, buffer: Buffer, filename: string, mimeType: string): void {
   if (!buffer || buffer.length === 0) {
     throw new Error(`Cannot upload empty file '${filename}'. Buffer is empty or missing.`);
   }
@@ -132,11 +213,7 @@ export function validateFile(
  * Copy a file between storage keys.
  * Uses driver.copy() if available, otherwise read → write fallback.
  */
-async function copyStorageFile(
-  driver: StorageDriver,
-  sourceKey: string,
-  destinationKey: string,
-): Promise<WriteResult> {
+async function copyStorageFile(driver: StorageDriver, sourceKey: string, destinationKey: string): Promise<WriteResult> {
   if (driver.copy) {
     return driver.copy(sourceKey, destinationKey);
   }
@@ -159,7 +236,7 @@ export function rewriteKey(oldKey: string, targetFolder: string): string {
  * Used by renameFolder to remap nested paths.
  */
 export function rewriteKeyPrefix(key: string, oldPrefix: string, newPrefix: string): string {
-  if (key.startsWith(oldPrefix + '/')) {
+  if (key.startsWith(`${oldPrefix}/`)) {
     return newPrefix + key.slice(oldPrefix.length);
   }
   if (key === oldPrefix) {
@@ -252,7 +329,12 @@ export async function executeKeyRewrite(
           }
           completed++;
           void deps.events.emit(progressEvent, {
-            fileId, completed, total, key: file.key, context, timestamp: new Date(),
+            fileId,
+            completed,
+            total,
+            key: file.key,
+            context,
+            timestamp: new Date(),
           });
           return;
         }
@@ -292,7 +374,12 @@ export async function executeKeyRewrite(
 
           completed++;
           void deps.events.emit(progressEvent, {
-            fileId, completed, total, key: writeResult.key, context, timestamp: new Date(),
+            fileId,
+            completed,
+            total,
+            key: writeResult.key,
+            context,
+            timestamp: new Date(),
           });
         } catch (err) {
           const reason = (err as Error).message;
@@ -302,10 +389,19 @@ export async function executeKeyRewrite(
           // Without this, a variant-copy failure mid-way would leave the
           // first few new keys orphaned even though no DB update lands.
           for (const orphan of newKeysCopied) {
-            try { await deps.driver.delete(orphan); } catch { /* ignore */ }
+            try {
+              await deps.driver.delete(orphan);
+            } catch {
+              /* ignore */
+            }
           }
           void deps.events.emit(progressEvent, {
-            fileId, completed, total, key: file.key, context, timestamp: new Date(),
+            fileId,
+            completed,
+            total,
+            key: file.key,
+            context,
+            timestamp: new Date(),
           });
           log(deps, 'warn', 'Failed to copy file during key rewrite', {
             id: fileId,
@@ -318,10 +414,7 @@ export async function executeKeyRewrite(
     ),
   );
 
-  const allUpdates = [
-    ...plans.map((p) => ({ id: p.fileId, data: p.updateData })),
-    ...noOpUpdates,
-  ];
+  const allUpdates = [...plans.map((p) => ({ id: p.fileId, data: p.updateData })), ...noOpUpdates];
 
   if (allUpdates.length === 0) {
     return { modifiedCount: 0, failed };
@@ -339,7 +432,11 @@ export async function executeKeyRewrite(
   } catch (dbError) {
     for (const plan of plans) {
       for (const key of plan.newKeysCopied) {
-        try { await deps.driver.delete(key); } catch { /* ignore rollback failure */ }
+        try {
+          await deps.driver.delete(key);
+        } catch {
+          /* ignore rollback failure */
+        }
       }
     }
     throw dbError;
@@ -369,7 +466,11 @@ export async function executeKeyRewrite(
   for (const plan of plans) {
     if (succeededIds.has(plan.fileId)) continue;
     for (const newKey of plan.newKeysCopied) {
-      try { await deps.driver.delete(newKey); } catch { /* ignore rollback failure */ }
+      try {
+        await deps.driver.delete(newKey);
+      } catch {
+        /* ignore rollback failure */
+      }
     }
     // Surface the failure so callers can react / log / alert.
     const dbFailure = perFileFailures.find((f) => f.id === plan.fileId);

@@ -50,7 +50,7 @@ export interface ProcessImageResult {
     audioCodec?: string;
   };
   duration?: number;
-  exif?: Record<string, any>;
+  exif?: Record<string, unknown>;
 }
 
 /**
@@ -77,10 +77,7 @@ function resolveOriginalHandling(config?: ProcessingConfig): OriginalHandling {
  * Returns the (possibly transformed) buffer, dimensions, and uploaded variants.
  * On processing failure, returns the original buffer unchanged.
  */
-export async function processImage(
-  deps: OperationDeps,
-  params: ProcessImageParams,
-): Promise<ProcessImageResult> {
+export async function processImage(deps: OperationDeps, params: ProcessImageParams): Promise<ProcessImageResult> {
   let { buffer, filename, mimeType } = params;
   const { skipProcessing, contentType, focalPoint, targetFolder, context } = params;
 
@@ -99,7 +96,7 @@ export async function processImage(
 
   // RAW adapter: convert camera RAW formats to Sharp-processable format before processing
   const rawAdapter = deps.config.processing?.rawAdapter;
-  if (isRawImage(mimeType) && rawAdapter && rawAdapter.supportedTypes.includes(mimeType.toLowerCase())) {
+  if (isRawImage(mimeType) && rawAdapter?.supportedTypes.includes(mimeType.toLowerCase())) {
     try {
       log(deps, 'info', 'Converting RAW image via rawAdapter', { filename, mimeType });
       const converted = await rawAdapter.convert(buffer, mimeType);
@@ -116,11 +113,7 @@ export async function processImage(
     }
   }
 
-  const shouldProcess =
-    !skipProcessing &&
-    deps.config.processing?.enabled &&
-    deps.processor &&
-    isImage(mimeType);
+  const shouldProcess = !skipProcessing && deps.config.processing?.enabled && deps.processor && isImage(mimeType);
 
   if (shouldProcess && deps.processor) {
     const effectiveContentType = contentType || getContentType(deps, targetFolder);
@@ -155,10 +148,16 @@ export async function processImage(
       if (deps.config.processing?.smartSkip && deps.processor?.isOptimized) {
         const isOptimized = await deps.processor.isOptimized(buffer, mimeType);
         const targetFormat = processOpts.format;
-        const FORMAT_MIME_MAP: Record<string, string> = { webp: 'image/webp', jpeg: 'image/jpeg', png: 'image/png', avif: 'image/avif' };
+        const FORMAT_MIME_MAP: Record<string, string> = {
+          webp: 'image/webp',
+          jpeg: 'image/jpeg',
+          png: 'image/png',
+          avif: 'image/avif',
+        };
         const sameFormat = !targetFormat || mimeType === FORMAT_MIME_MAP[targetFormat];
-        const needsResize = (processOpts.maxWidth && width !== undefined && width > processOpts.maxWidth) ||
-                            (processOpts.maxHeight && height !== undefined && height > processOpts.maxHeight);
+        const needsResize =
+          (processOpts.maxWidth && width !== undefined && width > processOpts.maxWidth) ||
+          (processOpts.maxHeight && height !== undefined && height > processOpts.maxHeight);
 
         if (isOptimized && sameFormat && !needsResize) {
           log(deps, 'info', 'Smart skip: image already optimized', { filename });
@@ -169,10 +168,7 @@ export async function processImage(
       // Original handling: store untouched original as '__original' variant BEFORE processing
       const originalHandling = resolveOriginalHandling(deps.config.processing);
       if (originalHandling === 'keep-variant' && !skipMainProcess) {
-        const origFilename = updateFilenameExtension(
-          `${filename.replace(/\.[^.]+$/, '')}__original`,
-          mimeType,
-        );
+        const origFilename = updateFilenameExtension(`${filename.replace(/\.[^.]+$/, '')}__original`, mimeType);
         const origKey = generateKey(origFilename, targetFolder);
         const origWrite = await deps.driver.write(origKey, buffer, mimeType);
         variants.push({
@@ -215,16 +211,13 @@ export async function processImage(
         const sizeVariants = deps.config.processing?.sizes;
         if (sizeVariants && sizeVariants.length > 0) {
           for (const variant of sizeVariants) {
-            if (!deps.processor!.generateVariants) continue;
-            const [variantResult] = await deps.processor!.generateVariants(buffer, [variant], processOpts);
+            if (!deps.processor?.generateVariants) continue;
+            const [variantResult] = await deps.processor.generateVariants(buffer, [variant], processOpts);
 
             if (!variantResult) continue;
 
             const baseFilename = finalFilename.replace(/\.[^.]+$/, '');
-            const variantFilename = updateFilenameExtension(
-              `${baseFilename}-${variant.name}`,
-              variantResult.mimeType,
-            );
+            const variantFilename = updateFilenameExtension(`${baseFilename}-${variant.name}`, variantResult.mimeType);
 
             const variantKey = generateKey(variantFilename, targetFolder);
             const variantWriteResult = await deps.driver.write(
@@ -280,11 +273,12 @@ export async function processImage(
   let thumbhash: string | undefined;
   if (deps.config.processing?.thumbhash !== false && isImage(mimeType)) {
     try {
-      const sharp = deps.processor && 'getSharpInstance' in deps.processor
-        ? await (deps.processor as any).getSharpInstance()
-        : null;
+      const sharp =
+        deps.processor && 'getSharpInstance' in deps.processor
+          ? await (deps.processor as import('../processing/image.js').SharpInstanceSource).getSharpInstance()
+          : null;
       if (sharp) {
-        thumbhash = await generateThumbHash(sharp, buffer) ?? undefined;
+        thumbhash = (await generateThumbHash(sharp, buffer)) ?? undefined;
       }
     } catch {
       // Non-blocking
@@ -295,14 +289,14 @@ export async function processImage(
   let dominantColor: string | undefined;
   if (deps.config.processing?.dominantColor !== false && deps.processor?.extractDominantColor && isImage(mimeType)) {
     try {
-      dominantColor = await deps.processor.extractDominantColor(buffer) ?? undefined;
+      dominantColor = (await deps.processor.extractDominantColor(buffer)) ?? undefined;
     } catch {
       // Non-blocking
     }
   }
 
   // EXIF extraction
-  let exif: Record<string, any> | undefined;
+  let exif: Record<string, unknown> | undefined;
   if (deps.processor?.extractMetadata && isImage(mimeType)) {
     try {
       exif = await deps.processor.extractMetadata(buffer);
@@ -316,9 +310,9 @@ export async function processImage(
   let videoDuration: number | undefined;
   const videoAdapter = deps.config.processing?.videoAdapter;
   if (isVideo(mimeType) && videoAdapter) {
-    const os = await import('os');
-    const fs = await import('fs/promises');
-    const path = await import('path');
+    const os = await import('node:os');
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
     const tempPath = path.join(os.tmpdir(), `mk-${Date.now()}-${filename}`);
     try {
       await fs.writeFile(tempPath, buffer);
@@ -357,9 +351,27 @@ export async function processImage(
     } catch (err) {
       log(deps, 'warn', 'Video processing failed', { filename, error: (err as Error).message });
     } finally {
-      try { const fs2 = await import('fs/promises'); await fs2.unlink(tempPath); } catch { /* ignore */ }
+      try {
+        const fs2 = await import('node:fs/promises');
+        await fs2.unlink(tempPath);
+      } catch {
+        /* ignore */
+      }
     }
   }
 
-  return { finalBuffer, finalMimeType, finalFilename, width, height, aspectRatio, variants, thumbhash, dominantColor, videoMetadata, duration: videoDuration, exif };
+  return {
+    finalBuffer,
+    finalMimeType,
+    finalFilename,
+    width,
+    height,
+    aspectRatio,
+    variants,
+    thumbhash,
+    dominantColor,
+    videoMetadata,
+    duration: videoDuration,
+    exif,
+  };
 }

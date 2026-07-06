@@ -24,6 +24,7 @@ export const uploadInputSchema = z.object({
   skipProcessing: z.boolean().optional(),
   provider: z.string().optional(),
   expiresAt: z.coerce.date().optional(),
+  visibility: z.enum(['public', 'private']).optional(),
 });
 
 export const confirmUploadSchema = z.object({
@@ -34,10 +35,11 @@ export const confirmUploadSchema = z.object({
   folder: z.string().optional(),
   alt: z.string().optional(),
   title: z.string().optional(),
-  url: z.string().optional(),
+  url: z.url().optional(),
   hashStrategy: z.enum(['etag', 'sha256', 'skip']).optional(),
   etag: z.string().optional(),
   process: z.boolean().optional(),
+  visibility: z.enum(['public', 'private']).optional(),
 });
 
 export const initiateMultipartSchema = z.object({
@@ -67,12 +69,15 @@ export const completeMultipartSchema = z.object({
 });
 
 export const batchPresignSchema = z.object({
-  files: z.array(
-    z.object({
-      filename: z.string().min(1),
-      contentType: z.string().min(1),
-    }),
-  ).min(1),
+  files: z
+    .array(
+      z.object({
+        filename: z.string().min(1),
+        contentType: z.string().min(1),
+        size: z.number().int().min(1).optional(),
+      }),
+    )
+    .min(1),
   folder: z.string().optional(),
   expiresIn: z.number().int().min(1).optional(),
 });

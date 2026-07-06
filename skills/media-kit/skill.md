@@ -1,12 +1,17 @@
 ---
 name: media-kit
 description: |
-  @classytic/media-kit — Production-grade media management for Mongoose with pluggable storage (S3, GCS, local).
-  Use when building file uploads, image processing, presigned uploads, multipart uploads, media CRUD,
-  asset transforms, or integrating cloud storage with MongoDB.
+  @classytic/media-kit — Production-grade media management for Mongoose with pluggable storage
+  (S3, GCS, local, Cloudinary, ImageKit, imgbb), image processing, and PRIVATE media serving
+  (HMAC-signed proxy URLs + LLM-context helpers).
+  Use when building file uploads, image processing, presigned/multipart uploads, media CRUD,
+  asset transforms, private/authenticated media (auth-gated buckets like Drive/Dropbox/ChatGPT),
+  signed download URLs, or feeding stored images to a vision LLM (Claude/OpenAI).
   Triggers: media upload, file storage, s3 upload, gcs upload, presigned url, multipart upload,
-  image processing, sharp, media management, asset transform, media-kit, storage driver.
-version: 3.1.0
+  image processing, sharp, media management, asset transform, media-kit, storage driver,
+  private media, signed url, authenticated media, serve private image, revoke access,
+  media for llm, base64 for vision, getContextPayload, visibility public private.
+version: 3.4.0
 license: MIT
 metadata:
   author: Classytic
@@ -22,40 +27,47 @@ tags:
   - multipart-upload
   - sharp
   - asset-transform
+  - private-media
+  - signed-url
+  - hmac
+  - llm-vision
   - file-management
 progressive_disclosure:
   entry_point:
-    summary: "Media management for Mongoose: S3/GCS storage, image processing, presigned/multipart uploads, soft delete, multi-tenancy"
-    when_to_use: "Building file uploads, cloud storage integration, image processing, presigned/multipart uploads, or media CRUD with MongoDB"
-    quick_start: "1. npm install @classytic/media-kit 2. createMedia({ driver: new S3Provider({...}) }) 3. media.upload/getSignedUploadUrl/confirmUpload"
-  context_limit: 700
+    summary: "Media management for Mongoose: S3/GCS/local storage, image processing, presigned/multipart uploads, PRIVATE serving via HMAC-signed proxy URLs, LLM-context helpers, soft delete, multi-tenancy"
+    when_to_use: "Building file uploads, cloud storage integration, image processing, presigned/multipart uploads, private/authenticated media serving, signed download URLs, feeding stored images to a vision LLM, or media CRUD with MongoDB"
+    quick_start: "1. npm install @classytic/media-kit 2. createMedia({ driver: new S3Provider({...}) }) 3. media.upload / getSignedUploadUrl+confirmUpload / getSignedAssetUrl (private)"
+  context_limit: 800
 ---
 
 # @classytic/media-kit
 
-Production-grade media management for Mongoose with pluggable storage drivers, image processing, presigned/multipart uploads, and full TypeScript support. **458 tests.** Built on `@classytic/mongokit`.
+Production-grade media management for Mongoose: pluggable storage drivers, image processing,
+presigned/multipart uploads, **private media serving** (HMAC-signed proxy URLs), and
+**LLM-context helpers**. Full TypeScript, ESM-only. Built on `@classytic/mongokit`. **606 tests.**
 
-**Requires:** Mongoose `^9.0.0` | Node.js `>=18`
+**Requires:** Node.js `>=22` · Mongoose `>=9.4.1` · `@classytic/mongokit` `>=3.14`. Named
+exports only (no default exports). Heavy SDKs are optional peers — install only what you use.
 
 ## Installation
 
 ```bash
 npm install @classytic/media-kit @classytic/mongokit mongoose
-# Optional peer deps:
-npm install sharp                                          # Image processing
+# Optional peers, per feature:
+npm install sharp                                             # image processing
 npm install @aws-sdk/client-s3 @aws-sdk/s3-request-presigner  # S3
-npm install @google-cloud/storage                          # GCS
+npm install @google-cloud/storage                            # GCS
 ```
 
-## Core Pattern
+## Core pattern
 
 ```typescript
-import { createMedia } from '@classytic/media-kit';
+import { createMedia } from '@classytic/media-kit';        // named import — no default export
 import { S3Provider } from '@classytic/media-kit/providers/s3';
 import mongoose from 'mongoose';
 
 const media = createMedia({
-  driver: new S3Provider({ bucket: 'my-bucket', region: 'us-east-1', credentials: { accessKeyId: '...', secretAccessKey: '...' } }),
+  driver: new S3Provider({ bucket: 'my-bucket', region: 'us-east-1', credentials: { accessKeyId, secretAccessKey } }),
   processing: { enabled: true, format: 'webp', quality: 80, sizes: [{ name: 'thumb', width: 150, height: 150 }, { name: 'large', width: 1920 }] },
   fileTypes: { allowed: ['image/*', 'video/*'], maxSize: 100 * 1024 * 1024 },
   softDelete: { enabled: true, ttlDays: 30 },
@@ -63,220 +75,227 @@ const media = createMedia({
 });
 
 const Media = mongoose.model('Media', media.schema);
-media.init(Media);
+media.init(Media);                                          // required before any operation
 ```
 
-## Storage Drivers
+## Storage drivers
 
-| Driver | Import | Use Case |
-|--------|--------|----------|
-| `S3Provider` | `@classytic/media-kit/providers/s3` | AWS S3, MinIO, R2, DigitalOcean Spaces |
-| `GCSProvider` | `@classytic/media-kit/providers/gcs` | Google Cloud Storage |
-| `LocalProvider` | `@classytic/media-kit/providers/local` | Local filesystem (dev) |
-| `StorageRouter` | `@classytic/media-kit/providers/router` | Multi-backend routing by key prefix |
-
-### S3Provider Config
+| Driver | Import subpath | Use case |
+|--------|----------------|----------|
+| `S3Provider` | `providers/s3` | AWS S3, MinIO, R2, DigitalOcean Spaces |
+| `GCSProvider` | `providers/gcs` | Google Cloud Storage |
+| `LocalProvider` | `providers/local` | Local filesystem (dev) |
+| `CloudinaryProvider` | `providers/cloudinary` | Cloudinary CDN |
+| `ImageKitProvider` | `providers/imagekit` | ImageKit CDN |
+| `ImgbbProvider` | `providers/imgbb` | imgbb (public hosting) |
+| `StorageRouter` | `providers/router` | Multi-backend routing by key prefix (e.g. public→S3, private→locked S3) |
 
 ```typescript
-new S3Provider({
-  bucket: string,
-  region: string,
-  credentials?: { accessKeyId, secretAccessKey },
-  endpoint?: string,       // S3-compatible services
-  publicUrl?: string,      // CDN URL
-  acl?: 'private' | 'public-read',
-  forcePathStyle?: boolean,
-})
+new S3Provider({ bucket, region, credentials?, endpoint?, publicUrl?, acl?: 'private' | 'public-read', forcePathStyle? })
+new GCSProvider({ bucket, projectId?, keyFilename?, credentials?, makePublic?, publicUrl? })
 ```
 
-### GCSProvider Config
+## Upload operations
 
-```typescript
-new GCSProvider({
-  bucket: string,
-  projectId?: string,
-  keyFilename?: string,
-  credentials?: { client_email, private_key },
-  makePublic?: boolean,
-  publicUrl?: string,
-})
-```
-
-## Upload Operations
-
-### Standard Upload (buffer to storage)
+### Standard upload (buffer → storage)
 
 ```typescript
 const file = await media.upload({
   buffer, filename: 'photo.jpg', mimeType: 'image/jpeg',
   folder: 'products', tags: ['featured'], alt: 'Product photo',
-  focalPoint: { x: 0.3, y: 0.4 },  // for smart cropping
-  quality: 85, format: 'webp', maxWidth: 2048,
+  focalPoint: { x: 0.3, y: 0.4 },          // smart-crop anchor
+  visibility: 'private',                    // optional per-upload override (see Private media)
 }, context?);
-// Returns: { _id, url, key, mimeType, size, width, height, hash, status, variants[], thumbhash, dominantColor, ... }
+// → { _id, url, key, mimeType, size, width, height, hash, status, variants[], thumbhash, dominantColor, visibility, ... }
 
-const files = await media.uploadMany([...inputs], context?);
-const replaced = await media.replace(id, { buffer, filename, mimeType }, context?);
+await media.uploadMany([...inputs], context?);
+await media.replace(id, { buffer, filename, mimeType }, context?);   // same _id; preserves visibility unless overridden
 ```
 
-### Presigned Upload (client-direct, no server buffering)
+### Presigned upload (client-direct, no server buffering)
+
+Keys are minted server-side and are **tenant-bound** under a tenant context (a `__t-<orgId>`
+segment); `confirmUpload` enforces that binding, so a leaked key can't be claimed cross-tenant.
+Always pass `context` on both calls when multi-tenant.
 
 ```typescript
-// 1. Server generates signed URL
-const { uploadUrl, key } = await media.getSignedUploadUrl('video.mp4', 'video/mp4', { folder: 'videos' });
-
-// 2. Client PUTs directly to S3/GCS
-await fetch(uploadUrl, { method: 'PUT', body: file });
-
-// 3. Server confirms + creates DB record
+const { uploadUrl, key } = await media.getSignedUploadUrl('video.mp4', 'video/mp4', { folder: 'videos' }, context?);
+await fetch(uploadUrl, { method: 'PUT', body: file });           // client → cloud
 const doc = await media.confirmUpload({
   key, filename: 'video.mp4', mimeType: 'video/mp4', size: file.size,
-  hashStrategy: 'skip',  // 'skip' (default, zero cost) | 'etag' | 'sha256'
-  process: true,          // opt-in: ThumbHash, variants, dominant color
+  hashStrategy: 'skip',    // 'skip' (default, zero cost) | 'etag' | 'sha256'
+  process: true,           // opt-in ThumbHash / variants / dominant color
 }, context?);
 ```
 
-### Multipart Upload (large files >5GB, resumable)
+`confirmUpload` is hardened: the client key must match the generated shape (traversal / URLs /
+hand-crafted keys → 400), can't already belong to a record (403), and the stored `url` is always
+derived server-side (a client `url` is validated then discarded).
 
-Auto-detects driver: S3 returns `type='multipart'`, GCS returns `type='resumable'`.
+### Multipart / resumable (large files) & batch
 
 ```typescript
-// Initiate session with all part URLs signed upfront
-const session = await media.initiateMultipartUpload({
-  filename: 'raw-footage.mov', contentType: 'video/quicktime',
-  folder: 'videos', partCount: Math.ceil(fileSize / PART_SIZE),
-});
-
-if (session.type === 'multipart') {
-  // S3: parallel part uploads
-  const parts = await Promise.all(
-    chunks.map((chunk, i) =>
-      fetch(session.parts[i].uploadUrl, { method: 'PUT', body: chunk })
-        .then(r => ({ partNumber: i + 1, etag: r.headers.get('etag')! }))
-    )
-  );
-  const doc = await media.completeMultipartUpload({
-    key: session.key, uploadId: session.uploadId!, parts,
-    filename: 'raw-footage.mov', mimeType: 'video/quicktime', size: fileSize,
-  });
-} else {
-  // GCS: sequential chunks to single URI with Content-Range headers
-  // Then: media.confirmUpload({ key: session.key, ... })
-}
-
-// On-demand part signing, abort, GCS helpers:
+const session = await media.initiateMultipartUpload({ filename, contentType, folder, partCount }, context?);
+// S3 → session.type === 'multipart' (parallel parts + completeMultipartUpload)
+// GCS → session.type === 'resumable' (sequential Content-Range chunks + confirmUpload)
+await media.completeMultipartUpload({ key, uploadId, parts, filename, mimeType, size }, context?);
 await media.signUploadPart(key, uploadId, partNumber);
-await media.signUploadParts(key, uploadId, [1, 2, 3]);
 await media.abortMultipartUpload(key, uploadId);
-await media.getResumableUploadStatus(sessionUri);
-await media.abortResumableUpload(sessionUri);
+
+// Batch presigned PUTs (HLS segments, multi-file):
+const { uploads } = await media.generateBatchPutUrls({ files: [{ filename, contentType }, ...], folder }, context?);
 ```
 
-### Batch Presigned URLs (HLS segments, multi-file)
+## Private media serving
 
-```typescript
-const { uploads } = await media.generateBatchPutUrls({
-  files: [{ filename: 'seg-0.ts', contentType: 'video/mp2t' }, ...],
-  folder: 'live/session-abc',
-});
-```
+The pattern behind Drive/Dropbox/ChatGPT: a **private bucket + authenticated proxy**. Media-kit
+owns the reusable parts — a `visibility` flag, an HMAC URL signer, an auth gate on the streaming
+serve pipeline, and an LLM-context helper. Works over **every** driver (unlike S3/GCS native
+signed URLs, which cap at 7 days and don't exist on Local/Cloudinary/etc.).
 
-## CRUD & Queries
-
-```typescript
-const file = await media.getById(id, context?);
-const page = await media.getAll({ page: 1, limit: 20, sort: '-createdAt', filters: { folder: 'products' } }, context?);
-const results = await media.search('shoes', { limit: 10 }, context?);
-await media.delete(id, context?);
-await media.deleteMany([id1, id2], context?);
-await media.softDelete(id, context?);
-await media.restore(id, context?);
-await media.purgeDeleted(olderThan?, context?);
-```
-
-## Folders & Organization
-
-```typescript
-const tree = await media.getFolderTree(context?);
-const stats = await media.getFolderStats('products', context?);
-const crumbs = media.getBreadcrumb('products/electronics/phones');
-await media.renameFolder('old/path', 'new/path', context?);
-await media.move([id1, id2], 'target-folder', context?);
-await media.addTags(id, ['sale', 'featured'], context?);
-await media.setFocalPoint(id, { x: 0.3, y: 0.2 }, context?);
-```
-
-## Image Processing
-
-Requires `sharp`. Aspect ratio preserved by default. Only crops when explicitly configured.
-
-```typescript
-processing: {
-  enabled: true,
-  format: 'webp',          // 'webp' | 'jpeg' | 'png' | 'avif' | 'original'
-  quality: 80,              // or { jpeg: 82, webp: 82, avif: 50, png: 100 }
-  maxWidth: 2048,
-  keepOriginal: true,       // store untouched original as '__original' variant
-  smartSkip: true,          // skip re-compression if already optimized
-  generateAlt: true,        // auto alt-text from filename
-  aspectRatios: {
-    product: { aspectRatio: 3/4, fit: 'cover' },
-    avatar: { aspectRatio: 1, fit: 'cover' },
-    default: { preserveRatio: true },  // never crop (default)
-  },
-  sizes: [
-    { name: 'thumbnail', width: 150, height: 150 },  // width+height = crop
-    { name: 'medium', width: 800 },                   // width-only = preserve ratio
-    { name: 'large', width: 1920 },
-  ],
-}
-```
-
-**Focal point cropping:** When aspect ratio is enforced with a focal point, uses Payload CMS's extract-then-resize algorithm to keep the subject visible.
-
-**Auto-features:** ThumbHash (blur placeholder), dominant color extraction, EXIF metadata, video thumbnail via optional `videoAdapter`.
-
-## Events
-
-```typescript
-media.on('before:upload', async (event) => { /* validate/modify */ });
-media.on('after:upload', async (event) => { await notify(event.result); });
-media.on('error:upload', async (event) => { log(event.error); });
-// Operations: upload, delete, move, replace, softDelete, restore, import,
-// presignedUpload, confirmUpload, multipartUpload, completeMultipart, rename
-```
-
-## Multi-Tenancy
+### 1. Mark media private
 
 ```typescript
 const media = createMedia({
   driver,
-  multiTenancy: { enabled: true, field: 'organizationId', required: true },
+  visibility: { default: 'private', byFolder: { products: 'public' } },   // explicit upload > byFolder > default > 'public'
+  signing: { secret: process.env.MEDIA_SIGNING_SECRET!, servePath: '/media/content', defaultTtl: 3600 },
 });
+```
+`visibility` defaults to `'public'` (unchanged behavior; public uploads pay nothing for the
+private machinery). Private S3 uploads get a per-object `private` ACL automatically.
 
-// All operations auto-scoped
-const ctx = { userId: user._id, organizationId: org._id };
-await media.upload(input, ctx);
-await media.getAll({ limit: 20 }, ctx);
+### 2. Serve through the auth gate
+
+`AssetTransformService.handle(req)` is a framework-agnostic serve pipeline (Range/206, sharp
+transforms, cache headers). For private docs it admits via **either** a valid signature **or** a
+host `authorize(req, media)` callback:
+
+```typescript
+// arc / Fastify: one route → the serve pipeline
+fastify.get('/media/content/:id/:variant?', async (req, reply) => {
+  const res = await transformService.handle({
+    fileId: req.params.id, variant: req.params.variant,
+    query: req.query, principal: req.scope,          // your session/JWT
+    range: req.headers.range, accept: req.headers.accept,
+  });
+  reply.code(res.status).headers(res.headers);
+  return res.stream;
+});
+```
+- **Public docs** → served as today.
+- **Private + valid signature** → served (LLM fetchers, `<img>` embeds, share links).
+- **Private + session** → your `authorize(req, media)` returns true/false (throwing = 403, fail-closed). This is the bridge point for entitlement engines — call `@classytic/access`'s `check()` here; media-kit never imports it.
+- The "400 thumbnails in a list" case: render `<img src="/media/content/:id/thumb">` and let session-`authorize` admit them — **no per-URL signing**, Drive-style.
+
+### 3. Mint & revoke signed URLs
+
+```typescript
+const url = await media.getSignedAssetUrl(id, { variant?: 'thumb', expiresIn?: 86400, claims?: { u: userId } }, ctx?);
+// → `${servePath}/${id}[/variant]?e=<exp>&kid=<k>&v=<tokenVersion>&sig=<hmac>`
+await media.revokeAccess(id, ctx?);   // $inc tokenVersion → every outstanding signed URL dies instantly
 ```
 
-## Key Types
+Standalone signer at the `/signing` subpath (zero-dep `node:crypto`, usable in edge workers):
+```typescript
+import { createUrlSigner } from '@classytic/media-kit/signing';
+const signer = createUrlSigner({ keys: { k2: secretNew, k1: secretOld }, currentKid: 'k2', defaultTtl: 3600 });
+signer.sign({ id, variant?, expiresIn?, claims?, tokenVersion? });   // → { query, expiresAt }
+signer.verify({ id, variant?, params, expectedTokenVersion?, now? }); // → { ok:true } | { ok:false, reason }
+// reason: 'expired' | 'bad_signature' | 'unknown_kid' | 'version_mismatch' | 'malformed'. Keyring keeps N-1 keys for rotation.
+```
+
+### 4. Feed a vision LLM (long chat history)
+
+```typescript
+const { data, contentType, bytes } = await media.getContextPayload(id, {
+  as: 'base64',        // 'base64' (default) | 'dataUrl' | 'buffer'
+  maxDimension: 1568,  // downscale long edge (Anthropic token sweet spot); default 1568
+  maxBytes: 25 * 1024 * 1024,
+}, ctx?);
+```
+Streams from private storage, size-capped, sharp-downscaled, byte-stable output. **Store the media
+`_id` in the transcript, resolve to base64 (or an Anthropic `file_id`) at call time — never store
+signed URLs in transcripts:** LLM providers re-fetch URLs anonymously on every history replay, an
+expired URL breaks the conversation, and a re-signed URL busts prompt caching. Bedrock/Vertex are
+base64-only, so this helper is the portable path.
+
+## Image processing
+
+Requires `sharp`. Aspect ratio preserved by default — only crops when explicitly configured.
+
+```typescript
+processing: {
+  enabled: true,
+  format: 'webp',                  // 'webp' | 'jpeg' | 'png' | 'avif' | 'original'
+  quality: 80,                     // or { jpeg: 82, webp: 82, avif: 50 }
+  maxWidth: 2048,
+  originalHandling: 'keep-variant', // 'keep-variant' (store __original) | 'replace' (only processed) | 'discard'
+  smartSkip: true,                 // skip re-compression if already optimized
+  stripMetadata: true,             // drop EXIF/GPS, keep ICC
+  aspectRatios: { product: { aspectRatio: 3/4, fit: 'cover' }, default: { preserveRatio: true } },
+  sizes: [{ name: 'thumb', width: 150, height: 150 }, { name: 'medium', width: 800 }],  // width+height = crop; width-only = preserve ratio
+}
+```
+Use `originalHandling: 'replace'` when the source is too large to keep. Auto-features: ThumbHash
+placeholder, dominant color, EXIF, focal-point cropping (Payload-style extract-then-resize), and
+video thumbnails via an optional host `videoAdapter` (media-kit stores video as-is + serves
+byte-range; it does not transcode — HLS/renditions belong in Mux/ffmpeg or `@classytic/react-media`).
+
+## CRUD, queries, folders
+
+```typescript
+await media.getById(id, ctx?);
+await media.getAll({ page, limit, sort: '-createdAt', filters: { folder: 'products' } }, ctx?);
+await media.search('shoes', { limit: 10 }, ctx?);
+await media.delete(id, ctx?);  await media.deleteMany([...], ctx?);
+await media.softDelete(id, ctx?);  await media.restore(id, ctx?);
+await media.getFolderTree(ctx?);  await media.renameFolder('old', 'new', ctx?);  await media.move([...ids], 'target', ctx?);
+await media.addTags(id, ['sale'], ctx?);  await media.setFocalPoint(id, { x: 0.3, y: 0.2 }, ctx?);
+```
+
+## Cleanup & data hygiene
+
+Three cron-safe sweeps (storage + DB together, idempotent):
+
+```typescript
+await media.purgeDeleted(olderThan?, ctx?);       // soft-deleted past softDelete.ttlDays (default 30d)
+await media.purgeExpired(before?, ctx?);          // docs whose expiresAt has passed
+await media.purgeStalePending(olderThan?, ctx?);  // crashed uploads stuck in status:'pending' (default 24h)
+```
+The soft-delete Mongo **TTL index is opt-in** (`softDelete.ttlIndex: true`, default off) — Mongo's
+TTL sweeper deletes the doc with no hooks, orphaning the storage blob; use `purgeDeleted()` on a
+cron instead. Abandoned **presigned** uploads leave a bucket object with NO DB row — clean those
+with a storage-lifecycle rule on the upload prefix (S3 `AbortIncompleteMultipartUpload` + expiration;
+GCS age rule). Media-kit deliberately does not implement bucket GC.
+
+## Events & multi-tenancy
+
+```typescript
+media.on('before:upload', async (e) => { /* validate/modify */ });
+media.on('after:upload',  async (e) => { await notify(e.result); });
+// ops: upload, delete, move, replace, softDelete, restore, presignedUpload, confirmUpload, completeMultipart, rename
+
+// Multi-tenant: all ops auto-scoped by the mongokit tenant plugin.
+const media = createMedia({ driver, multiTenancy: { enabled: true, field: 'organizationId', required: true } });
+await media.upload(input, { userId, organizationId });
+```
+
+## Key types & subpaths
 
 ```typescript
 import type {
-  MediaKit, StorageDriver, WriteResult, FileStat, PresignedUploadResult,
-  UploadInput, ConfirmUploadInput, HashStrategy,
-  InitiateMultipartInput, CompleteMultipartInput, MultipartUploadSession,
-  SignedPartResult, CompletedPart, ResumableUploadSession,
-  BatchPresignInput, BatchPresignResult,
-  IMedia, IMediaDocument, MediaStatus, FocalPoint,
-  ProcessingOptions, SizeVariant, GeneratedVariant,
-  MediaKitConfig, FileTypesConfig, SoftDeleteConfig,
+  MediaKitConfig, MediaKit, StorageDriver, StorageWriteOptions, IMedia, IMediaDocument, MediaStatus,
+  MediaVisibility, MediaSigningConfig, VisibilityConfig, ServeAuthorize, FocalPoint,
+  UploadInput, ConfirmUploadInput, PresignedUploadResult, MultipartUploadSession,
+  ProcessingConfig, OriginalHandling, SizeVariant, GeneratedVariant,
 } from '@classytic/media-kit';
+import { createUrlSigner } from '@classytic/media-kit/signing';
+import { AssetTransformService } from '@classytic/media-kit/transforms';
+import { uploadInputSchema, confirmUploadSchema } from '@classytic/media-kit/schemas';
 ```
 
-## StorageDriver Interface
-
-Required methods: `write`, `read`, `delete`, `exists`, `stat`, `getPublicUrl`.
-
-Optional: `list`, `copy`, `move`, `getSignedUrl`, `getSignedUploadUrl`, `createMultipartUpload`, `signUploadPart`, `completeMultipartUpload`, `abortMultipartUpload`, `createResumableUpload`, `abortResumableUpload`, `getResumableUploadStatus`.
+`StorageDriver` required methods: `write`, `read` (byte-range), `delete`, `exists`, `stat`,
+`getPublicUrl`. Optional: `list`, `copy`, `move`, `getSignedUrl`, `getSignedUploadUrl`, multipart
+(`createMultipartUpload`/`signUploadPart`/`completeMultipartUpload`/`abortMultipartUpload`), and
+resumable (`createResumableUpload`/`abortResumableUpload`/`getResumableUploadStatus`).

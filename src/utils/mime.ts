@@ -1,6 +1,6 @@
 /**
  * MIME Type Utilities
- * 
+ *
  * Validation and helpers for file type handling.
  */
 
@@ -9,13 +9,30 @@
  * Used as fallback when `mime-types` peer dependency is not installed.
  */
 const BUILTIN_EXT_TO_MIME: Record<string, string> = {
-  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp',
-  gif: 'image/gif', svg: 'image/svg+xml', avif: 'image/avif', ico: 'image/x-icon',
-  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', avi: 'video/x-msvideo',
-  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', aac: 'audio/aac',
-  pdf: 'application/pdf', json: 'application/json', txt: 'text/plain', csv: 'text/csv',
-  doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+  gif: 'image/gif',
+  svg: 'image/svg+xml',
+  avif: 'image/avif',
+  ico: 'image/x-icon',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mov: 'video/quicktime',
+  avi: 'video/x-msvideo',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  ogg: 'audio/ogg',
+  aac: 'audio/aac',
+  pdf: 'application/pdf',
+  json: 'application/json',
+  txt: 'text/plain',
+  csv: 'text/csv',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 };
 
 const BUILTIN_MIME_TO_EXT: Record<string, string> = Object.fromEntries(
@@ -35,16 +52,8 @@ try {
  */
 export const FILE_TYPE_PRESETS = {
   /** Images only */
-  images: [
-    'image/jpeg',
-    'image/jpg',
-    'image/png',
-    'image/webp',
-    'image/gif',
-    'image/svg+xml',
-    'image/avif',
-  ],
-  
+  images: ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif', 'image/svg+xml', 'image/avif'],
+
   /** Documents */
   documents: [
     'application/pdf',
@@ -57,25 +66,13 @@ export const FILE_TYPE_PRESETS = {
     'text/plain',
     'text/csv',
   ],
-  
+
   /** Videos */
-  videos: [
-    'video/mp4',
-    'video/webm',
-    'video/quicktime',
-    'video/x-msvideo',
-    'video/x-flv',
-  ],
-  
+  videos: ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo', 'video/x-flv'],
+
   /** Audio */
-  audio: [
-    'audio/mpeg',
-    'audio/wav',
-    'audio/ogg',
-    'audio/webm',
-    'audio/aac',
-  ],
-  
+  audio: ['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm', 'audio/aac'],
+
   /** All media (images + videos + audio) */
   media: [
     'image/jpeg',
@@ -89,7 +86,7 @@ export const FILE_TYPE_PRESETS = {
     'audio/mpeg',
     'audio/wav',
   ],
-  
+
   /** Everything common */
   all: [
     // Images
@@ -176,13 +173,13 @@ export function getExtension(mimeType: string): string {
 export function isAllowedMimeType(mimeType: string, allowedTypes: string[]): boolean {
   // Normalize
   const normalizedMime = mimeType.toLowerCase();
-  const normalizedAllowed = allowedTypes.map(t => t.toLowerCase());
-  
+  const normalizedAllowed = allowedTypes.map((t) => t.toLowerCase());
+
   // Check exact match
   if (normalizedAllowed.includes(normalizedMime)) {
     return true;
   }
-  
+
   // Check wildcard patterns (e.g., 'image/*')
   for (const allowed of normalizedAllowed) {
     if (allowed.endsWith('/*')) {
@@ -192,7 +189,7 @@ export function isAllowedMimeType(mimeType: string, allowedTypes: string[]): boo
       }
     }
   }
-  
+
   return false;
 }
 
@@ -246,7 +243,7 @@ export function isAudio(mimeType: string): boolean {
  * Check if file is a document
  */
 export function isDocument(mimeType: string): boolean {
-  return FILE_TYPE_PRESETS.documents.includes(mimeType as any);
+  return (FILE_TYPE_PRESETS.documents as readonly string[]).includes(mimeType);
 }
 
 /**

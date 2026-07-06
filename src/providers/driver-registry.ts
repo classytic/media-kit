@@ -61,8 +61,7 @@ export class DriverRegistry {
     const d = this.drivers[name];
     if (!d) {
       throw new Error(
-        `[media-kit] Unknown provider "${name}". ` +
-          `Registered: ${Object.keys(this.drivers).join(', ')}`,
+        `[media-kit] Unknown provider "${name}". ` + `Registered: ${Object.keys(this.drivers).join(', ')}`,
       );
     }
     return d;

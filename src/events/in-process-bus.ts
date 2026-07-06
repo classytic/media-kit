@@ -7,11 +7,7 @@
  * never propagates.
  */
 
-import type {
-  DomainEvent,
-  EventHandler,
-  EventTransport,
-} from '@classytic/primitives/events';
+import type { DomainEvent, EventHandler, EventTransport } from '@classytic/primitives/events';
 import { matchEventPattern } from '@classytic/primitives/events';
 import type { MediaKitLogger } from '../types.js';
 

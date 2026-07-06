@@ -13,7 +13,7 @@
  * ```
  */
 
-import crypto from 'crypto';
+import crypto from 'node:crypto';
 
 /**
  * Compute SHA-256 hash of file buffer
@@ -22,10 +22,7 @@ import crypto from 'crypto';
  * @param algorithm - Hash algorithm (default: sha256)
  * @returns Hex-encoded hash string
  */
-export function computeFileHash(
-  buffer: Buffer,
-  algorithm: 'md5' | 'sha1' | 'sha256' = 'sha256'
-): string {
+export function computeFileHash(buffer: Buffer, algorithm: 'md5' | 'sha1' | 'sha256' = 'sha256'): string {
   return crypto.createHash(algorithm).update(buffer).digest('hex');
 }
 
@@ -64,7 +61,7 @@ export function buffersEqual(buffer1: Buffer, buffer2: Buffer): boolean {
  */
 export async function computeStreamHash(
   stream: NodeJS.ReadableStream | AsyncIterable<Buffer>,
-  algorithm: 'md5' | 'sha1' | 'sha256' = 'sha256'
+  algorithm: 'md5' | 'sha1' | 'sha256' = 'sha256',
 ): Promise<string> {
   const hash = crypto.createHash(algorithm);
   for await (const chunk of stream as AsyncIterable<Buffer>) {
@@ -72,5 +69,3 @@ export async function computeStreamHash(
   }
   return hash.digest('hex');
 }
-
-export default computeFileHash;

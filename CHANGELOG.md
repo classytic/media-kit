@@ -3,6 +3,336 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] — 2026-07-06
+
+The next release after 3.3.1. Two bodies of work land together: **private
+media serving** (visibility + HMAC-signed proxy URLs + LLM-context helpers)
+and a **security/hardening audit pass**. Most of it is additive
+(`visibility` defaults to `'public'`, which serves exactly as before), but a
+few changes are breaking — read the section immediately below first.
+
+### ⚠️ BREAKING CHANGES (low-impact, internal package)
+
+1. **Default exports removed.** All `export default` statements are gone
+   (`createMedia` and its root `default` re-export, every provider,
+   `ImageProcessor`, `computeFileHash`, `generateAltText`). Named exports are
+   unchanged — switch `import createMedia from '@classytic/media-kit'` to
+   `import { createMedia } from '@classytic/media-kit'`. (No default-import
+   usages existed in the repo's own tests/docs.)
+2. **Presign key format changed** (tenant binding). Keys minted under a tenant
+   context now embed a `__t-<orgId>` segment, and `confirmUpload()` /
+   `completeMultipartUpload()` enforce a tenant-match matrix. A presigned key
+   minted *before* this release confirms only via a tenantless caller — affects
+   only uploads in-flight across the upgrade window. See the tenant-key section.
+3. **`confirmUpload()` rejects client-supplied `key`/`url` it used to accept.**
+   This is the cross-tenant security fix below — it only "breaks" callers that
+   were relying on registering arbitrary keys (i.e. exploiting the hole).
+
+Behavior changes that are NOT breaking but worth noting on upgrade: the
+soft-delete Mongo TTL index now defaults **off** (existing collections keep
+their old `deletedAt` TTL index until dropped — see the migration note in the
+cleanup section), and cache invalidation now actually fires (it was silently a
+no-op before this release).
+
+### Added — `visibility` on the media document
+
+- `visibility: 'public' | 'private'` (default `'public'`, indexed) and
+  `tokenVersion: number` (default `0`, the signed-URL revocation counter) on
+  the schema and `IMedia`. Docs created before 3.4.0 lack both fields; reads
+  treat absent as public / version 0.
+- Engine config `visibility: { default?, byFolder? }` — per-upload `visibility`
+  overrides `byFolder` rules (longest segment-aware folder-prefix match, so a
+  rule for `invoices` covers `invoices/2026`), which override `default`.
+  Stamped by `upload()`, `replace()` (preserves existing unless overridden) and
+  `confirmUpload()`. `uploadInputSchema` / `confirmUploadSchema` accept the
+  enum.
+- `StorageWriteOptions` — optional 4th parameter to `StorageDriver.write()`
+  (backward-compatible; drivers may ignore it). Private uploads pass
+  `{ acl: 'private' }`; `S3Provider` applies it per-object (overriding the
+  provider-level `acl`). GCS has no per-object ACL under uniform bucket-level
+  access — privacy there is bucket IAM (documented, not hacked around).
+
+### Security — tenant-bound presign keys (key-format change)
+
+Client-completed upload flows (`getSignedUploadUrl`, `generateBatchPutUrls`,
+`initiateMultipartUpload` incl. the resumable fallback) now accept a context
+and, when it carries a tenant, mint keys as
+`<folder>/__t-<orgId>/<timestamp>-<random>-<name>.<ext>` (the `__` prefix is
+the package's reserved namespace, like `__transforms/`; a host folder named
+`t-shirts` can never collide). Confirm-time (`confirmUpload`,
+`completeMultipartUpload`) enforces an exact-match binding matrix BEFORE any
+DB/storage call — 403 `media.confirm.tenant_mismatch` when: the segment
+doesn't match the caller's org, a tenant-scoped caller submits a segmentless
+key, or a tenantless caller submits an org-bound key. Tenantless presign →
+tenantless confirm is unchanged (segmentless keys, single-tenant hosts
+unaffected). This closes the residual 3.4.0 hole where a leaked UNCONFIRMED
+key could be claimed by whoever held it — knowing a key is no longer enough.
+`completeMultipartUpload` additionally gained the same shape +
+key-in-use guards as `confirmUpload` and now stamps `visibility` /
+`tokenVersion` (it previously skipped both). The tenant segment is stripped
+before the doc's `folder` field is derived, so `visibility.byFolder` rules
+and folder listings are unaffected. **Presign key format change** — approved
+while the package is internal; keys minted before this release confirm only
+via tenantless callers.
+
+### Added — `/signing` subpath: zero-dep HMAC URL signing
+
+- `createUrlSigner({ keys | secret, currentKid?, defaultTtl? })` — pure
+  `node:crypto`, no imports from the rest of the package (usable standalone in
+  edge workers). `sign()` returns `{ query, expiresAt }` with
+  `e=<exp>&kid=<kid>&v=<tokenVersion>[&c.<claim>=...]&sig=<base64url HMAC-SHA256>`;
+  the signature covers EVERY externally supplied parameter (id, variant,
+  expiry, kid, tokenVersion, sorted claims — components URI-encoded in the
+  canonical string so delimiters can't collide). `verify()` returns
+  `{ ok: true } | { ok: false, reason: 'expired' | 'bad_signature' |
+  'unknown_kid' | 'version_mismatch' | 'malformed' }`, uses
+  `crypto.timingSafeEqual` (length mismatch → `bad_signature`, never a throw),
+  and resolves keys by `kid` — keep N-1 old keys in the ring for rotation.
+- Why package HMAC: storage-native presigning caps at 7 days (S3 SigV4 / GCS
+  V4) and only exists on S3/GCS. The HMAC proxy works on every driver (Local,
+  Cloudinary, ImageKit, imgbb included) and supports arbitrary TTLs — required
+  for URLs handed to LLM providers, which re-fetch them anonymously on every
+  chat-history replay.
+
+### Added — auth gate in `AssetTransformService`
+
+- `TransformRequest` gains `variant?`, `query?` (decoded request query — carries
+  the signature fields) and `principal?` (opaque host session object). The
+  service can now serve a specific variant's bytes (`/media/content/:id/:variant`);
+  signatures are bound to the variant.
+- Service config (and `MediaTransformSource`) gains `signing?` + `authorize?` —
+  both default to the engine's, so `createAssetTransform({ media: engine })` is
+  fully wired. The gate runs BEFORE any storage read:
+  public → unchanged; valid signature (checked against the doc's current
+  `tokenVersion`) → serve; else `authorize(request, media)` → serve on `true`;
+  else `403` with JSON body `{ error: { code } }` — `media.serve.link_expired`
+  for authentic-but-expired signatures, `media.serve.forbidden` otherwise.
+  Denials are RETURNED as `TransformResponse` (status 403), not thrown, so
+  hosts that pipe `handle()` results verbatim get correct semantics for free.
+- Fail-closed: a THROWING `authorize` denies with 403 (never 500) — an erroring
+  authorizer must not leak bytes nor become a probing oracle.
+- Private cache policy: signed hits get
+  `Cache-Control: private, max-age=min(remaining signature TTL, 3600)` (the URL
+  is the credential — holder-side caching within its own validity leaks
+  nothing; the 1h cap bounds revocation staleness). Session (`authorize`) hits
+  get `private, no-store` (ambient-credential responses must not be cached).
+  Private responses never carry `public` / `immutable`.
+
+### Added — repository verbs
+
+- `getSignedAssetUrl(idOrDoc, { variant?, expiresIn?, claims? }, ctx?)` — mints
+  `${signing.servePath}/${id}[/variant]?<signed query>`. Requires engine
+  `signing` config (`{ keys | secret, servePath, ... }`); throws typed
+  `HttpError` `media.signing.not_configured` otherwise. When a `CdnBridge` is
+  configured the minted URL routes through
+  `bridges.cdn.transform(key, url, { signed: true, ... })` — bridge wins
+  (CloudFront offload).
+- `revokeAccess(idOrDoc, ctx?)` — `$inc tokenVersion` through the normal
+  plugin-routed update (tenant scoping + cache invalidation fire), instantly
+  invalidating all outstanding signed URLs.
+- `getContextPayload(idOrDoc, { as?, maxDimension?, maxBytes? }, ctx?)` — the
+  LLM-context path: streams with a hard cap (default 25MB → typed 413
+  `media.context.too_large`), downscales images whose long edge exceeds
+  `maxDimension` (default 1568px — Anthropic's token sweet spot; hard limits
+  10MB / 8000px) when sharp is available, returns
+  `{ data: base64 | dataUrl | Buffer, contentType, bytes }`. Byte-stable output
+  is prompt-cache-friendly; Bedrock/Vertex are base64-only. Works regardless of
+  visibility.
+- Engine: `createMedia({ signing, visibility, authorize })` constructs ONE
+  `UrlSigner` shared by repo + transform service and exposes
+  `engine.signing` / `engine.authorize`.
+
+### Added — `purgeStalePending()` (crashed-upload sweep)
+
+- `purgeStalePending(olderThan?, ctx?)` on `MediaRepository` — hard-deletes
+  (storage + DB) `status: 'pending'` rows older than the cutoff (default 24h,
+  exported as `STALE_PENDING_MAX_AGE_MS`). `upload()` creates the row as
+  `'pending'` before the storage write and flips it to `'ready'` at the end;
+  a crash in between stranded the row forever — there was no sweep. Cron-safe,
+  idempotent, tenant-scoped like `purgeDeleted()`; a missing storage object
+  (crash before the write) is tolerated and the DB row is still removed.
+  Emits `media:asset.purged` with the new optional payload field
+  `reason: 'stale_pending'` (`AssetPurgedPayload.reason` — absent on
+  `purgeDeleted()` events, so existing subscribers are unaffected).
+- Documented the presign-orphan gap alongside it: abandoned PRESIGNED uploads
+  leave unconfirmed bucket objects with NO DB row (`confirmUpload()` creates
+  the row), invisible to any DB-driven sweep. The remedy is a
+  storage-lifecycle rule on the upload prefix (S3
+  `AbortIncompleteMultipartUpload` + expiration rule scoped to the presign
+  folder; GCS lifecycle age rule) — media-kit deliberately does not implement
+  bucket GC.
+
+### Changed — soft-delete Mongo TTL index is now opt-in (`softDelete.ttlIndex`)
+
+- New `SoftDeleteConfig.ttlIndex?: boolean` (default **false**). The schema
+  now creates the `deletedAt` TTL index ONLY when `ttlIndex: true` (the
+  `ttlDays > 0` requirement stays), and `ttlDays` is only forwarded to
+  mongokit's `softDeletePlugin` (which creates the same index at the
+  COLLECTION level) under the same gate. `ttlDays` keeps its existing role as
+  `purgeDeleted()`'s default cutoff.
+- Migration: hosts that relied on the implicit TTL index must either set
+  `softDelete: { ..., ttlIndex: true }` (and accept/lifecycle-cover the
+  orphaned blobs) or — recommended — schedule a `purgeDeleted()` cron. Note
+  Mongoose does not drop existing indexes: databases that already have the
+  TTL index keep it until `syncIndexes()`/manual drop.
+
+### Fixed — soft-delete TTL index orphaned storage blobs
+
+- The previously unconditional TTL index (created whenever
+  `softDelete.enabled && ttlDays > 0`, via BOTH the schema declaration and
+  mongokit `softDeletePlugin`'s collection-level `createIndex`) let Mongo's
+  TTL sweeper delete the
+  DOCUMENT with no hooks — the storage object (S3/GCS/local file) and its
+  variants were orphaned forever, and the sweeper raced the proper
+  `purgeDeleted()` path (same `ttlDays` window, but storage + DB together).
+  Defaulting the index OFF makes `purgeDeleted()` the single cleanup path.
+- Latent since multi-tenancy: `injectTenantField()` prepended the tenant key
+  to the schema-declared TTL index, producing a compound TTL index MongoDB
+  rejects ("TTL indexes are single-field indexes") — the schema-level index
+  silently failed to build under tenant scoping (background index errors are
+  swallowed) and only the plugin's collection-level index ever existed.
+  `injectTenantField()` now skips TTL indexes, so `ttlIndex: true` builds a
+  valid single-field `deletedAt` TTL index under tenant scoping too.
+- Also latent: the unnamed TTL index auto-named itself `deletedAt_1`,
+  colliding with the path-level `deletedAt: { index: true }` index of the
+  same name (IndexOptionsConflict, again swallowed in background builds).
+  The TTL index is now explicitly named `media_deletedAt_ttl` so both
+  coexist — i.e. `ttlIndex: true` is the first configuration under which the
+  schema-level TTL index actually builds.
+
+### Docs
+
+- New "Cleanup & data hygiene" section (README + `docs/api/media-kit.mdx`)
+  listing the three sweeps — `purgeDeleted()`, `purgeExpired()`,
+  `purgeStalePending()` — with cron recommendations, the presign-orphan
+  lifecycle-rule guidance, and the `ttlIndex` default change.
+- New guide: `docs/guides/private-media.mdx` — private bucket + proxy pattern,
+  dual auth (session for own-UI list views, signed URLs for
+  embeds/LLMs/share links), key rotation, revocation, the three chat-history
+  strategies + prompt-caching caveat, arc integration recipe, and the
+  `@classytic/access` composition recipe (bridge via `authorize`, never an
+  import — which is also why the field is `visibility` and the subpath is
+  `/signing`, avoiding concept collision with that package).
+
+## Audit hardening
+
+### Security — `confirmUpload` no longer trusts the client-supplied `key` / `url` (HIGH)
+
+Pre-3.4.0, `confirmUpload()` accepted any `key` string and stored any `url`
+verbatim. A caller could register (and later `hardDelete()`, destroying the
+storage object) arbitrary keys — including another tenant's files. Now:
+
+- **Key shape validation** — the submitted key must have exactly the shape
+  `getSignedUploadUrl()`'s server-side `generateKey()` produces
+  (`<folder>/<ms-timestamp>-<12 hex>-<sanitized name>.<ext>` under a
+  normalized folder). Traversal segments, backslashes, URLs, and hand-crafted
+  basenames are rejected with a 400 `HttpError`
+  (`code: 'media.confirm.invalid_key'`). Exposed as
+  `assertGeneratedKeyShape()` from `operations/helpers`.
+- **Ownership guard** — a key already registered to ANY media record (any
+  tenant, including soft-deleted rows) cannot be confirmed again: 403
+  `HttpError` (`code: 'media.confirm.key_in_use'`), via the new internal
+  `MediaRepository.isKeyRegistered()` (deliberately unscoped probe).
+  Confirming an *unconfirmed* foreign key would additionally require guessing
+  the 48-bit random + exact ms timestamp embedded in every generated key.
+- **URL derived server-side** — the stored `url` is now ALWAYS
+  `driver.getPublicUrl(key)`. A client-supplied `url` is only validated
+  (absolute http(s), origin must match the storage origin; `javascript:` /
+  `data:` / malformed input → 400 `HttpError`
+  (`code: 'media.confirm.invalid_url'`)) and then discarded.
+  `confirmUploadSchema.url` tightened to `z.url()`.
+
+### Removed — default exports (potentially breaking)
+
+All `export default` statements were removed: `S3Provider`, `GCSProvider`,
+`LocalProvider`, `CloudinaryProvider`, `ImageKitProvider`, `ImgbbProvider`,
+`StorageRouter`, `createMedia` (and its `default` re-export from the package
+root), `ImageProcessor`, `computeFileHash`, `generateAltText`.
+**Removed — potentially breaking for consumers using default imports (named
+exports unchanged)**: switch `import X from '@classytic/media-kit/...'` to
+`import { X } from '@classytic/media-kit/...'`.
+
+### Fixed — S3/GCS retry no longer re-sends a consumed stream body (MEDIUM)
+
+`S3Provider.write()` retried by re-sending one `PutObjectCommand` instance;
+after a transient failure a stream `Body` was already (partially) consumed and
+the retry uploaded truncated/empty data. Buffer bodies are now retried with
+the command rebuilt fresh per attempt; stream bodies get exactly one attempt.
+`GCSProvider.write()` had the same defect on its stream path
+(`pipeline(data, writable)` inside `withRetry`) and is fixed the same way —
+Buffer saves stay retried, stream pipelines are single-shot.
+
+### Fixed — unescaped filename in `Content-Disposition` (MEDIUM)
+
+`AssetTransformService` interpolated raw filenames into
+`Content-Disposition: attachment; filename="..."` — quotes/CR-LF enabled
+header injection and non-ASCII names were emitted verbatim. New
+`contentDispositionAttachment()` helper (`src/utils/content-disposition.ts`)
+implements RFC 6266/5987: control chars stripped, quotes/backslashes
+neutralized in the ASCII fallback, and non-ASCII names carried in
+`filename*=UTF-8''<percent-encoded>`.
+
+### Fixed — upload policy now enforced at presign time (MEDIUM)
+
+`getSignedUploadUrl()` and `generateBatchPutUrls()` previously signed URLs for
+any content type/size, bypassing `fileTypes.allowed` / `maxSize` until (maybe)
+confirm time. Both now reject disallowed content types before signing, and
+accept an optional declared `size` (new `options.size` /
+`BatchPresignInput.files[].size`) checked against `maxSize`. The declared size
+is still re-verified from storage at confirm time.
+
+### Changed — retry classification prefers structured signals (LOW)
+
+`isRetryableError()` now checks, in order: Node syscall codes (`ETIMEDOUT`,
+`ECONNRESET`, `EPIPE`, ...), AWS SDK `$retryable` / `$metadata.httpStatusCode`,
+numeric `status` / `statusCode` / `code` in {408, 429, 500, 502, 503, 504} —
+a present status is authoritative (404/403 never retry) — and only then
+word-boundary message checks. Bare substrings like `'500'` no longer match, so
+an error naming `IMG_500.jpg` is not retried.
+
+### Changed — `importFromUrl` download bounded by the upload semaphore (LOW)
+
+The remote fetch/buffering now runs inside `concurrency.maxConcurrent`'s
+semaphore, so N concurrent imports can no longer hold N unbounded download
+buffers. The slot is released before `upload()` re-acquires its own (no
+self-deadlock at `maxConcurrent: 1`). Behavior otherwise identical.
+
+### Fixed — `LocalProvider` removes partial files on failed stream writes (LOW)
+
+A failing source stream previously left a truncated file on disk; the partial
+file is now unlinked (best-effort) before the error rethrows.
+
+### Added — Biome lint/format gate
+
+`@biomejs/biome` devDep + `biome.json` (aligned with the org config used by
+mongokit; `noExplicitAny: error` in `src/`). New scripts: `lint`, `lint:fix`,
+`check` (`biome ci src/ --diagnostic-level=error`). `prepublishOnly` gate is
+now `check → build → typecheck → test → test:smoke`.
+
+### Changed — zero `any` in `src/`
+
+All ~60 `any` usages replaced with proper types: typed optional-peer SDK
+clients (`S3Client`, GCS `Storage`/`Bucket` via type-only imports — erased at
+runtime, peers stay optional), `SharpModule` type for the shared sharp
+instance, `ImageAdapter.extractMetadata` now returns
+`Record<string, unknown>`, and `MediaRepository`'s option bags / contexts are
+properly typed. The cache plugin wiring was also corrected for
+mongokit ≥ 3.18 / repo-core ≥ 0.7: `MediaCacheConfig`'s `del`/string adapter
+is bridged to repo-core's `delete`/envelope `CacheAdapter`, and
+`byIdTtl`/`prefix` now map to `defaults.staleTime`/`prefix` (the previous
+`ttl`/`keyPrefix` keys were silently ignored).
+
+### Removed — dead code / stale docs
+
+- Dead private `extractKey()` in `LocalProvider`.
+- Hardcoded version in the `src/index.ts` docblock (drifted at `v3.0.0`).
+- Broken `testing-infrastructure` link in README (§Testing).
+
+### Dev dependencies
+
+- `@classytic/mongokit` `^3.16.0` → `^3.18.0`, `@classytic/repo-core`
+  `^0.6.0` → `^0.7.0` (peer floors unchanged).
+
 ## [3.3.1] — 2026-06-14
 
 ### Fixed — `importFromUrl` crashed with "Invalid IP address: undefined" on Node ≥18

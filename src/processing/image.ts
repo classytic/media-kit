@@ -25,13 +25,25 @@ import type {
   ImageProcessor as IImageProcessor,
   ProcessingOptions,
   ProcessedImage,
-  AspectRatioPreset,
   SizeVariant,
-  FocalPoint,
-  QualityMap,
   SharpOptions,
 } from '../types';
 import { calculateFocalPointCrop } from './focal-point';
+import type sharpModule from 'sharp';
+
+/**
+ * The callable `sharp` module (its default export). Type-only — erased at
+ * runtime, so `sharp` stays an optional peer dependency.
+ */
+export type SharpModule = typeof sharpModule;
+
+/**
+ * Structural type for processors that can hand out their Sharp module
+ * (used by transforms / thumbhash to share concurrency + cache config).
+ */
+export interface SharpInstanceSource {
+  getSharpInstance(): Promise<SharpModule>;
+}
 
 // MIME types that can be processed
 const PROCESSABLE_TYPES = [
@@ -53,7 +65,10 @@ const FORMAT_MIME_MAP: Record<string, string> = {
 };
 
 const DEFAULT_QUALITY_MAP: Record<string, number> = {
-  jpeg: 82, webp: 82, avif: 50, png: 100,
+  jpeg: 82,
+  webp: 82,
+  avif: 50,
+  png: 100,
 };
 
 function resolveQuality(quality: unknown, format: string): number {
@@ -68,7 +83,7 @@ function resolveQuality(quality: unknown, format: string): number {
  * Image Processor Implementation
  */
 export class ImageProcessor implements IImageProcessor {
-  private sharp: any;
+  private sharp: SharpModule | null = null;
   private available = false;
   private initPromise: Promise<void>;
   private sharpOptions: SharpOptions;
@@ -99,12 +114,10 @@ export class ImageProcessor implements IImageProcessor {
     }
   }
 
-  private async getSharp() {
+  private async getSharp(): Promise<SharpModule> {
     await this.initPromise;
-    if (!this.available) {
-      throw new Error(
-        'sharp is required for image processing. Install it with: npm install sharp'
-      );
+    if (!this.available || !this.sharp) {
+      throw new Error('sharp is required for image processing. Install it with: npm install sharp');
     }
     return this.sharp;
   }
@@ -138,14 +151,7 @@ export class ImageProcessor implements IImageProcessor {
   async process(buffer: Buffer, options: ProcessingOptions): Promise<ProcessedImage> {
     const sharp = await this.getSharp();
 
-    const {
-      maxWidth = 2048,
-      maxHeight,
-      quality = 80,
-      format = 'webp',
-      aspectRatio,
-      focalPoint,
-    } = options;
+    const { maxWidth = 2048, maxHeight, quality = 80, format = 'webp', aspectRatio, focalPoint } = options;
 
     const metadata = await sharp(buffer).metadata();
 
@@ -182,9 +188,7 @@ export class ImageProcessor implements IImageProcessor {
       });
 
       // Extract-then-resize (Payload CMS pattern)
-      instance = instance
-        .extract(crop)
-        .resize(targetWidth, targetHeight, { fit: 'fill' });
+      instance = instance.extract(crop).resize(targetWidth, targetHeight, { fit: 'fill' });
     } else if (aspectRatio && !aspectRatio.preserveRatio && aspectRatio.aspectRatio) {
       // Standard aspect ratio crop (center-based)
       const targetWidth = Math.min(metadata.width, maxWidth);
@@ -272,7 +276,7 @@ export class ImageProcessor implements IImageProcessor {
   async generateVariants(
     buffer: Buffer,
     variants: SizeVariant[],
-    baseOptions: Omit<ProcessingOptions, 'maxWidth'> = {}
+    baseOptions: Omit<ProcessingOptions, 'maxWidth'> = {},
   ): Promise<Array<ProcessedImage & { variantName: string }>> {
     const sharp = await this.getSharp();
     const metadata = await sharp(buffer).metadata();
@@ -300,9 +304,7 @@ export class ImageProcessor implements IImageProcessor {
         continue;
       }
 
-      const variantFormat = variant.format && variant.format !== 'original'
-        ? variant.format
-        : undefined;
+      const variantFormat = variant.format && variant.format !== 'original' ? variant.format : undefined;
 
       const variantOptions: ProcessingOptions = {
         ...baseOptions,
@@ -331,7 +333,7 @@ export class ImageProcessor implements IImageProcessor {
    * Get the raw Sharp constructor (for sharing with other services).
    * Throws if Sharp is not available.
    */
-  async getSharpInstance(): Promise<any> {
+  async getSharpInstance(): Promise<SharpModule> {
     return this.getSharp();
   }
 
@@ -382,7 +384,7 @@ export class ImageProcessor implements IImageProcessor {
   /**
    * Extract EXIF metadata from image
    */
-  async extractMetadata(buffer: Buffer): Promise<Record<string, any>> {
+  async extractMetadata(buffer: Buffer): Promise<Record<string, unknown>> {
     const sharp = await this.getSharp();
     const metadata = await sharp(buffer).metadata();
 
@@ -412,5 +414,3 @@ export function createImageProcessor(): ImageProcessor | null {
     return null;
   }
 }
-
-export default ImageProcessor;

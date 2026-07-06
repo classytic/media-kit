@@ -152,13 +152,15 @@ interface DeduplicationConfig {
 interface SoftDeleteConfig {
   enabled: boolean;
   ttlDays?: number;
+  ttlIndex?: boolean;
 }
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | `boolean` | -- | Enable soft deletes |
-| `ttlDays` | `number` | `30` | Auto-purge TTL in days. Set `0` to disable auto-purge |
+| `ttlDays` | `number` | `30` | Purge window in days — `purgeDeleted()`'s default cutoff. Set `0` to disable the default cutoff |
+| `ttlIndex` | `boolean` | `false` | Opt-in MongoDB TTL index on `deletedAt`. **Warning:** Mongo's TTL sweeper deletes the document with no hooks — the storage blob is orphaned. Only enable when a bucket lifecycle rule covers the blobs; the supported cleanup path is a `purgeDeleted()` cron |
 
 ---
 

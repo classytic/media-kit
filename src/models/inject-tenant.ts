@@ -11,11 +11,7 @@
  * `resolveMediaTenant()` before the input reaches repo-core.
  */
 import mongoose, { type Schema } from 'mongoose';
-import {
-  resolveTenantConfig,
-  type ResolvedTenantConfig,
-  type TenantConfig,
-} from '@classytic/repo-core/tenant';
+import { resolveTenantConfig, type ResolvedTenantConfig, type TenantConfig } from '@classytic/repo-core/tenant';
 
 /**
  * Accept the same config surface other packages use (TenantConfig | boolean),
@@ -121,6 +117,10 @@ export function injectTenantField(schema: Schema, tenant: ResolvedTenantConfig):
     for (const indexEntry of existingIndexes) {
       const fields = indexEntry[0];
       if (fields[tenant.tenantField] !== undefined) continue;
+      // TTL indexes must stay single-field — MongoDB rejects compound TTL
+      // indexes ("TTL indexes are single-field indexes"), and the sweep is
+      // global by design (tenant scoping is meaningless for expiry).
+      if (indexEntry[1]?.expireAfterSeconds !== undefined) continue;
       const newFields: Record<string, unknown> = { [tenant.tenantField]: 1 };
       for (const [key, val] of Object.entries(fields)) {
         newFields[key] = val;

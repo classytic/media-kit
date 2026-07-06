@@ -35,7 +35,7 @@ export function generateAltText(filename: string, fallback = 'Image'): string {
   let text = filename.replace(/\.[^.]+$/, '');
 
   // Replace common separators with spaces
-  text = text.replace(/[-_\.]/g, ' ');
+  text = text.replace(/[-_.]/g, ' ');
 
   // Remove timestamps and hash-like patterns FIRST
   text = text.replace(/\b\d{8,}\b/g, ''); // 8+ digit numbers (timestamps)
@@ -79,7 +79,7 @@ export function generateAltTextWithOptions(
     fallback?: string;
     maxLength?: number;
     customGenerator?: (filename: string) => string;
-  } = {}
+  } = {},
 ): string {
   const { fallback = 'Image', maxLength = 125, customGenerator } = options;
 
@@ -98,10 +98,8 @@ export function generateAltTextWithOptions(
 
   // Truncate if too long (recommended max for alt text is 125 chars)
   if (alt.length > maxLength) {
-    alt = alt.substring(0, maxLength - 3) + '...';
+    alt = `${alt.substring(0, maxLength - 3)}...`;
   }
 
   return alt;
 }
-
-export default generateAltText;
