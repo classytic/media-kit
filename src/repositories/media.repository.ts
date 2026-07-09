@@ -394,7 +394,7 @@ export class MediaRepository extends Repository<IMediaDocument> {
       },
     });
 
-    const newKey = generateKey(processed.finalFilename, targetFolder);
+    const newKey = generateKey(processed.finalFilename, targetFolder, this.mediaConfig.folders?.keyPrefix);
 
     // Visibility: explicit input wins, otherwise preserve the existing doc's.
     const visibility: MediaVisibility = input.visibility ?? existing.visibility ?? 'public';
@@ -1770,7 +1770,7 @@ export class MediaRepository extends Repository<IMediaDocument> {
 
     const targetFolder = normalizeFolderPath(folder || this.mediaConfig.folders?.defaultFolder || 'general');
     const finalTitle = input.title || generateTitle(filename);
-    let key = generateKey(filename, targetFolder);
+    let key = generateKey(filename, targetFolder, this.mediaConfig.folders?.keyPrefix);
 
     // Visibility: explicit per-upload > byFolder rule > config default > 'public'.
     const visibility = resolveVisibility(this.mediaConfig.visibility, targetFolder, input.visibility);

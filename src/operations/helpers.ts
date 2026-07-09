@@ -134,17 +134,29 @@ export function getAspectRatio(deps: ConfigOnlyDeps, contentType: string): Aspec
   return deps.config.processing?.aspectRatios?.[contentType] || deps.config.processing?.aspectRatios?.default;
 }
 
+/** Normalize a deployment key-prefix into a clean single path segment set:
+ *  trims, drops leading/trailing slashes, collapses repeats. Empty → ''. */
+export function normalizeKeyPrefix(keyPrefix?: string): string {
+  if (!keyPrefix) return '';
+  return keyPrefix.trim().replace(/^\/+|\/+$/g, '').replace(/\/{2,}/g, '/');
+}
+
 /**
  * Generate a storage key for a file.
- * Format: folder/timestamp-random-sanitizedName.ext
+ * Format: [keyPrefix/]folder/timestamp-random-sanitizedName.ext
+ *
+ * `keyPrefix` (optional) namespaces the STORAGE KEY for a deployment sharing
+ * a bucket with other companies — it is NOT part of the `folder` metadata.
+ * Omitted/empty → the classic `folder/…` shape (back-compatible).
  */
-export function generateKey(filename: string, folder: string): string {
+export function generateKey(filename: string, folder: string, keyPrefix?: string): string {
   const timestamp = Date.now();
   const random = crypto.randomBytes(6).toString('hex');
   const safeName = filename.replace(/[^a-zA-Z0-9.-]/g, '_');
   const baseName = safeName.replace(/\.[^/.]+$/, '');
   const ext = safeName.split('.').pop() || 'bin';
-  return `${folder}/${timestamp}-${random}-${baseName}.${ext}`;
+  const prefix = normalizeKeyPrefix(keyPrefix);
+  return `${prefix ? `${prefix}/` : ''}${folder}/${timestamp}-${random}-${baseName}.${ext}`;
 }
 
 /**
@@ -169,11 +181,16 @@ export function tenantKeySegment(organizationId: unknown): string {
  * minted FOR that tenant — a leaked unconfirmed key cannot be claimed by
  * anyone else. Without a tenant the format is identical to generateKey().
  */
-export function generateScopedKey(filename: string, folder: string, organizationId?: unknown): string {
+export function generateScopedKey(
+  filename: string,
+  folder: string,
+  organizationId?: unknown,
+  keyPrefix?: string,
+): string {
   if (organizationId === undefined || organizationId === null || organizationId === '') {
-    return generateKey(filename, folder);
+    return generateKey(filename, folder, keyPrefix);
   }
-  return generateKey(filename, `${folder}/${tenantKeySegment(organizationId)}`);
+  return generateKey(filename, `${folder}/${tenantKeySegment(organizationId)}`, keyPrefix);
 }
 
 /**

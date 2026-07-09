@@ -3,6 +3,38 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.0] — 2026-07-09
+
+### Added — deployment `keyPrefix` for shared-bucket multi-tenancy
+
+Hosts running multiple companies in a single S3/GCS/R2 bucket can now
+namespace ALL storage keys under a deployment-scoped prefix without changing
+folder metadata:
+
+- **`FolderConfig.keyPrefix?: string`** (`types.ts`) — deployment prefix
+  prepended to every generated key (originals, variants, thumbnails). Example:
+  `keyPrefix: 'acme'` → `acme/products/<ts>-<hex>-photo.jpg`. The `folder`
+  metadata stays `products` — the bucket browser and content-type maps are
+  unaffected.
+- **`normalizeKeyPrefix(keyPrefix?)`** (`operations/helpers.ts`) — trims,
+  strips leading/trailing slashes, collapses repeats; exported for testing.
+- **`generateKey`** / **`generateScopedKey`** accept an optional `keyPrefix`
+  parameter (fully back-compatible; omitting → empty prefix → classic key
+  shape).
+- All key-generation call sites updated: `upload()`, `replace()`,
+  `processImage()` (originals, size variants, thumbnails), presigned
+  (`getSignedUploadUrl`, batch PUT, multipart / resumable), and
+  `MediaRepository._performUpload` / `importFromUrl`.
+
+**Forward-only, non-breaking.** Keys are minted once at upload and stored on
+the doc verbatim; reads and deletes use the stored key. Setting or changing
+`keyPrefix` NEVER rekeys existing objects — only new uploads pick up the prefix.
+
+### Tests
+
+- **`tests/unit/key-prefix.test.ts`** — `normalizeKeyPrefix` edge cases +
+  `generateKey`/`generateScopedKey` prefix injection and back-compat.
+
 ## [3.5.0] — 2026-07-09
 
 The client-processed-upload release: media-kit becomes the fast server-side

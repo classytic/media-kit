@@ -870,6 +870,23 @@ export interface FileTypesConfig {
 export interface FolderConfig {
   /** Default folder if not specified */
   defaultFolder?: string;
+  /**
+   * Storage-key root prefix prepended to EVERY generated key (originals,
+   * variants, thumbnails), e.g. `'eternal'` → `eternal/products/<file>`.
+   *
+   * This namespaces one deployment's objects inside a bucket SHARED by
+   * several companies — without touching the `folder` METADATA (content-type
+   * mapping + folder browser stay keyed on the bare folder, e.g. `products`).
+   *
+   * Forward-only + non-breaking: keys/URLs are minted once at upload and
+   * stored on the doc, then read/deleted verbatim — so setting or changing
+   * this NEVER affects objects already uploaded (their stored keys win). Do
+   * NOT apply a prefix inside the storage driver instead: that would
+   * double-prefix or orphan existing keys on delete/copy.
+   *
+   * Omit / empty string → no prefix (default; back-compatible).
+   */
+  keyPrefix?: string;
   /** Content type mappings (folder pattern → content type) */
   contentTypeMap?: Record<string, string[]>;
   /** Enable unlimited subfolder nesting (default: true) */

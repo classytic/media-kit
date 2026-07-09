@@ -262,7 +262,7 @@ async function runProcessImage(
       const originalHandling = resolveOriginalHandling(deps.config.processing);
       if (originalHandling === 'keep-variant' && !skipMainProcess) {
         const origFilename = updateFilenameExtension(`${filename.replace(/\.[^.]+$/, '')}__original`, mimeType);
-        const origKey = generateKey(origFilename, targetFolder);
+        const origKey = generateKey(origFilename, targetFolder, deps.config.folders?.keyPrefix);
         const origWrite = await deps.driver.write(origKey, buffer, mimeType);
         tracker.record(origWrite.key);
         variants.push({
@@ -313,7 +313,7 @@ async function runProcessImage(
             const baseFilename = finalFilename.replace(/\.[^.]+$/, '');
             const variantFilename = updateFilenameExtension(`${baseFilename}-${variant.name}`, variantResult.mimeType);
 
-            const variantKey = generateKey(variantFilename, targetFolder);
+            const variantKey = generateKey(variantFilename, targetFolder, deps.config.folders?.keyPrefix);
             const variantWriteResult = await deps.driver.write(
               variantKey,
               variantResult.buffer,
@@ -431,7 +431,7 @@ async function runProcessImage(
       ]);
       if (thumbResult.status === 'fulfilled' && thumbResult.value) {
         const thumbFilename = `${filename.replace(/\.[^.]+$/, '')}__thumbnail.jpg`;
-        const thumbKey = generateKey(thumbFilename, targetFolder);
+        const thumbKey = generateKey(thumbFilename, targetFolder, deps.config.folders?.keyPrefix);
         const writeResult = await deps.driver.write(thumbKey, thumbResult.value.buffer, thumbResult.value.mimeType);
         tracker.record(writeResult.key);
         variants.push({

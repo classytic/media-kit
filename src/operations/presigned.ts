@@ -152,7 +152,7 @@ export async function getSignedUploadUrl(
 
   const organizationId = requireTenant(deps, context);
   const folder = normalizeFolderPath(options.folder || deps.config.folders?.defaultFolder || 'uploads');
-  const key = generateScopedKey(filename, folder, organizationId);
+  const key = generateScopedKey(filename, folder, organizationId, deps.config.folders?.keyPrefix);
 
   const eventData = { filename, contentType, folder, key };
 
@@ -514,7 +514,7 @@ export async function initiateMultipartUpload(
     // Fall back to GCS resumable if available
     if (deps.driver.createResumableUpload) {
       const folder = normalizeFolderPath(input.folder || deps.config.folders?.defaultFolder || 'uploads');
-      const key = generateScopedKey(input.filename, folder, organizationId);
+      const key = generateScopedKey(input.filename, folder, organizationId, deps.config.folders?.keyPrefix);
       const result = await deps.driver.createResumableUpload(key, input.contentType);
       return {
         type: 'resumable',
@@ -529,7 +529,7 @@ export async function initiateMultipartUpload(
   }
 
   const folder = normalizeFolderPath(input.folder || deps.config.folders?.defaultFolder || 'uploads');
-  const key = generateScopedKey(input.filename, folder, organizationId);
+  const key = generateScopedKey(input.filename, folder, organizationId, deps.config.folders?.keyPrefix);
 
   await deps.events.emit('before:multipartUpload', { data: input, timestamp: new Date() });
 
@@ -848,7 +848,7 @@ export async function generateBatchPutUrls(
 
   const uploads = await Promise.all(
     input.files.map((file) => {
-      const key = generateScopedKey(file.filename, folder, organizationId);
+      const key = generateScopedKey(file.filename, folder, organizationId, deps.config.folders?.keyPrefix);
       return deps.driver.getSignedUploadUrl!(key, file.contentType, input.expiresIn);
     }),
   );

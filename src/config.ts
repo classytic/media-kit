@@ -15,6 +15,7 @@ const DEFAULT_CONFIG: Omit<MediaKitConfig, 'driver'> = {
   },
   folders: {
     defaultFolder: 'general',
+    keyPrefix: '', // no deployment key-prefix by default (back-compatible)
     contentTypeMap: {},
     enableSubfolders: true,
   },

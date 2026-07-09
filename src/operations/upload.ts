@@ -217,8 +217,9 @@ async function performUpload(
   // Generate title if not provided
   const finalTitle = title || generateTitle(filename);
 
-  // Generate initial storage key
-  let key = generateKey(filename, targetFolder);
+  // Generate initial storage key (deployment keyPrefix namespaces the key,
+  // not the folder metadata — see FolderConfig.keyPrefix).
+  let key = generateKey(filename, targetFolder, deps.config.folders?.keyPrefix);
 
   // Resolve which driver handles this upload — store the REGISTRY KEY (not
   // the driver's own `name`), same contract as MediaRepository._performUpload:
@@ -309,7 +310,7 @@ async function performUpload(
 
     // Regenerate key if processing changed the format
     if (finalMimeType !== mimeType) {
-      key = generateKey(finalFilename, targetFolder);
+      key = generateKey(finalFilename, targetFolder, deps.config.folders?.keyPrefix);
     }
 
     // Step 3: Upload to storage via the resolved provider's driver

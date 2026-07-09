@@ -1,6 +1,6 @@
 {
   "name": "@classytic/media-kit",
-  "version": "3.5.0",
+  "version": "3.6.0",
   "description": "Engine-factory media management for Mongoose and Arc — arc-compatible events, dynamic multi-tenancy, pluggable storage drivers, smart pagination, image processing",
   "type": "module",
   "sideEffects": false,
