@@ -322,6 +322,124 @@ const media = createMedia({ driver: gcs });
 1. `publicUrl` config (if set): `${publicUrl}/${key}`
 2. Default: `https://storage.googleapis.com/${bucket}/${key}`
 
+## Cloudflare R2 (via S3Provider)
+
+R2 needs **no dedicated provider** — its S3-compatible API works with `S3Provider` plus an `endpoint`. Confirmed against the R2 docs (2026):
+
+- **Endpoint:** `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`. Jurisdiction-restricted buckets use `https://<ACCOUNT_ID>.<jurisdiction>.r2.cloudflarestorage.com` (e.g. `eu`, `fedramp`) and are reachable *only* through their jurisdiction endpoint.
+- **Region:** always `'auto'` — required by the SDK, ignored by R2.
+- **Path style:** R2 supports both virtual-hosted and path-style; `forcePathStyle: true` is the safe default and what the recipe below uses.
+- **Presigned URLs:** supported for GET/HEAD/PUT/DELETE with expiry from 1 second to **7 days** (604 800 s) — so `getSignedUploadUrl()` / `getSignedUrl()` work as on AWS. Presigned URLs only work against the `r2.cloudflarestorage.com` S3 domain, **not** custom domains.
+- **Multipart:** CreateMultipartUpload / UploadPart / CompleteMultipartUpload / AbortMultipartUpload are implemented, so `initiateMultipartUpload()` works. Note: re-uploading the same part number replaces the previous part.
+- **ACLs are not supported** — R2 has no per-object ACLs. Omit `acl`; make objects public via a public bucket instead.
+- **Public URLs:** buckets are private by default. For public delivery attach a **custom domain** (production — gets Cloudflare CDN/cache/WAF) or enable the `r2.dev` development URL (rate-limited, not for production). Point `publicUrl` at whichever you use.
+
+```typescript
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+
+const r2 = new S3Provider({
+  bucket: 'my-bucket',
+  region: 'auto',                    // required by the SDK, ignored by R2
+  endpoint: `https://${process.env.CF_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID!,      // R2 API token (S3 auth kind)
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+  },
+  forcePathStyle: true,
+  publicUrl: 'https://media.example.com', // custom domain (or https://<id>.r2.dev in dev)
+});
+```
+
+Docs: [S3 API compatibility](https://developers.cloudflare.com/r2/api/s3/api/) · [Presigned URLs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/) · [Public buckets](https://developers.cloudflare.com/r2/buckets/public-buckets/) · [Data location / jurisdictions](https://developers.cloudflare.com/r2/reference/data-location/)
+
+## CloudflareImagesProvider
+
+Cloudflare Images storage driver — managed image pipeline (storage + named/flexible variants + `imagedelivery.net` CDN). Zero dependencies: native `fetch` + `node:crypto`, no SDK.
+
+**Images only** — max 10 MB per upload, max 100 megapixels (PNG, JPEG, GIF/WebP incl. animation, SVG, AVIF). Route videos/documents to a bucket provider with `StorageRouter`.
+
+### Import
+
+```typescript
+import { CloudflareImagesProvider } from '@classytic/media-kit/providers/cloudflare-images';
+```
+
+### Config
+
+```typescript
+interface CloudflareImagesProviderConfig {
+  /** Cloudflare account ID (required) */
+  accountId: string;
+  /** API token with Images:Edit — string or lazy () => string | Promise<string> */
+  apiToken: string | (() => string | Promise<string>);
+  /** Images account hash — appears in every delivery URL (required) */
+  accountHash: string;
+  /** Variant used for delivery URLs (default: 'public') */
+  defaultVariant?: string;
+  /** Private mode: signed-delivery token key (dashboard → Images → Keys) */
+  signing?: { key: string };
+}
+```
+
+### Two modes
+
+| | Public mode (default) | Private mode (`signing` configured) |
+|---|---|---|
+| `write()` | Custom ID = the media-kit generated key (path-like custom IDs are supported: ≤1024 chars, subpaths OK, no leading/trailing slash, not a UUID) — the key is preserved verbatim | `requireSignedURLs: true`, **no custom ID** (Cloudflare forbids custom IDs on signed images) — the stored key is Cloudflare's UUID |
+| `getPublicUrl()` | `https://imagedelivery.net/{accountHash}/{key}/{defaultVariant}` | Same shape, but 403s without a token |
+| `getSignedUrl()` | Throws (no signing key) | HMAC-SHA256 `?exp=…&sig=…` token per Cloudflare's scheme |
+| `getSignedUploadUrl()` | Works — direct creator upload with the generated key as custom ID, so `confirmUpload()`'s key-shape check passes | **Throws** — the CF UUID key can't survive `confirmUpload()` validation; use server-side `upload()` |
+
+### Presigned-upload client contract (differs from S3/GCS!)
+
+Cloudflare's one-time `uploadURL` accepts a `multipart/form-data` **POST** with the file in a `file` field — **not** a raw `PUT` of the bytes:
+
+```typescript
+// Client side — after calling media.getSignedUploadUrl(...)
+const form = new FormData();
+form.append('file', fileBlob);
+await fetch(uploadUrl, { method: 'POST', body: form }); // NOT fetch(uploadUrl, { method: 'PUT', body: fileBlob })
+```
+
+`expiresIn` is clamped to Cloudflare's window: 2 minutes – 6 hours (default 30 min on their side; the provider always sends an explicit `expiry`).
+
+### Caveats (platform constraints, honestly stated)
+
+- **`stat()` size/contentType describe the served variant**, not the original bytes: the details API returns identity only (filename, upload date, signed flag), so the provider HEADs the delivery URL for byte info.
+- **`read()` streams the `defaultVariant` rendition** — Cloudflare Images has no original-bytes download API. Byte-range: Range on `imagedelivery.net` is undocumented; the provider forwards the header and, if the CDN replies 200, slices the requested window locally so callers always get correct bytes.
+- **No `list`/`copy`/`move`/multipart** — left `undefined` (engine feature-detects), Cloudflare Images has no equivalents (the list API has no prefix filter).
+- **Disable server-side processing** (`processing: { enabled: false }`) — variants/optimization are Cloudflare's job.
+
+### Extensions beyond StorageDriver
+
+```typescript
+const driver = engine.driver as CloudflareImagesProvider;
+driver.getVariantUrl(key, 'thumbnail');            // named variant
+driver.getVariantUrl(key, 'w=400,sharpen=3');      // flexible variant (must be enabled; public images only)
+driver.getSignedVariantUrl(key, 'thumbnail', 600); // signed, private mode
+```
+
+### Example
+
+```typescript
+import { createMedia } from '@classytic/media-kit';
+import { CloudflareImagesProvider } from '@classytic/media-kit/providers/cloudflare-images';
+
+const media = await createMedia({
+  connection: mongoose.connection,
+  driver: new CloudflareImagesProvider({
+    accountId: process.env.CF_ACCOUNT_ID!,
+    apiToken: () => secrets.get('cf-images-token'), // lazy — resolved on first upload
+    accountHash: process.env.CF_IMAGES_ACCOUNT_HASH!,
+    defaultVariant: 'public',
+    // signing: { key: process.env.CF_IMAGES_SIGNING_KEY! }, // ← private mode
+  }),
+  processing: { enabled: false },
+});
+```
+
+Docs: [Upload via API](https://developers.cloudflare.com/images/upload-images/) · [Custom IDs](https://developers.cloudflare.com/images/upload-images/upload-custom-path/) · [Direct creator upload](https://developers.cloudflare.com/images/upload-images/direct-creator-upload/) · [Serve private images (tokens)](https://developers.cloudflare.com/images/manage-images/serve-images/serve-private-images/) · [Flexible variants](https://developers.cloudflare.com/images/manage-images/enable-flexible-variants/) · [Limits & formats](https://developers.cloudflare.com/images/get-started/limits/)
+
 ## Custom Driver
 
 Implement the `StorageDriver` interface to create a custom storage backend. Only the core methods and `getPublicUrl` are required.

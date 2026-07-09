@@ -1,0 +1,562 @@
+# React Media Integration
+
+Wire `@classytic/react-media`'s upload providers to a media-kit backend.
+
+`@classytic/react-media` (0.3.0+) handles the browser side of large uploads: chunking,
+retry/backoff, presigned-URL buffering and refresh, circuit breaking, crash recovery.
+It speaks to your server through a handful of small JSON routes. media-kit owns the
+server side: key minting, tenant binding, policy gates, part signing, multipart
+assembly, and the media document. This guide is the glue — the exact host routes that
+translate between the two packages' wire shapes.
+
+Two flows are covered:
+
+1. **Chunked multipart** — `createMediaKitProvider` (react-media) ↔
+   `initiateMultipartUpload` / `signUploadParts` / `completeMultipartUpload` (media-kit).
+   For recordings and large files.
+2. **Live HLS segments** — `createHlsSegmentProvider` (react-media) ↔
+   `generateBatchPutUrls` (media-kit). For live-viewable recording.
+
+Plus the **single-PUT small-file path** (`getSignedUploadUrl` + `confirmUpload`) when you
+don't need chunking at all.
+
+## Three integration rules (read these first)
+
+> **Rule 1 — Tenant continuity: initiate and complete MUST share the same org context.**
+> Keys minted under a tenant context embed a `__t-<orgId>` segment, and
+> `completeMultipartUpload()` / `confirmUpload()` enforce an exact-match binding — a
+> mismatch is a 403 `media.confirm.tenant_mismatch`. Derive the operation context from
+> the authenticated request on BOTH routes (in arc: from `req.scope`), never from
+> client-supplied fields. If the user can switch organizations mid-upload, pin the org
+> at initiate time and reject completes from a different scope.
+
+> **Rule 2 — Forward client display hints through `/complete`.**
+> `CompleteMultipartInput` (like `ConfirmUploadInput`) accepts client-computed `width`,
+> `height`, `thumbhash`, `dominantColor` — the output of
+> `@classytic/media-transform`'s `toUploadHints()`. In the client-processed flow the
+> server skips sharp entirely, so these hints are the ONLY source of dimensions and
+> blur-up placeholders. react-media's provider does not post them on `/complete`
+> itself — pass them in `initUpload`'s `metadata` and stash them server-side (see the
+> pending-session store below), then spread them into `completeMultipartUpload()`.
+> Dropping them ships records with no placeholder metadata.
+
+> **Rule 3 — Presign orphans need a bucket lifecycle rule.**
+> Abandoned presigned objects (user closes the tab before `/complete`) have NO database
+> row — `purgeStalePending()` and the other DB-driven sweeps cannot see them. Scope a
+> storage lifecycle rule to your upload prefixes: S3 `AbortIncompleteMultipartUpload`
+> (for abandoned multipart parts) plus an expiration rule on the presign folder; GCS an
+> age rule. This applies doubly to live HLS segments — see the warning in that section.
+> Full posture: [Upload Profiles](./upload-profiles.mdx).
+
+## Endpoint contract
+
+`createMediaKitProvider({ apiBase })` (a preconfigured `createS3Provider` — same wire
+protocol) calls these routes relative to `apiBase`:
+
+| # | Route | Client sends | Host calls | Host responds |
+|---|-------|--------------|------------|---------------|
+| 1 | `POST /init` | `{ resourceId, contentType, metadata, initialParts }` | `media.initiateMultipartUpload({ filename, contentType, folder, partCount, expiresIn }, ctx)` | `{ success, uploadId, key, presignedUrls: [{ partNumber, url, expiresAt }] }` |
+| 2 | `POST /part-urls` | `{ key, uploadId, startPart, count }` | `media.signUploadParts(key, uploadId, partNumbers, expiresIn)` | `{ presignedUrls: [{ partNumber, url, expiresAt }] }` |
+| 3 | `POST /complete` | `{ resourceId, key, uploadId, parts: [{ partNumber, etag }], duration, totalBytes }` | `media.completeMultipartUpload({ key, uploadId, parts, filename, mimeType, size, ...hints }, ctx)` | `{ success, location, key }` |
+| 4 | `POST /abort` | `{ resourceId, key, uploadId }` | `media.abortMultipartUpload(key, uploadId)` | `{ success }` |
+| 5 | `GET /processing/:jobId` | — | media doc lookup (optional; only if you defer `process`) | `{ job: { id, key, status, ... } }` |
+
+### The field mapping
+
+media-kit's `SignedPartResult` and react-media's expected presigned-URL shape differ in
+two field names and one time format. This mapping is the entire translation layer:
+
+| media-kit (`SignedPartResult`) | react-media (`PresignedUrl`) | Conversion |
+|---|---|---|
+| `uploadUrl: string` | `url: string` | rename |
+| `partNumber: number` | `partNumber: number` | as-is |
+| `expiresIn: number` (seconds from now) | `expiresAt: string` (ISO timestamp) | `new Date(Date.now() + expiresIn * 1000).toISOString()` |
+| `headers?: Record<string, string>` | — | not forwarded — see the S3 note below |
+
+```typescript
+import type { SignedPartResult } from '@classytic/media-kit';
+
+/** SignedPartResult → the shape createMediaKitProvider expects. */
+function toPresignedUrl(p: SignedPartResult) {
+  return {
+    partNumber: p.partNumber,
+    url: p.uploadUrl,
+    expiresAt: new Date(Date.now() + p.expiresIn * 1000).toISOString(),
+  };
+}
+```
+
+`headers` note: react-media's part PUT sends only `Content-Type`. media-kit's
+`S3Provider.signUploadPart()` returns no extra headers and does not sign
+`Content-Type` for parts, so the two compose cleanly on S3 / R2 / MinIO. A custom
+driver whose `signUploadPart` REQUIRES extra headers is not compatible with this
+provider.
+
+Two host-side requirements outside the JSON layer:
+
+- **S3-compatible driver only.** `initiateMultipartUpload()` falls back to a GCS-style
+  resumable session (`type: 'resumable'`) when the driver has no
+  `createMultipartUpload` — react-media's part-numbered uploader cannot consume that.
+  Guard on `session.type === 'multipart'`.
+- **Expose `ETag` in bucket CORS.** react-media reads the part ETag from the PUT
+  response header (`ExposeHeaders: ["ETag"]` in the bucket CORS rules). Without it,
+  every part completes with an empty etag and assembly fails.
+
+## Host routes (Fastify)
+
+The handlers below are arc-style — the operation context comes from `req.scope`. On
+plain Fastify, substitute your own `{ userId, organizationId }` extraction.
+
+### Shared setup
+
+```typescript
+import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { getUserId, getOrgId } from '@classytic/arc/scope';
+import { ensureMediaEngine } from './media.engine.js'; // your eager singleton
+
+const engine = await ensureMediaEngine();
+const media = engine.repositories.media;
+
+/** Rule 1: derive tenant context from the AUTHENTICATED request, on every route. */
+function ctxOf(req: FastifyRequest) {
+  return { userId: getUserId(req.scope), organizationId: getOrgId(req.scope) };
+}
+
+/**
+ * Pending-session store: the client's /complete body carries only
+ * { key, uploadId, parts, duration, totalBytes } — filename, mimeType, and the
+ * display hints (Rule 2) must be remembered from /init. A Map works for a
+ * single instance; use Redis/Mongo (cf. the PendingUpload pattern in
+ * ./presigned-uploads.mdx) when running more than one — it doubles as the
+ * orphan tracker.
+ */
+interface PendingMultipart {
+  filename: string;
+  mimeType: string;
+  organizationId?: string;
+  hints: { width?: number; height?: number; thumbhash?: string; dominantColor?: string };
+  /** Single-purpose token for the beacon abort route (see "Abandoned sessions"). */
+  abortToken: string;
+}
+const pending = new Map<string, PendingMultipart>();
+
+const PART_URL_TTL = 3600; // seconds; react-media refreshes ~5 min before expiresAt
+```
+
+### 1. Initiate — `POST /init`
+
+```typescript
+app.post('/api/media/multipart/init', async (req) => {
+  const { resourceId, contentType, metadata, initialParts } = req.body as {
+    resourceId: string;
+    contentType: string;
+    metadata?: Record<string, string>;
+    initialParts?: number;
+  };
+  const ctx = ctxOf(req);
+
+  const session = await media.initiateMultipartUpload(
+    {
+      // The client forwards file.name (and hints) via initUpload's `metadata`.
+      filename: metadata?.filename ?? `${resourceId}.bin`,
+      contentType,
+      folder: 'recordings',
+      partCount: Math.min(initialParts ?? 50, 100),
+      expiresIn: PART_URL_TTL,
+    },
+    ctx,
+  );
+
+  if (session.type !== 'multipart' || !session.uploadId) {
+    // GCS resumable sessions are not compatible with this client — see above.
+    throw Object.assign(new Error('Backend driver does not support S3-style multipart'), { statusCode: 400 });
+  }
+
+  // Stash what /complete will need (Rule 2: hints ride along from metadata).
+  const abortToken = crypto.randomUUID(); // for the beacon abort route below
+  pending.set(session.uploadId, {
+    filename: metadata?.filename ?? `${resourceId}.bin`,
+    mimeType: contentType,
+    organizationId: ctx.organizationId ? String(ctx.organizationId) : undefined,
+    hints: {
+      width: metadata?.width ? Number(metadata.width) : undefined,
+      height: metadata?.height ? Number(metadata.height) : undefined,
+      thumbhash: metadata?.thumbhash,
+      dominantColor: metadata?.dominantColor,
+    },
+    abortToken,
+  });
+
+  return {
+    success: true,
+    uploadId: session.uploadId,
+    key: session.key,
+    presignedUrls: (session.parts ?? []).map(toPresignedUrl),
+    abortToken, // extra fields are ignored by the provider; the host app reads this
+  };
+});
+```
+
+### 2. Sign more parts — `POST /part-urls`
+
+react-media calls this when its URL buffer runs low (fewer than 5 unused URLs).
+
+```typescript
+app.post('/api/media/multipart/part-urls', async (req) => {
+  const { key, uploadId, startPart, count } = req.body as {
+    key: string;
+    uploadId: string;
+    startPart: number;
+    count?: number;
+  };
+
+  const partNumbers = Array.from(
+    { length: Math.min(count ?? 20, 100) },
+    (_, i) => startPart + i,
+  );
+  const parts = await media.signUploadParts(key, uploadId, partNumbers, PART_URL_TTL);
+
+  return { presignedUrls: parts.map(toPresignedUrl) };
+});
+```
+
+### 3. Complete — `POST /complete`
+
+```typescript
+app.post('/api/media/multipart/complete', async (req) => {
+  const { key, uploadId, parts, totalBytes } = req.body as {
+    resourceId: string;
+    key: string;
+    uploadId: string;
+    parts: Array<{ partNumber: number; etag: string }>;
+    duration?: number;
+    totalBytes?: number;
+  };
+
+  const meta = pending.get(uploadId);
+  if (!meta) {
+    throw Object.assign(new Error('Unknown or expired upload session'), { statusCode: 410 });
+  }
+
+  const doc = await media.completeMultipartUpload(
+    {
+      key,
+      uploadId,
+      parts: parts.map((p) => ({ partNumber: p.partNumber, etag: p.etag })),
+      filename: meta.filename,
+      mimeType: meta.mimeType,
+      size: totalBytes ?? 0, // storage-reported size wins server-side anyway
+      ...meta.hints,         // Rule 2: width/height/thumbhash/dominantColor
+      // process: true,      // optional: server sharp pass (images only) — runs
+                             // synchronously inside this call, status processing → ready
+    },
+    ctxOf(req), // Rule 1: SAME tenant scope as /init, or 403 tenant_mismatch
+  );
+
+  pending.delete(uploadId);
+
+  // Field mapping back out: doc.url → location.
+  return { success: true, location: doc.url, key: doc.key };
+});
+```
+
+### 4. Abort — `POST /abort`
+
+```typescript
+app.post('/api/media/multipart/abort', async (req) => {
+  const { key, uploadId } = req.body as { key: string; uploadId: string };
+  await media.abortMultipartUpload(key, uploadId);
+  pending.delete(uploadId);
+  return { success: true };
+});
+```
+
+### 5. Status — `GET /processing/:jobId` (optional)
+
+Only needed if you defer processing to a background job instead of the synchronous
+`process: true` above. react-media's `getProcessingStatus()` / `waitForProcessing()`
+poll this route and expect `{ job }` with `status: 'pending' | 'processing' | 'completed' | 'failed'`.
+media-kit's document status maps directly:
+
+```typescript
+app.get('/api/media/multipart/processing/:jobId', async (req) => {
+  const { jobId } = req.params as { jobId: string };
+  const doc = await media.findById(jobId, ctxOf(req));
+  if (!doc) throw Object.assign(new Error('Not found'), { statusCode: 404 });
+
+  const status =
+    doc.status === 'ready' ? 'completed'
+    : doc.status === 'failed' ? 'failed'
+    : doc.status === 'processing' ? 'processing'
+    : 'pending';
+
+  return { job: { id: jobId, key: doc.key, status, tasks: ['process'] } };
+});
+```
+
+## Client side
+
+```tsx
+import { createMediaKitProvider } from '@classytic/react-media/providers/media-kit';
+import { toUploadHints } from '@classytic/media-transform'; // client-processed flow
+
+const provider = createMediaKitProvider({ apiBase: '/api/media/multipart' });
+
+// filename + display hints travel via initUpload metadata (all values strings):
+const hints = toUploadHints(compressed); // { width, height, thumbhash?, dominantColor? }
+await provider.initUpload({
+  id: recordingId,
+  contentType: file.type,
+  metadata: {
+    filename: file.name,
+    width: String(hints.width),
+    height: String(hints.height),
+    ...(hints.thumbhash && { thumbhash: hints.thumbhash }),
+    ...(hints.dominantColor && { dominantColor: hints.dominantColor }),
+  },
+});
+```
+
+For recording, pass the provider to react-media's upload orchestrator / recorder as
+usual — it drives `initUpload` / `uploadChunk` / `completeUpload` for you.
+
+## Small files: single PUT + confirm
+
+When the file fits in one request (images, documents), skip multipart entirely — one
+presigned PUT and one confirm. This is the simpler alternative for anything under
+~50 MB, and the natural pairing for `@classytic/media-transform`'s client-side
+compression:
+
+```typescript
+// Host — two routes:
+app.post('/api/media/presign', async (req) => {
+  const { filename, contentType, size } = req.body as {
+    filename: string; contentType: string; size?: number;
+  };
+  // → { uploadUrl, key, publicUrl, expiresIn, headers? }
+  return media.getSignedUploadUrl(filename, contentType, { folder: 'uploads', expiresIn: 600, size }, ctxOf(req));
+});
+
+app.post('/api/media/confirm', async (req) => {
+  const { key, filename, mimeType, size, width, height, thumbhash, dominantColor } =
+    req.body as Record<string, never>;
+  // Rules 1 + 2 apply here identically: same tenant scope as presign,
+  // hints spread straight into the confirm input.
+  const doc = await media.confirmUpload(
+    { key, filename, mimeType, size, width, height, thumbhash, dominantColor },
+    ctxOf(req),
+  );
+  return { success: true, location: doc.url, key: doc.key };
+});
+```
+
+Client: `fetch(uploadUrl, { method: 'PUT', body: file, headers })`, then POST the
+confirm body with `...toUploadHints(compressed)` spread in. Full client patterns
+(progress, retry, React hook): [Presigned Uploads](./presigned-uploads.mdx).
+
+## Live HLS segments
+
+react-media's `createHlsSegmentProvider` uploads each recorder chunk as an individual
+bucket object plus a rolling `manifest.json`, so viewers can watch the recording live.
+It expects these routes (all relative to its `apiBase`), with presigned PUT URLs shaped
+`{ uploadUrl, key, expiresAt }` — same `expiresIn → expiresAt` conversion:
+
+| Route | Client sends | Host responds |
+|---|---|---|
+| `POST /init` | `{ interviewId, segmentDuration, metadata }` | `{ success, prefix, initUrl, manifestUrl, segmentUrls: [...], segmentDuration, manifestKey }` |
+| `POST /segment-urls` | `{ prefix, startSegment, count }` | `{ segmentUrls: [...], manifestUrl }` |
+| `POST /refresh-init-url` | `{ prefix }` | `{ initUrl }` |
+| `POST /segment-uploaded` | `{ interviewId, segmentNumber, timestamp }` | `{ success }` (fire-and-forget notify) |
+| `POST /complete` | `{ interviewId, totalSegments, totalDuration }` | `{ success }` |
+| `POST /abort` | `{ interviewId }` | `{ success }` |
+
+Two kinds of objects, two signing paths:
+
+- **Segments** (unique, write-once) → `media.generateBatchPutUrls()`. The engine's
+  MIME/size policy gates and tenant-scoped key minting apply. The provider derives
+  each segment's manifest URI by slicing the returned `key` relative to `prefix`, so
+  the randomized minted keys work as long as the batch `folder` lives under the prefix.
+- **`init.mp4` and `manifest.json`** (STABLE keys, re-signed and overwritten repeatedly)
+  → driver-level `engine.driver.getSignedUploadUrl()`. Engine-level presign always
+  mints a fresh randomized key per call — correct for segments, wrong for an object
+  the provider must keep overwriting at one known key that the viewer polls.
+
+```typescript
+import type { PresignedUploadResult } from '@classytic/media-kit';
+
+const toPutUrl = (u: PresignedUploadResult) => ({
+  uploadUrl: u.uploadUrl,
+  key: u.key,
+  expiresAt: new Date(Date.now() + u.expiresIn * 1000).toISOString(),
+});
+
+const SEGMENT_TTL = 3600; // provider refreshes 5 min before expiry — keep TTL ≥ 15 min
+
+const segmentBatch = (start: number, count: number) =>
+  Array.from({ length: count }, (_, i) => ({
+    filename: `seg_${String(start + i).padStart(4, '0')}.m4s`,
+    contentType: 'video/mp4' as const,
+  }));
+
+app.post('/api/live/init', async (req) => {
+  const { interviewId, segmentDuration } = req.body as { interviewId: string; segmentDuration?: number };
+  const ctx = ctxOf(req);
+  const prefix = `live/${interviewId}/`;
+
+  // Segments through the engine: policy-gated, tenant-scoped keys under the prefix.
+  const { uploads } = await media.generateBatchPutUrls(
+    { files: segmentBatch(0, 20), folder: `${prefix}segments`, expiresIn: SEGMENT_TTL },
+    ctx,
+  );
+
+  // Stable-key objects through the driver (re-signable at the SAME key).
+  const initSigned = await engine.driver.getSignedUploadUrl!(`${prefix}init.mp4`, 'video/mp4', SEGMENT_TTL);
+  const manifestSigned = await engine.driver.getSignedUploadUrl!(`${prefix}manifest.json`, 'application/json', SEGMENT_TTL);
+
+  return {
+    success: true,
+    prefix,
+    initUrl: toPutUrl(initSigned),
+    manifestUrl: toPutUrl(manifestSigned),
+    segmentUrls: uploads.map(toPutUrl),
+    segmentDuration: segmentDuration ?? 6,
+    manifestKey: `${prefix}manifest.json`,
+  };
+});
+
+app.post('/api/live/segment-urls', async (req) => {
+  const { prefix, startSegment, count } = req.body as { prefix: string; startSegment: number; count?: number };
+  const { uploads } = await media.generateBatchPutUrls(
+    { files: segmentBatch(startSegment, Math.min(count ?? 20, 50)), folder: `${prefix}segments`, expiresIn: SEGMENT_TTL },
+    ctxOf(req),
+  );
+  // Re-sign the SAME manifest key — the provider replaces its manifest URL wholesale.
+  const manifestSigned = await engine.driver.getSignedUploadUrl!(`${prefix}manifest.json`, 'application/json', SEGMENT_TTL);
+  return { segmentUrls: uploads.map(toPutUrl), manifestUrl: toPutUrl(manifestSigned) };
+});
+
+app.post('/api/live/refresh-init-url', async (req) => {
+  const { prefix } = req.body as { prefix: string };
+  const initSigned = await engine.driver.getSignedUploadUrl!(`${prefix}init.mp4`, 'video/mp4', SEGMENT_TTL);
+  return { initUrl: toPutUrl(initSigned) };
+});
+
+app.post('/api/live/segment-uploaded', async (req) => {
+  // Fire-and-forget heartbeat from the client — push to admin viewers via socket/SSE.
+  return { success: true };
+});
+```
+
+### One confirm for the finished asset
+
+Individual segments are never confirmed — they are bucket objects without DB rows.
+When the recording ends, register the finished asset ONCE so it becomes a first-class
+media record (tenancy, folders, events, listing) without re-owning the bytes:
+
+```typescript
+app.post('/api/live/complete', async (req) => {
+  const { interviewId, totalSegments, totalDuration } = req.body as {
+    interviewId: string; totalSegments: number; totalDuration: number;
+  };
+  const manifestKey = `live/${interviewId}/manifest.json`;
+
+  // Reference-only record pointing at the manifest. Requires the bucket/CDN
+  // origin in `external.allowedOrigins`. Alternatively create your own domain
+  // row (Interview.recordingPrefix = prefix) and skip the media record.
+  const doc = await media.registerExternal(
+    {
+      url: engine.driver.getPublicUrl(manifestKey),
+      mimeType: 'application/json',
+      folder: 'live',
+      title: `Live recording ${interviewId}`,
+    },
+    ctxOf(req),
+  );
+
+  return { success: true, assetId: String(doc._id), totalSegments, totalDuration };
+});
+```
+
+### Segment lifecycle warning
+
+> **Live segments are invisible to every DB-driven sweep.** Each recording writes
+> dozens-to-thousands of objects (`init.mp4`, `manifest.json`, `segments/*.m4s`) that
+> have no media document — `purgeStalePending()`, `purgeDeleted()` and `purgeExpired()`
+> cannot reclaim them. An abandoned recording (crash, closed tab, failed `/complete`)
+> leaks its whole prefix. This is Rule 3 at scale: scope a bucket lifecycle rule to the
+> live prefix (e.g. S3 expiration on `live/` after N days, or transition-then-expire),
+> and when a recording IS finalized and you want to keep it, either exclude kept
+> prefixes via tags/prefix layout or copy/transcode the finished asset out of the
+> expiring prefix. Deleting a registered external record does not delete the bytes —
+> the lifecycle rule (or an explicit `driver.list(prefix)` + delete sweep on abort) is
+> the cleanup path.
+
+## Abandoned sessions — browser closed mid-upload/recording
+
+A closed tab, a crashed laptop, a killed PWA: the client vanishes without calling
+`/complete` or `/abort`. Defense is layered — **the beacon is an optimization, the
+server sweep + bucket lifecycle rules are the guarantee.**
+
+**1. Client best-effort: abort beacon on `pagehide`.** `navigator.sendBeacon` is the
+only send that reliably survives page teardown (fetch/XHR are killed). react-media does
+not ship built-in unload guards yet (planned follow-up), so wire it in the host app —
+about ten lines:
+
+```typescript
+// After initUpload resolves, remember the session, then:
+window.addEventListener('pagehide', () => {
+  if (!activeSession) return;
+  navigator.sendBeacon(
+    `/api/media/multipart/abort-beacon?t=${abortToken}`, // token minted at /init
+    new Blob([JSON.stringify({ key: activeSession.key, uploadId: activeSession.providerUploadId })],
+      { type: 'application/json' }),
+  );
+});
+// Clear activeSession on completeUpload/abortUpload so a finished upload never beacons.
+```
+
+**2. Server endpoint: beacon-friendly abort.** `sendBeacon` cannot set an
+`Authorization` header — the request arrives with cookies (if same-origin) and whatever
+you put in the URL, nothing else. Either rely on the session cookie, or mint a
+single-purpose token at `/init` and check it here. Be honest about the trade-off: this
+route deletes only in-flight multipart state (`abortMultipartUpload` — no media
+document exists yet), so a forged call can at worst cancel an upload it knows the
+`uploadId` of; still scope the token per-upload rather than leaving the route open.
+
+```typescript
+app.post('/api/media/multipart/abort-beacon', async (req) => {
+  const { key, uploadId } = req.body as { key: string; uploadId: string };
+  const token = (req.query as { t?: string }).t;
+  if (!pending.get(uploadId) || token !== pending.get(uploadId)?.abortToken) {
+    return { success: true }; // don't oracle unknown sessions to beacon callers
+  }
+  await media.abortMultipartUpload(key, uploadId);
+  pending.delete(uploadId);
+  return { success: true };
+});
+```
+
+**3. The guarantee layer (beacons are best-effort — assume some never arrive):**
+
+- `purgeStalePending()` on a cron sweeps media documents stuck in `pending` — covers
+  crashed server-side uploads.
+- The bucket lifecycle rule from Rule 3 covers what no DB sweep can see: S3
+  `AbortIncompleteMultipartUpload` reclaims parts of multipart uploads that were never
+  completed or aborted, and an expiration rule on the presign folder (GCS: age rule)
+  reclaims unconfirmed single-PUT objects. Cross-reference:
+  [Upload Profiles](./upload-profiles.mdx).
+
+**4. Live-HLS sessions: the segment PUTs ARE the heartbeat.** The provider already
+fire-and-forgets `POST /segment-uploaded` after every segment — track
+`lastSegmentAt` per session, and treat a session with no segment for N minutes
+(say 3× `segmentDuration` plus slack) as dead. Then apply a finalize-or-discard
+policy: write a final `ended: true` manifest and register the asset if enough
+segments landed to be worth keeping, otherwise leave the prefix to the lifecycle
+rule.
+
+## Next Steps
+
+- [Presigned Uploads](./presigned-uploads.mdx) - The single-PUT flow in depth (progress, retries, orphan tracking)
+- [Upload Profiles](./upload-profiles.mdx) - chat / cms / document config bundles + the client-processed flow
+- [Private Media](./private-media.mdx) - Serving the uploaded assets behind auth
+- [Storage Providers](./storage-providers.mdx) - S3 / R2 / MinIO driver configuration

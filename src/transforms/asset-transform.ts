@@ -42,6 +42,7 @@ import type { UrlSigner } from '../signing/index';
 import type { SharpModule, SharpInstanceSource } from '../processing/image';
 import { calculateFocalPointCrop } from '../processing/focal-point';
 import { contentDispositionAttachment } from '../utils/content-disposition';
+import { isExternalMedia } from '../utils/external';
 
 /**
  * Minimal structural type — accepts either a MediaEngine or a raw repo+driver pair.
@@ -60,6 +61,14 @@ export interface MediaTransformSource {
   readonly signing?: UrlSigner | undefined;
   /** Host authorize callback — MediaEngine exposes it when configured. */
   readonly authorize?: ServeAuthorize | undefined;
+  /**
+   * Per-document driver resolver for multi-provider setups — MediaEngine
+   * wires it to `registry.resolve(media.provider ?? defaultName)` so a doc
+   * stored on a non-default provider streams from ITS backend. When absent
+   * (v2 hosts constructing the service manually), every read falls back to
+   * `driver` — the pre-multi-provider behavior.
+   */
+  readonly resolveDriver?: ((media: IMediaDocument) => StorageDriver) | undefined;
 }
 
 /**
@@ -92,6 +101,11 @@ export interface AssetTransformConfig {
    * `check()`) here — media-kit never imports them.
    */
   authorize?: ServeAuthorize | undefined;
+  /**
+   * Per-document driver resolver — explicit config wins over the source's
+   * own `media.resolveDriver`. Absent both → all reads use `media.driver`.
+   */
+  resolveDriver?: ((media: IMediaDocument) => StorageDriver) | undefined;
 }
 
 /** Deny codes returned in the 403 JSON body: `{ error: { code } }`. */
@@ -181,6 +195,7 @@ export class AssetTransformService {
   private config: AssetTransformConfig;
   private signing: UrlSigner | undefined;
   private authorize: ServeAuthorize | undefined;
+  private resolveDriver: ((media: IMediaDocument) => StorageDriver) | undefined;
 
   constructor(config: AssetTransformConfig) {
     this.config = config;
@@ -189,10 +204,22 @@ export class AssetTransformService {
     this.maxWidth = config.maxWidth || 4096;
     this.maxHeight = config.maxHeight || 4096;
     // Explicit service config wins; otherwise pick up the engine's shared
-    // signer / authorize so `createAssetTransform({ media: engine })` is
-    // fully wired with zero extra host code.
+    // signer / authorize / driver resolver so
+    // `createAssetTransform({ media: engine })` is fully wired with zero
+    // extra host code.
     this.signing = config.signing ?? config.media.signing;
     this.authorize = config.authorize ?? config.media.authorize;
+    this.resolveDriver = config.resolveDriver ?? config.media.resolveDriver;
+  }
+
+  /**
+   * The driver holding THIS document's bytes. Multi-provider engines route
+   * per doc via `resolveDriver`; without a resolver every read uses the
+   * source's single `driver` (back-compat). Never called for external
+   * records — they are redirected before any storage read.
+   */
+  private driverFor(file: IMediaDocument): StorageDriver {
+    return this.resolveDriver ? this.resolveDriver(file) : this.media.driver;
   }
 
   /**
@@ -229,6 +256,21 @@ export class AssetTransformService {
     // Non-null for private files: overrides every public Cache-Control below.
     const cacheControl = gate.cacheControl;
 
+    // --- External (reference-only) records: no readable bytes ---
+    // Raw serve → 302 redirect to the stored third-party URL (the auth gate
+    // above already ran, so private external records still require a valid
+    // signature or authorize() approval before the URL is disclosed).
+    // Transform / variant requests → 400 with the URL in the error body:
+    // there are no bytes to transform — hosts should use `media.url`
+    // directly (or the redirect) for external records.
+    if (isExternalMedia(file)) {
+      const wantsTransform = Boolean(params.w || params.h || params.format || params.q || request.variant);
+      if (wantsTransform) {
+        return this.externalNoBytes(file.url);
+      }
+      return this.redirect(file.url, cacheControl);
+    }
+
     // --- Variant resolution: serve a specific variant's bytes when requested ---
     let serveTarget: { key: string; mimeType: string; size: number; filename: string } = file;
     if (request.variant) {
@@ -239,12 +281,18 @@ export class AssetTransformService {
       serveTarget = variant;
     }
 
+    // Resolve the driver that stores THIS doc's bytes (variants live in the
+    // same provider as the main file). Resolved after the external branch —
+    // 'external' is not a registered driver name.
+    const driver = this.driverFor(file);
+
     const isImage = serveTarget.mimeType.startsWith('image/');
     const hasTransforms = params.w || params.h || params.format || params.q;
 
     // --- Non-image or no transforms: proxy raw file ---
     if (!isImage || !hasTransforms) {
       return this.serveRaw(
+        driver,
         serveTarget.key,
         serveTarget.mimeType,
         serveTarget.size,
@@ -259,6 +307,14 @@ export class AssetTransformService {
 
     const cacheKey = buildCacheKey(request.variant ? `${fileId}-${request.variant}` : fileId, params, format);
 
+    // Cache placement: the transform cache lives on ITS OWN driver (a
+    // StorageTransformCache is constructed with one driver — typically the
+    // engine default), NOT the source doc's provider. That's deliberate:
+    // the cache is engine-owned derived data, and both get() and set()
+    // below go through the same `this.cache`, so reads and writes are
+    // consistent regardless of which provider holds the source bytes.
+    // Cache keys embed fileId + params, so docs from different providers
+    // can never collide.
     // Check cache (auth already passed — private hits still get private headers)
     if (this.cache) {
       const cached = await this.cache.get(cacheKey);
@@ -275,8 +331,9 @@ export class AssetTransformService {
       }
     }
 
-    // Process image
+    // Process image (source bytes read from the doc's own provider)
     const transformed = await this.transformImage(
+      driver,
       {
         key: serveTarget.key,
         mimeType: serveTarget.mimeType,
@@ -393,10 +450,54 @@ export class AssetTransformService {
   }
 
   /**
+   * 302 redirect to an externally-hosted URL (external records' raw serve).
+   * Private records keep the gate's private Cache-Control; public ones get a
+   * short public TTL so hosts can re-point the registered URL without a
+   * year-long stale redirect.
+   */
+  private async redirect(url: string, cacheControl?: string | null): Promise<TransformResponse> {
+    const { Readable } = await import('node:stream');
+    return {
+      stream: Readable.from(Buffer.alloc(0)),
+      contentType: 'text/plain',
+      contentLength: 0,
+      status: 302,
+      headers: {
+        Location: url,
+        'Content-Length': '0',
+        'Cache-Control': cacheControl ?? 'public, max-age=3600',
+      },
+    };
+  }
+
+  /**
+   * 400 for transform/variant requests against an external record — there
+   * are no bytes to transform. The stored URL is included in the body so
+   * callers can fall back to it directly.
+   */
+  private async externalNoBytes(url: string): Promise<TransformResponse> {
+    const body = Buffer.from(JSON.stringify({ error: { code: 'media.serve.external_no_bytes', url } }));
+    const { Readable } = await import('node:stream');
+    return {
+      stream: Readable.from(body),
+      contentType: 'application/json',
+      contentLength: body.length,
+      status: 400,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': String(body.length),
+        'Cache-Control': 'private, no-store',
+      },
+    };
+  }
+
+  /**
    * Serve raw file (no transform) — supports range requests.
+   * `driver` is the doc's own provider driver (resolved by the caller).
    * `cacheControl` (set for private files) replaces the public default.
    */
   private async serveRaw(
+    driver: StorageDriver,
     key: string,
     contentType: string,
     fileSize: number,
@@ -419,7 +520,7 @@ export class AssetTransformService {
     if (rangeHeader && fileSize > 0) {
       const range = parseRange(rangeHeader, fileSize);
       if (range) {
-        const stream = await this.media.driver.read(key, range);
+        const stream = await driver.read(key, range);
         const contentLength = range.end - range.start + 1;
 
         return {
@@ -437,7 +538,7 @@ export class AssetTransformService {
     }
 
     // Full file
-    const stream = await this.media.driver.read(key);
+    const stream = await driver.read(key);
 
     return {
       stream,
@@ -452,9 +553,11 @@ export class AssetTransformService {
   }
 
   /**
-   * Transform an image using Sharp
+   * Transform an image using Sharp.
+   * `driver` is the doc's own provider driver (resolved by the caller).
    */
   private async transformImage(
+    driver: StorageDriver,
     file: { key: string; mimeType: string; focalPoint?: FocalPoint; width?: number; height?: number },
     params: TransformParams,
     format: string,
@@ -471,8 +574,8 @@ export class AssetTransformService {
       throw new Error('sharp is required for image transforms. Install: npm install sharp');
     }
 
-    // Read file as stream, buffer it
-    const stream = await this.media.driver.read(file.key);
+    // Read file as stream, buffer it (from the doc's own provider)
+    const stream = await driver.read(file.key);
     const chunks: Buffer[] = [];
     for await (const chunk of stream) {
       chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));

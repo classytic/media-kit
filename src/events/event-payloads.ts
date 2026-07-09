@@ -57,6 +57,20 @@ export interface AssetImportedPayload {
   size: number;
 }
 
+export interface AssetExternalRegisteredPayload {
+  assetId: string;
+  /** The externally-hosted URL that was registered (never fetched). */
+  url: string;
+  /** Freeform origin label ('cloudflare-images', ...; default 'external'). */
+  sourceProvider: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  folder: string;
+  /** Sentinel key (`__external__/<hash16>`) — never a storage location. */
+  key: string;
+}
+
 export interface AssetPurgedPayload {
   count: number;
   olderThan?: Date;
@@ -152,6 +166,7 @@ export interface TypedMediaEventMap {
   'media:asset.restored': AssetRestoredPayload;
   'media:asset.moved': AssetMovedPayload;
   'media:asset.imported': AssetImportedPayload;
+  'media:asset.externalRegistered': AssetExternalRegisteredPayload;
   'media:asset.purged': AssetPurgedPayload;
   'media:asset.tagged': AssetTaggedPayload;
   'media:asset.untagged': AssetUntaggedPayload;

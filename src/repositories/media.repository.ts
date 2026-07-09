@@ -39,6 +39,8 @@ import type {
   MediaKitLogger,
   GeneratedVariant,
   MediaVisibility,
+  RegisterExternalInput,
+  StorageDriver,
 } from '../types.js';
 import { createError } from '@classytic/repo-core/errors';
 import type { UrlSigner } from '../signing/index.js';
@@ -61,9 +63,19 @@ import { Semaphore } from '../utils/semaphore.js';
 import { computeFileHash } from '../utils/hash.js';
 import { isImage } from '../utils/mime.js';
 import { normalizeFolderPath, buildFolderTree } from '../utils/folders.js';
+import {
+  EXTERNAL_PROVIDER,
+  isExternalMedia,
+  assertExternalUrl,
+  assertExternalOriginAllowed,
+  buildExternalKey,
+  externalUrlHash,
+} from '../utils/external.js';
 import { generateAltText, generateAltTextWithOptions } from '../utils/alt-text.js';
 import { processImage } from '../operations/process-image.js';
 import {
+  deleteKeysBestEffort,
+  deriveAspectRatio,
   generateKey,
   generateTitle,
   validateFile as validateFileHelper,
@@ -132,13 +144,30 @@ export class MediaRepository extends Repository<IMediaDocument> {
 
   // ── Internal: bridge to legacy operation helpers ──────────
 
-  /** Build OperationDeps for delegating to existing operation helpers. */
+  /**
+   * Build OperationDeps for delegating to existing operation helpers.
+   *
+   * `driver` is the DEFAULT driver — operation flows that target a specific
+   * provider (upload/replace with `input.provider`, per-doc routing) must go
+   * through {@link _opDepsWith} instead, otherwise storage writes silently
+   * land in the default provider's backend.
+   */
   private get _opDeps(): OperationDeps {
+    return this._opDepsWith(this.registry.defaultDriver);
+  }
+
+  /**
+   * Build OperationDeps bound to a SPECIFIC storage driver — used when the
+   * target provider is known up front (upload/replace resolve
+   * `input.provider ?? doc.provider ?? default`), so `processImage()` writes
+   * the `__original` + size variants to the SAME provider as the main file.
+   */
+  private _opDepsWith(driver: StorageDriver): OperationDeps {
     // Minimal shim: events emitter that maps new transport → old event emitter shape
     const self = this;
     return {
       config: this.mediaConfig,
-      driver: this.registry.defaultDriver,
+      driver,
       registry: this.registry,
       repository: this,
       get processor() {
@@ -306,6 +335,19 @@ export class MediaRepository extends Repository<IMediaDocument> {
     const existing = await this.getById(id, { ...ctx });
     if (!existing) throw new Error(`Media ${id} not found`);
 
+    // External records own no bytes to replace — and their sentinel key must
+    // never flow into storage writes/deletes. Re-host via importFromUrl() or
+    // upload() + hardDelete() instead.
+    if (isExternalMedia(existing)) {
+      const err = createError(
+        400,
+        `[media-kit] replace() is not supported for external media ${id} — ` +
+          `it references a third-party URL and owns no bytes. Upload a new asset or use importFromUrl().`,
+      );
+      err.code = 'media.external.no_bytes';
+      throw err;
+    }
+
     const previousKey = existing.key;
     const previousVariants = [...(existing.variants || [])];
 
@@ -317,8 +359,24 @@ export class MediaRepository extends Repository<IMediaDocument> {
     const hash = computeFileHash(buffer, hashAlgorithm);
     const targetFolder = normalizeFolderPath(input.folder || existing.folder || 'general');
 
-    // Process image
-    const processed = await processImage(this._opDeps, {
+    // Resolve provider key BEFORE processing: explicit input > existing doc >
+    // default. processImage writes the `__original` + size variants through
+    // its deps driver — binding it here keeps variants in the SAME provider
+    // as the main file (a default-driver deps bag would scatter them).
+    const providerKey = input.provider ?? existing.provider ?? this.registry.defaultName;
+    const driver = this.registry.resolve(providerKey);
+
+    // Every key written during this replace, in write order — fed FIRST by
+    // processImage's onWrite collector (`__original` + size variants as they
+    // land, INCLUDING keys processImage itself cleans up when it fails
+    // internally and falls back), then by the main write below. processImage
+    // owns cleanup of its own failure window; this list covers the
+    // post-return window (main write / DB update failure). Rollback deletes
+    // are best-effort, so re-deleting an already-cleaned key is a no-op.
+    const newlyWrittenKeys: string[] = [];
+
+    // Process image (variants written via the resolved driver)
+    const processed = await processImage(this._opDepsWith(driver), {
       buffer,
       filename,
       mimeType,
@@ -331,53 +389,65 @@ export class MediaRepository extends Repository<IMediaDocument> {
       format: input.format,
       maxWidth: input.maxWidth,
       maxHeight: input.maxHeight,
+      onWrite: (key) => {
+        newlyWrittenKeys.push(key);
+      },
     });
 
     const newKey = generateKey(processed.finalFilename, targetFolder);
 
-    // Resolve provider key: explicit input > existing doc > default
-    const providerKey = input.provider ?? existing.provider ?? this.registry.defaultName;
-    const driver = this.registry.resolve(providerKey);
-
     // Visibility: explicit input wins, otherwise preserve the existing doc's.
     const visibility: MediaVisibility = input.visibility ?? existing.visibility ?? 'public';
 
-    // Write new file
-    const writeResult = await driver.write(
-      newKey,
-      processed.finalBuffer,
-      processed.finalMimeType,
-      visibility === 'private' ? { acl: 'private' } : undefined,
-    );
+    // Write new main file + update DB. Same storage-DB consistency contract
+    // as executeKeyRewrite: the doc's `key` must always point at a live
+    // object. If the main write or the DB update fails, every newly-written
+    // key (variants from processImage + the main object if it landed) is
+    // rolled back best-effort through the SAME driver, the old object stays
+    // untouched (the doc still references it), and the error propagates.
+    let updated: IMediaDocument | null;
+    let writeResult: Awaited<ReturnType<StorageDriver['write']>>;
+    try {
+      writeResult = await driver.write(
+        newKey,
+        processed.finalBuffer,
+        processed.finalMimeType,
+        visibility === 'private' ? { acl: 'private' } : undefined,
+      );
+      newlyWrittenKeys.push(writeResult.key);
 
-    // Update DB record
-    const updated = await this.update(
-      id,
-      {
-        filename: processed.finalFilename,
-        originalFilename: filename,
-        mimeType: processed.finalMimeType,
-        size: writeResult.size,
-        url: writeResult.url,
-        key: writeResult.key,
-        hash,
-        provider: providerKey,
-        width: processed.width,
-        height: processed.height,
-        aspectRatio: processed.aspectRatio,
-        variants: processed.variants,
-        status: 'ready',
-        thumbhash: processed.thumbhash,
-        dominantColor: processed.dominantColor,
-        exif: processed.exif,
-        ...(writeResult.metadata && { providerMetadata: writeResult.metadata }),
-        ...(input.alt !== undefined && { alt: input.alt }),
-        ...(input.title !== undefined && { title: input.title }),
-        ...(input.visibility !== undefined && { visibility: input.visibility }),
-      },
-      { session: ctx?.session },
-    );
-    if (!updated) throw new Error(`[media-kit] Media not found after replace: ${id}`);
+      updated = await this.update(
+        id,
+        {
+          filename: processed.finalFilename,
+          originalFilename: filename,
+          mimeType: processed.finalMimeType,
+          size: writeResult.size,
+          url: writeResult.url,
+          key: writeResult.key,
+          hash,
+          provider: providerKey,
+          width: processed.width,
+          height: processed.height,
+          aspectRatio: processed.aspectRatio,
+          variants: processed.variants,
+          status: 'ready',
+          thumbhash: processed.thumbhash,
+          dominantColor: processed.dominantColor,
+          exif: processed.exif,
+          ...(writeResult.metadata && { providerMetadata: writeResult.metadata }),
+          ...(input.alt !== undefined && { alt: input.alt }),
+          ...(input.title !== undefined && { title: input.title }),
+          ...(input.visibility !== undefined && { visibility: input.visibility }),
+        },
+        { session: ctx?.session },
+      );
+      if (!updated) throw new Error(`[media-kit] Media not found after replace: ${id}`);
+    } catch (err) {
+      // Best-effort orphan rollback through the SAME driver the writes went to.
+      await deleteKeysBestEffort(driver, newlyWrittenKeys);
+      throw err;
+    }
 
     // Cleanup old files from old provider (best-effort)
     const oldDriver = this.registry.resolve(existing.provider ?? this.registry.defaultName);
@@ -432,24 +502,31 @@ export class MediaRepository extends Repository<IMediaDocument> {
 
     const variantKeys = (media.variants || []).map((v) => v.key);
 
-    // Resolve the driver that stored this file (fall back to default for pre-multi-provider docs)
-    const driver = this.registry.resolve(media.provider ?? this.registry.defaultName);
+    // External (reference-only) records own no bytes — the sentinel key is
+    // not a storage location and `'external'` is not a registered driver, so
+    // the delete is DB-only. This also keeps every purge sweep
+    // (purgeDeleted / purgeExpired / purgeStalePending / deleteFolder →
+    // hardDeleteMany) storage-safe for external records.
+    if (!isExternalMedia(media)) {
+      // Resolve the driver that stored this file (fall back to default for pre-multi-provider docs)
+      const driver = this.registry.resolve(media.provider ?? this.registry.defaultName);
 
-    // Delete from storage (best-effort)
-    try {
-      await driver.delete(media.key);
-    } catch (err) {
-      this._log('warn', 'Failed to delete main file from storage', {
-        id,
-        key: media.key,
-        error: (err as Error).message,
-      });
-    }
-    for (const variant of media.variants || []) {
+      // Delete from storage (best-effort)
       try {
-        await driver.delete(variant.key);
-      } catch {
-        /* ignore */
+        await driver.delete(media.key);
+      } catch (err) {
+        this._log('warn', 'Failed to delete main file from storage', {
+          id,
+          key: media.key,
+          error: (err as Error).message,
+        });
+      }
+      for (const variant of media.variants || []) {
+        try {
+          await driver.delete(variant.key);
+        } catch {
+          /* ignore */
+        }
       }
     }
 
@@ -777,6 +854,98 @@ export class MediaRepository extends Repository<IMediaDocument> {
     );
 
     return result;
+  }
+
+  /**
+   * Register an EXTERNALLY-HOSTED asset (Cloudflare Images delivery URL, an
+   * existing CDN object, a partner's hosted image) as a first-class media
+   * record — tenancy, visibility, folders, tags, listing, events — WITHOUT
+   * media-kit owning the bytes.
+   *
+   * - The URL is validated (absolute http(s); optional
+   *   `external.allowedOrigins` config allowlist) but NEVER fetched — this is
+   *   a reference registry, not an importer. Use `importFromUrl()` to re-host
+   *   (it carries the SSRF machinery).
+   * - The record stores `provider: 'external'` (the canonical discriminator)
+   *   and the sentinel key `__external__/<sha256-hex-16-of-url>` — never a
+   *   storage location. `hash` is the full SHA-256 of the URL string, so
+   *   `existsByHash()` / dedup answer "is this URL already registered?"
+   *   within a tenant. Registering the same URL twice creates two records
+   *   (no implicit dedup) unless `deduplication` handles it host-side.
+   * - Storage-op verbs are external-aware: `hardDelete()` (and every purge
+   *   sweep) is DB-only; folder `move()`/`renameFolder()` never rewrite the
+   *   sentinel key; the serve path 302-redirects to the stored URL;
+   *   `getContextPayload()`/`applyTransforms()`/`replace()` throw typed
+   *   errors (no readable bytes).
+   * - Emits `media:asset.externalRegistered`.
+   *
+   * @throws 400 `media.external.invalid_url` — not an absolute http(s) URL
+   * @throws 403 `media.external.origin_not_allowed` — origin outside `external.allowedOrigins`
+   */
+  async registerExternal(input: RegisterExternalInput, ctx?: MediaContext): Promise<IMediaDocument> {
+    const url = assertExternalUrl(input.url);
+    assertExternalOriginAllowed(url, this.mediaConfig.external?.allowedOrigins);
+
+    const targetFolder = normalizeFolderPath(input.folder || this.mediaConfig.folders?.defaultFolder || 'general');
+    // Same precedence as uploads: explicit > byFolder rule > config default > 'public'.
+    const visibility = resolveVisibility(this.mediaConfig.visibility, targetFolder, input.visibility);
+    const key = buildExternalKey(input.url);
+
+    // Filename: explicit > last URL path segment > sentinel-derived fallback.
+    const pathSegment = decodeURIComponent(url.pathname.split('/').filter(Boolean).pop() ?? '');
+    const filename = input.filename || pathSegment || `external-${externalUrlHash(input.url).slice(0, 16)}`;
+    const sourceProvider = input.sourceProvider ?? EXTERNAL_PROVIDER;
+
+    const media = await this.create(
+      {
+        filename,
+        originalFilename: filename,
+        title: input.title || generateTitle(filename),
+        mimeType: input.mimeType ?? 'application/octet-stream',
+        size: input.size ?? 0,
+        url: input.url,
+        key,
+        hash: externalUrlHash(input.url),
+        provider: EXTERNAL_PROVIDER,
+        status: 'ready',
+        visibility,
+        tokenVersion: 0,
+        folder: targetFolder,
+        tags: input.tags ?? [],
+        variants: [],
+        metadata: input.metadata ?? {},
+        providerMetadata: { sourceProvider },
+        width: input.width,
+        height: input.height,
+        aspectRatio: deriveAspectRatio(input.width, input.height),
+        ...(input.alt !== undefined && { alt: input.alt }),
+        ...(input.thumbhash !== undefined && { thumbhash: input.thumbhash }),
+        ...(input.dominantColor !== undefined && { dominantColor: input.dominantColor }),
+      },
+      { session: ctx?.session, organizationId: ctx?.organizationId },
+    );
+
+    this._log('info', 'External media registered', { id: media._id, url: input.url, sourceProvider });
+
+    await this.events.publish(
+      createMediaEvent(
+        MEDIA_EVENTS.ASSET_EXTERNAL_REGISTERED,
+        {
+          assetId: String(media._id),
+          url: input.url,
+          sourceProvider,
+          filename: media.filename,
+          mimeType: media.mimeType,
+          size: media.size,
+          folder: media.folder,
+          key: media.key,
+        },
+        ctx,
+        { resource: 'media', resourceId: String(media._id) },
+      ),
+    );
+
+    return media;
   }
 
   // ============================================================
@@ -1355,6 +1524,22 @@ export class MediaRepository extends Repository<IMediaDocument> {
     const maxDimension = options.maxDimension ?? 1568;
 
     const media = await this._resolveDoc(idOrDoc, ctx);
+
+    // External records have no readable bytes in any registered driver.
+    // Deliberately NOT fetched server-side: fetching arbitrary stored URLs
+    // here would be an SSRF surface. Hosts fetch `media.url` themselves.
+    // (Future option: route through url-import's pinned, SSRF-guarded fetch
+    // as an explicit opt-in.)
+    if (isExternalMedia(media)) {
+      const err = createError(
+        400,
+        `[media-kit] Media ${String(media._id)} is an external reference — no bytes to load. ` +
+          `Fetch media.url yourself (or re-host it via importFromUrl()).`,
+      );
+      err.code = 'media.context.external';
+      throw err;
+    }
+
     const driver = this.registry.resolve(media.provider ?? this.registry.defaultName);
 
     const stream = await driver.read(media.key);
@@ -1422,6 +1607,17 @@ export class MediaRepository extends Repository<IMediaDocument> {
     const media = await this.getById(mediaId, { ...ctx });
     if (!media) throw new Error(`Media ${mediaId} not found`);
 
+    // External records own no bytes to transform.
+    if (isExternalMedia(media)) {
+      const err = createError(
+        400,
+        `[media-kit] applyTransforms() is not supported for external media ${mediaId} — ` +
+          `it references a third-party URL and owns no bytes.`,
+      );
+      err.code = 'media.external.no_bytes';
+      throw err;
+    }
+
     const opsRegistry = this.bridges.transform?.ops;
     if (!opsRegistry || Object.keys(opsRegistry).length === 0) {
       throw new Error('[media-kit] No TransformBridge configured — register ops via bridges.transform.ops');
@@ -1477,6 +1673,36 @@ export class MediaRepository extends Repository<IMediaDocument> {
       ...this._tenantOpts(ctx),
       throwOnNotFound: false,
     } as Record<string, unknown>)) as IMediaDocument | null;
+  }
+
+  /**
+   * Pre-upload dedup handshake — "do you already have this file?".
+   *
+   * The WhatsApp "instant forward" recipe: the client hashes the file FIRST
+   * (SHA-256 via `crypto.subtle.digest`), asks the server, and on a hit
+   * skips the upload entirely, reusing the returned media's id (the same
+   * `returnExisting` semantics `upload()` applies after receiving bytes —
+   * this verb just moves the check before the bytes travel).
+   *
+   * Tenant-scoped through the SAME plugin-routed read as `getByHash()` —
+   * NEVER cross-tenant. A globally-scoped answer would be an existence
+   * oracle: anyone could probe "has someone, anywhere, uploaded this file?"
+   * by hash. The same content uploaded by another tenant therefore reports
+   * `exists: false` by design. Hosts MUST require auth on the endpoint that
+   * proxies this verb. Full recipe: docs/guides/upload-profiles.mdx.
+   *
+   * Note: presigned confirms hash with a placeholder by default
+   * (`hashStrategy: 'skip'`) — for the handshake to hit, confirm with a
+   * real content hash (`hashStrategy: 'sha256'`) or store the client's
+   * SHA-256 via server `upload()` with dedup enabled.
+   */
+  async existsByHash(
+    hash: string,
+    ctx?: MediaContext,
+  ): Promise<{ exists: boolean; media?: IMediaDocument | undefined }> {
+    const media = await this.getByHash(hash, ctx);
+    if (!media) return { exists: false };
+    return { exists: true, media };
   }
 
   async getStorageByFolder(ctx?: MediaContext): Promise<Array<{ folder: string; totalSize: number; count: number }>> {
@@ -1591,6 +1817,20 @@ export class MediaRepository extends Repository<IMediaDocument> {
     const mediaId = String(media._id);
     const variants: GeneratedVariant[] = [];
 
+    // Rollback bookkeeping for the catch below:
+    // - pendingDocKey: the create-time key the pending doc references — the
+    //   only storage key an error-state record may legitimately point at.
+    // - writtenKeys: every variant key processImage writes (fed by onWrite —
+    //   a superset of `processed.variants`, it also sees keys written before
+    //   an internal processImage fallback, which processImage already cleans;
+    //   re-deleting those is a best-effort no-op).
+    // - mainWriteKey: the Step-3 main object key, orphaned when it differs
+    //   from pendingDocKey (format change regenerated the key) and the
+    //   processing → ready CAS never landed.
+    const pendingDocKey = key;
+    const writtenKeys: string[] = [];
+    let mainWriteKey: string | undefined;
+
     const updateOpts: Record<string, unknown> = { session: ctx?.session, organizationId: ctx?.organizationId };
 
     try {
@@ -1616,7 +1856,9 @@ export class MediaRepository extends Repository<IMediaDocument> {
       }
       media = processing;
 
-      const processed = await processImage(this._opDeps, {
+      // Bind processImage to the upload's resolved driver so `__original` +
+      // size variants land in the SAME provider as the main file.
+      const processed = await processImage(this._opDepsWith(driver), {
         buffer,
         filename,
         mimeType,
@@ -1629,6 +1871,9 @@ export class MediaRepository extends Repository<IMediaDocument> {
         format: input.format,
         maxWidth: input.maxWidth,
         maxHeight: input.maxHeight,
+        onWrite: (writtenKey) => {
+          writtenKeys.push(writtenKey);
+        },
       });
       variants.push(...processed.variants);
 
@@ -1638,10 +1883,17 @@ export class MediaRepository extends Repository<IMediaDocument> {
 
       // Step 3: Write to storage via the resolved provider
       const writeResult = await driver.write(key, processed.finalBuffer, processed.finalMimeType, writeOptions);
+      mainWriteKey = writeResult.key;
 
       // Step 4: processing → ready. State transition + payload write
       // in one atomic CAS — partial-failure can't leave a record
       // half-updated.
+      //
+      // Display-hint precedence: server-computed values ALWAYS win; the
+      // client-computed hints (width/height/thumbhash/dominantColor from
+      // e.g. @classytic/media-transform) only land when processing left
+      // the corresponding value unset (skipProcessing, processing
+      // disabled, or no processor installed).
       const ready = await assertAndClaim(MEDIA_MACHINE, this, mediaId, {
         from: 'processing',
         to: 'ready',
@@ -1651,12 +1903,12 @@ export class MediaRepository extends Repository<IMediaDocument> {
           size: writeResult.size,
           url: writeResult.url,
           key: writeResult.key,
-          width: processed.width,
-          height: processed.height,
-          aspectRatio: processed.aspectRatio,
+          width: processed.width ?? input.width,
+          height: processed.height ?? input.height,
+          aspectRatio: processed.aspectRatio ?? deriveAspectRatio(input.width, input.height),
           variants: variants.length > 0 ? variants : [],
-          thumbhash: processed.thumbhash,
-          dominantColor: processed.dominantColor,
+          thumbhash: processed.thumbhash ?? input.thumbhash,
+          dominantColor: processed.dominantColor ?? input.dominantColor,
           videoMetadata: processed.videoMetadata,
           exif: processed.exif,
           ...(processed.duration !== undefined && { duration: processed.duration }),
@@ -1696,14 +1948,25 @@ export class MediaRepository extends Repository<IMediaDocument> {
         /* ignore */
       }
 
-      // Cleanup orphaned variants from the same provider
-      for (const v of variants) {
-        try {
-          await driver.delete(v.key);
-        } catch {
-          /* ignore */
-        }
+      // Cleanup every orphaned storage write from the same provider.
+      // `writtenKeys` (fed by processImage's onWrite) covers ALL variant
+      // writes — including any processImage already cleaned internally
+      // (re-delete is a no-op) — and the main object is rolled back when the
+      // error-state doc never came to reference it (a format change
+      // regenerated the key after the pending doc was created). When
+      // mainWriteKey === pendingDocKey the doc still points at a live object,
+      // which purge/hard-delete flows clean up through doc.key later.
+      const orphanKeys = [...writtenKeys];
+      if (mainWriteKey !== undefined && mainWriteKey !== pendingDocKey) {
+        orphanKeys.push(mainWriteKey);
       }
+      await deleteKeysBestEffort(driver, orphanKeys, (orphanKey, deleteErr) => {
+        this._log('warn', 'Failed to delete orphaned storage key after upload failure', {
+          id: mediaId,
+          key: orphanKey,
+          error: deleteErr.message,
+        });
+      });
 
       throw error;
     }

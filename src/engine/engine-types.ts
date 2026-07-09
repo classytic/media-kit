@@ -29,6 +29,7 @@ import type {
   VisibilityConfig,
   MediaSigningConfig,
   ServeAuthorize,
+  ExternalMediaConfig,
 } from '../types.js';
 import type { UrlSigner } from '../signing/index.js';
 
@@ -137,6 +138,12 @@ export interface MediaConfig {
   authorize?: ServeAuthorize;
 
   /**
+   * External (reference-only) media policy for `registerExternal()` —
+   * currently an origin allowlist. Unset = any absolute http(s) URL.
+   */
+  external?: ExternalMediaConfig | undefined;
+
+  /**
    * Schema extension point — add fields/indexes without forking.
    */
   schemaOptions?: {
@@ -192,6 +199,16 @@ export interface MediaEngine {
    * Preserved for single-driver backward compatibility.
    */
   readonly driver: StorageDriver;
+
+  /**
+   * Resolve the driver that stores a given media document's bytes
+   * (`registry.resolve(media.provider ?? defaultName)`). Satisfies
+   * `MediaTransformSource.resolveDriver`, so
+   * `createAssetTransform({ media: engine })` serves non-default-provider
+   * docs from the correct backend with zero extra host wiring. Throws for
+   * external (reference-only) records — check `isExternalMedia()` first.
+   */
+  readonly resolveDriver: (media: IMediaDocument) => StorageDriver;
 
   /** Bridges passed in config (frozen). */
   readonly bridges: Readonly<MediaBridges>;

@@ -10,8 +10,9 @@ description: |
   Triggers: media upload, file storage, s3 upload, gcs upload, presigned url, multipart upload,
   image processing, sharp, media management, asset transform, media-kit, storage driver,
   private media, signed url, authenticated media, serve private image, revoke access,
-  media for llm, base64 for vision, getContextPayload, visibility public private.
-version: 3.4.0
+  media for llm, base64 for vision, getContextPayload, visibility public private,
+  external media, registerExternal, register cdn url, cloudflare images reference.
+version: 3.5.0
 license: MIT
 metadata:
   author: Classytic
@@ -44,7 +45,7 @@ progressive_disclosure:
 
 Production-grade media management for Mongoose: pluggable storage drivers, image processing,
 presigned/multipart uploads, **private media serving** (HMAC-signed proxy URLs), and
-**LLM-context helpers**. Full TypeScript, ESM-only. Built on `@classytic/mongokit`. **606 tests.**
+**LLM-context helpers**. Full TypeScript, ESM-only. Built on `@classytic/mongokit`. **624 tests.**
 
 **Requires:** Node.js `>=22` · Mongoose `>=9.4.1` · `@classytic/mongokit` `>=3.14`. Named
 exports only (no default exports). Heavy SDKs are optional peers — install only what you use.
@@ -86,6 +87,7 @@ media.init(Media);                                          // required before a
 | `GCSProvider` | `providers/gcs` | Google Cloud Storage |
 | `LocalProvider` | `providers/local` | Local filesystem (dev) |
 | `CloudinaryProvider` | `providers/cloudinary` | Cloudinary CDN |
+| `CloudflareImagesProvider` | `providers/cloudflare-images` | Cloudflare Images (managed pipeline + variants; images only, ≤10 MB) |
 | `ImageKitProvider` | `providers/imagekit` | ImageKit CDN |
 | `ImgbbProvider` | `providers/imgbb` | imgbb (public hosting) |
 | `StorageRouter` | `providers/router` | Multi-backend routing by key prefix (e.g. public→S3, private→locked S3) |
@@ -93,7 +95,20 @@ media.init(Media);                                          // required before a
 ```typescript
 new S3Provider({ bucket, region, credentials?, endpoint?, publicUrl?, acl?: 'private' | 'public-read', forcePathStyle? })
 new GCSProvider({ bucket, projectId?, keyFilename?, credentials?, makePublic?, publicUrl? })
+new CloudflareImagesProvider({ accountId, apiToken, accountHash, defaultVariant?: 'public', signing?: { key } })
 ```
+
+**Cloudflare R2 = S3Provider** (no dedicated driver): `endpoint: 'https://<ACCOUNT_ID>.r2.cloudflarestorage.com'`
+(jurisdiction buckets: `<ACCOUNT_ID>.eu.r2.cloudflarestorage.com`), `region: 'auto'`, `forcePathStyle: true`,
+NO `acl` (R2 has none — use a public bucket/custom domain + `publicUrl` for public delivery). Presigned
+PUT/GET work (max 7 days, S3 domain only); multipart works.
+
+**CloudflareImagesProvider modes:** public (default) — uploads use the generated key as the CF custom ID
+(path-like custom IDs supported), so presign→confirm works BUT the client must POST `multipart/form-data`
+with a `file` field to the one-time `uploadURL` (NOT a raw PUT). Private (`signing: { key }`) — uploads set
+`requireSignedURLs: true`, keys become CF UUIDs, `getSignedUrl()` mints HMAC `?exp&sig` tokens, and
+`getSignedUploadUrl()` THROWS (CF forbids custom IDs on signed images) — use server `upload()`.
+Images only; pair with `processing: { enabled: false }` and route video/docs elsewhere via `StorageRouter`.
 
 ## Upload operations
 
@@ -132,6 +147,41 @@ const doc = await media.confirmUpload({
 hand-crafted keys → 400), can't already belong to a record (403), and the stored `url` is always
 derived server-side (a client `url` is validated then discarded).
 
+### Upload profiles (chat / cms / document) & client-processed flow
+
+Media-kit is a provider-agnostic blob/data-bucket layer (any bytes: video, documents, binary) —
+image processing is optional enrichment, not the package identity. Pick a named config bundle
+instead of assembling flags — **chat** (client compresses via `@classytic/media-transform`;
+confirm accepts client-computed `width`/`height`/`thumbhash`/`dominantColor` display hints since
+the server skips processing — server values overwrite them if `process: true` runs;
+`existsByHash(hash, ctx?)` is the pre-upload dedup handshake / content-addressed lookup,
+tenant-scoped by design so it's never a cross-tenant existence oracle — auth the endpoint),
+**cms** (server sharp pipeline, `__original` kept), **document** (the general byte-exact
+data-bucket posture: `skipProcessing`, bytes preserved exactly). Video policy: media-kit stores +
+byte-range serves any bytes, never transcodes (`videoAdapter` = thumbnails/metadata only).
+Full recipes: [docs/guides/upload-profiles.mdx](../../docs/guides/upload-profiles.mdx).
+
+### External (reference-only) media — register a third-party URL
+
+```typescript
+// Register media hosted elsewhere (Cloudflare Images, existing CDN asset, partner URL)
+// as a first-class record — tenancy/visibility/folders/tags/events — WITHOUT owning bytes.
+const doc = await media.registerExternal(
+  { url: 'https://imagedelivery.net/acct/id/public', mimeType: 'image/png',
+    sourceProvider: 'cloudflare-images', folder: 'landing', width: 1280, height: 960 },
+  { organizationId },
+);
+doc.provider; // 'external' (discriminator — isExternalMedia(doc)); key = '__external__/<hash16>' sentinel
+```
+
+URL is validated (absolute http(s); optional engine config `external: { allowedOrigins }` → 403)
+but NEVER fetched — re-hosting is `importFromUrl()`. External-aware verbs: `hardDelete`/purges are
+DB-only; `move`/`renameFolder` never rewrite the sentinel key; serve path 302-redirects raw
+requests to `doc.url` (private gate still runs first) and 400s transforms
+(`media.serve.external_no_bytes`); `getContextPayload` → 400 `media.context.external` (fetch
+`doc.url` yourself); `replace`/`applyTransforms` → 400 `media.external.no_bytes`. Zod:
+`registerExternalSchema`. Event: `media:asset.externalRegistered`.
+
 ### Multipart / resumable (large files) & batch
 
 ```typescript
@@ -145,6 +195,11 @@ await media.abortMultipartUpload(key, uploadId);
 // Batch presigned PUTs (HLS segments, multi-file):
 const { uploads } = await media.generateBatchPutUrls({ files: [{ filename, contentType }, ...], folder }, context?);
 ```
+
+Browser client: `@classytic/react-media`'s `createMediaKitProvider` (chunked multipart) and
+`createHlsSegmentProvider` (live HLS) speak to these verbs through 4-6 small host routes —
+copy-paste Fastify recipe + field mapping (`uploadUrl→url`, `expiresIn`s`→expiresAt`ISO):
+[docs/guides/react-media-integration.mdx](../../docs/guides/react-media-integration.mdx).
 
 ## Private media serving
 

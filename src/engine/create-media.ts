@@ -33,7 +33,7 @@
 
 import type { MediaConfig, MediaEngine, ResolvedMediaConfig } from './engine-types.js';
 import type { EventTransport } from '@classytic/primitives/events';
-import type { ImageAdapter, MediaKitConfig } from '../types.js';
+import type { ImageAdapter, IMediaDocument, MediaKitConfig, StorageDriver } from '../types.js';
 import { InProcessMediaBus } from '../events/in-process-bus.js';
 import { createMediaModels } from '../models/create-models.js';
 import { resolveMediaTenant } from '../models/inject-tenant.js';
@@ -79,6 +79,7 @@ export async function createMedia(config: MediaConfig): Promise<MediaEngine> {
     suppressWarnings: config.suppressWarnings,
     visibility: config.visibility,
     signing: config.signing,
+    external: config.external,
   });
 
   // Merge validated values back over the original config so non-validated
@@ -173,6 +174,10 @@ export async function createMedia(config: MediaConfig): Promise<MediaEngine> {
     config: Object.freeze(resolved),
     registry,
     driver: registry.defaultDriver,
+    // Per-doc driver routing for the serve path — AssetTransformService
+    // picks this up via MediaTransformSource so non-default-provider docs
+    // stream from their own backend instead of 404ing on the default.
+    resolveDriver: (media: IMediaDocument): StorageDriver => registry.resolve(media.provider ?? registry.defaultName),
     bridges,
     signing: signer,
     authorize: config.authorize,

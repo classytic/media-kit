@@ -7,11 +7,19 @@
 
 import crypto from 'crypto';
 import { Readable } from 'stream';
-import type { StorageDriver, WriteResult, FileStat, PresignedUploadResult } from '../../src/types';
+import type {
+  StorageDriver,
+  WriteResult,
+  FileStat,
+  PresignedUploadResult,
+  SignedPartResult,
+  CompletedPart,
+} from '../../src/types';
 
 export class MemoryStorageDriver implements StorageDriver {
   readonly name = 'memory';
   private storage = new Map<string, { buffer: Buffer; contentType: string; modified: Date }>();
+  private multipartSessions = new Map<string, { key: string; contentType: string; parts: Map<number, Buffer> }>();
 
   async write(key: string, data: Buffer | NodeJS.ReadableStream, contentType: string): Promise<WriteResult> {
     let buffer: Buffer;
@@ -106,6 +114,53 @@ export class MemoryStorageDriver implements StorageDriver {
       expiresIn,
       headers: { 'Content-Type': contentType },
     };
+  }
+
+  // --- Multipart (S3-style) ---
+
+  async createMultipartUpload(key: string, contentType: string): Promise<{ uploadId: string }> {
+    const uploadId = crypto.randomUUID();
+    this.multipartSessions.set(uploadId, { key, contentType, parts: new Map() });
+    return { uploadId };
+  }
+
+  async signUploadPart(key: string, uploadId: string, partNumber: number, expiresIn = 3600): Promise<SignedPartResult> {
+    return {
+      uploadUrl: `https://cdn.example.com/_multipart/${key}?uploadId=${uploadId}&partNumber=${partNumber}`,
+      partNumber,
+      expiresIn,
+    };
+  }
+
+  async completeMultipartUpload(
+    key: string,
+    uploadId: string,
+    parts: CompletedPart[],
+  ): Promise<{ etag: string; size: number }> {
+    const session = this.multipartSessions.get(uploadId);
+    if (!session || session.key !== key) throw new Error(`NoSuchUpload: ${uploadId}`);
+    const buffers = [...parts]
+      .sort((a, b) => a.partNumber - b.partNumber)
+      .map((p) => {
+        const buf = session.parts.get(p.partNumber);
+        if (!buf) throw new Error(`InvalidPart: ${p.partNumber}`);
+        return buf;
+      });
+    const buffer = Buffer.concat(buffers);
+    this.storage.set(key, { buffer, contentType: session.contentType, modified: new Date() });
+    this.multipartSessions.delete(uploadId);
+    return { etag: `"${crypto.createHash('md5').update(buffer).digest('hex')}"`, size: buffer.length };
+  }
+
+  async abortMultipartUpload(_key: string, uploadId: string): Promise<void> {
+    this.multipartSessions.delete(uploadId);
+  }
+
+  /** Simulate the client PUTting a part to its presigned URL (multipart flow tests) */
+  simulatePartUpload(uploadId: string, partNumber: number, buffer: Buffer): void {
+    const session = this.multipartSessions.get(uploadId);
+    if (!session) throw new Error(`NoSuchUpload: ${uploadId}`);
+    session.parts.set(partNumber, buffer);
   }
 
   /** Simulate an external upload (for presigned flow tests) */

@@ -1,6 +1,6 @@
 {
   "name": "@classytic/media-kit",
-  "version": "3.4.0",
+  "version": "3.5.0",
   "description": "Engine-factory media management for Mongoose and Arc — arc-compatible events, dynamic multi-tenancy, pluggable storage drivers, smart pagination, image processing",
   "type": "module",
   "sideEffects": false,
@@ -35,6 +35,10 @@
     "./providers/cloudinary": {
       "types": "./dist/providers/cloudinary.d.mts",
       "import": "./dist/providers/cloudinary.mjs"
+    },
+    "./providers/cloudflare-images": {
+      "types": "./dist/providers/cloudflare-images.d.mts",
+      "import": "./dist/providers/cloudflare-images.mjs"
     },
     "./providers/router": {
       "types": "./dist/providers/router.d.mts",

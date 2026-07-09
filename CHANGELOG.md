@@ -3,6 +3,302 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0] — 2026-07-09
+
+The client-processed-upload release: media-kit becomes the fast server-side
+half of a WhatsApp-style pipeline. Clients compress with
+`@classytic/media-transform`, upload via presigned PUT, and confirm with
+client-computed display hints — the server never touches sharp on that path.
+Plus the `existsByHash()` dedup handshake, EXTERNAL reference-only records,
+a `CloudflareImagesProvider`, and a multi-provider data-integrity fix pass.
+
+### Fixed — multi-provider data integrity
+
+Three silent-corruption bugs when the engine runs with `providers` +
+`defaultProvider` and documents live on a non-default provider. Regression
+suite: `tests/integration/multi-provider-integrity.test.ts` +
+`tests/unit/key-rewrite-provider.test.ts` + `tests/unit/url-import-provider.test.ts`.
+
+- **Ops layer hardwired the default driver (HIGH).** The repository's
+  operation-deps bridge pinned `driver: registry.defaultDriver`, so
+  `processImage()` wrote the `__original` and size variants to the DEFAULT
+  provider while `upload({ provider })` / `replace()` wrote the main file to
+  the input provider's backend — variants scattered across buckets, and the
+  later variant deletes targeted the wrong one. `upload()`/`replace()` now
+  bind the ops deps to the resolved driver (`_opDepsWith(driver)` /
+  `withDriver()`), so main file + every variant land in — and are cleaned up
+  from — the same provider. `move()`/`renameFolder()` (`executeKeyRewrite`)
+  copied/deleted every file through the default driver even though files in
+  one folder can span providers; the rewrite engine now resolves the driver
+  PER FILE (`file.provider`, default when absent) for copies, old-key
+  deletes, and both rollback phases. An unregistered provider name fails
+  only that file; external records keep their DB-only branch.
+  `importFromUrl()`'s documented-but-dropped `provider` option is now wired
+  through to the upload (and the operations upload path stamps
+  `media.provider` + routes variants like the repository path).
+- **Transform serving ignored the doc's provider (HIGH).**
+  `AssetTransformService` read bytes via the engine default driver, so a
+  non-default-provider asset 404'd or served from the wrong backend.
+  `MediaTransformSource` (and the service config) gained an optional
+  `resolveDriver?: (media) => StorageDriver`; `MediaEngine` now exposes it
+  (`registry.resolve(media.provider ?? defaultName)`), so
+  `createAssetTransform({ media: engine })` routes raw serves, variant
+  serves, range reads, and transform source reads per doc with zero host
+  wiring. Hosts constructing the service manually without a resolver keep
+  the old single-`driver` behavior. The transform CACHE deliberately stays
+  on the driver it was constructed with (typically the engine default):
+  it is engine-owned derived data, get/set always use the same driver, and
+  cache keys embed the file id — documented in the guide.
+- **`replace()` leaked the new object when the DB update failed (MEDIUM).**
+  `replace()` wrote the new object first and updated the DB second, with no
+  rollback — a failed update stranded the new main file (and its variants)
+  in storage forever. It now mirrors `executeKeyRewrite`'s storage-DB
+  consistency contract: on main-write or DB-update failure, every
+  newly-written key is best-effort deleted through the CORRECT driver, the
+  old object stays live (the doc still references it), and the error
+  rethrows. The external-media guard still rejects before any write.
+- Presigned flows (`getSignedUploadUrl`, batch PUT, multipart/resumable)
+  intentionally remain default-provider — the presign URL and the
+  confirm-time existence/stat checks must hit the same driver, so there is
+  no per-call `provider` option (documented in `src/operations/presigned.ts`
+  and the storage-providers guide). `confirmUpload()` /
+  `completeMultipartUpload()` now stamp `provider: <defaultProvider>` on the
+  created doc so per-doc routing survives a later `defaultProvider` change.
+
+### Fixed — `processImage` orphaned partial writes on mid-pipeline failure (MEDIUM)
+
+Sibling of the multi-provider data-integrity section above — same storage-DB
+consistency contract, applied INSIDE the processing pipeline. `processImage()`
+writes storage objects incrementally (the `__original` variant BEFORE
+`processor.process()` runs, size variants inside the generation loop, video
+thumbnails), but callers only learned the written keys from its RETURN value,
+and its documented failure contract swallows ("On processing failure, returns
+the original buffer unchanged"). A mid-pipeline failure therefore leaked in
+two shapes: the swallow-fallback left `__original` + earlier variants behind
+as an inconsistent partial variant set (or, in the presigned reprocess flows,
+stranded them outright when the finalising `processing → ready` CAS threw or
+lost its race — nothing referenced those keys, a permanent leak), and any
+rethrow path would strand keys invisible to caller-side rollback
+(`_performUpload`'s catch and `replace()`'s rollback list were fed only from
+the return value). Regression suite:
+`tests/unit/process-image-cleanup.test.ts` +
+`tests/integration/process-image-orphans.test.ts`.
+
+- **Cleanup is owned at the source.** `processImage` tracks every
+  successfully-written key and, on ANY internal failure — rethrow or
+  swallow-fallback — best-effort deletes them through `deps.driver` (the
+  per-provider-bound driver from the fix above, so cleanup hits the SAME
+  backend the writes did), drops them from the returned variants list, and
+  resets the fallback result to the true original (buffer, mime type,
+  filename; dimensions re-derived from the original). The fallback now
+  honors its contract exactly: original unchanged, zero variants, zero
+  orphaned keys. Cleanup failures log warnings and never mask the original
+  error.
+- **`ProcessImageParams.onWrite?: (key: string) => void`** — fires at write
+  time for every written key, in write order. `replace()` and the upload
+  pipelines (`MediaRepository._performUpload` AND the operations/upload path
+  behind `importFromUrl`) feed their rollback lists from the collector, so a
+  failure AFTER processImage returns but before the DB write lands rolls
+  back every newly-written key (re-deleting a key processImage already
+  cleaned internally is a best-effort no-op). Internal-ownership cleanup
+  stays the primary mechanism; the collector covers the caller's
+  post-return window.
+- **Upload rollback also covers the regenerated main key.** When a format
+  conversion changes the extension, the main object is written under a NEW
+  key while the pending doc still references the create-time key — on a
+  failed `processing → ready` CAS that object was a permanent orphan. The
+  catch now deletes the written main object whenever the error-state doc
+  never came to reference it (when the keys match, the doc points at a live
+  object and purge/hard-delete flows own it).
+- **Presigned reprocess flows no longer strand variants.**
+  `confirmUpload()` / `completeMultipartUpload()` with `process: true` stay
+  non-blocking on processing failure, but variant keys written by a
+  reprocess whose finalising CAS threw or lost its claim race are now
+  deleted instead of leaking.
+
+### Added — client-computed display hints on `confirmUpload` / `completeMultipartUpload` / `upload`
+
+Composition gap for client-processed uploads (`@classytic/media-transform`
+compresses in the browser, PUTs via presigned URL, confirms with `process`
+absent): the server never runs sharp in that flow, so the record had NO
+width/height/thumbhash/dominantColor — hosts either paid for `process: true`
+(re-download + sharp, defeating the point) or lost the placeholder metadata.
+
+- `ConfirmUploadInput`, `CompleteMultipartInput` and `UploadInput` gain
+  optional `width` / `height` (int, 1–65535), `thumbhash` (base64, ≤128
+  chars) and `dominantColor` (`#rrggbb`) — validated by
+  `confirmUploadSchema` / `completeMultipartSchema` / `uploadInputSchema`.
+- Persisted on the created doc; `aspectRatio` is derived server-side
+  (`width / height`, the same unrounded convention `processImage` uses) when
+  both dimensions are present. New shared helper `deriveAspectRatio()` in
+  `operations/helpers`.
+- Trust model: DISPLAY HINTS only — accepted because the server skips
+  processing in that flow; worst case a lying client wrongs its own tenant's
+  placeholder rendering. Server-computed values ALWAYS win: `process: true`
+  (confirm/multipart) and the `upload()` pipeline overwrite the hints
+  whenever processing actually ran (`processed.X ?? input.X` precedence on
+  the buffer path — hints land only when processing is
+  skipped/disabled/processor absent).
+
+### Added — `existsByHash()` pre-upload dedup handshake
+
+WhatsApp's "forward is instant": the client hashes FIRST (SHA-256 via
+`crypto.subtle.digest`), asks the server, and on a hit skips the upload
+entirely. Media-kit previously deduped only AFTER receiving the bytes.
+
+- `MediaRepository.existsByHash(hash, ctx?) → { exists, media? }` — returns
+  the doc on a hit so the host can reference it directly (same
+  `returnExisting` semantics as upload-time dedup, moved before the bytes
+  travel).
+- Tenant-scoped through the same plugin-routed read as `getByHash()` — NEVER
+  cross-tenant: a global answer would be an existence oracle leaking
+  "someone, somewhere uploaded this file". The same content under another
+  tenant reports `exists: false` by design. Hosts must require auth on the
+  proxying endpoint.
+- For the handshake to ever hit, stored hashes must be real content hashes —
+  confirm presigned uploads with `hashStrategy: 'sha256'` or dedup through
+  server `upload()` (the default presign confirm stores a key-derived
+  placeholder hash).
+
+### Added — `registerExternal()`: EXTERNAL / reference-only media records
+
+Register media that lives on a third party (a Cloudflare Images delivery
+URL, an existing CDN asset, a partner's hosted image) as a first-class media
+record — tenancy, visibility, folders, tags, listing, events — WITHOUT
+media-kit owning the bytes.
+
+- **`MediaRepository.registerExternal(input, ctx?)`** — input:
+  `{ url (required); filename?; mimeType?; size?; folder?; visibility?;
+  tags?; alt?; title?; metadata?; sourceProvider?; width?/height?/thumbhash?/
+  dominantColor? }` (the same client display-hint bundle as `confirmUpload`).
+  Creates a `status: 'ready'` record through the normal tenant-stamped create
+  path; visibility follows the standard precedence (explicit > `byFolder` >
+  `default`); `aspectRatio` derived from the hints; `sourceProvider`
+  (freeform label, default `'external'`) stored on
+  `providerMetadata.sourceProvider`. Emits the new
+  `media:asset.externalRegistered` event (`AssetExternalRegisteredPayload`).
+- **Record shape:** `provider: 'external'` is the canonical discriminator
+  (exported: `EXTERNAL_PROVIDER`, `isExternalMedia()`); the stored `key` is
+  the sentinel `__external__/<sha256-hex-16-of-url>` in the package's
+  reserved `__` namespace (exported: `EXTERNAL_KEY_PREFIX`,
+  `buildExternalKey()`) — a namespace marker, never a storage location, and
+  shaped so `assertGeneratedKeyShape` can never accept it (presign
+  `confirmUpload` cannot claim external keys). `hash` = full SHA-256 of the
+  URL string, so `existsByHash(sha256(url))` answers "is this URL already
+  registered?" per tenant. Registering the same URL twice creates two records
+  by design (both DB-only deletes — harmless).
+- **Validation, no fetching:** the URL must be absolute http(s) — `javascript:`
+  / `data:` / relative → 400 `media.external.invalid_url`. The URL is NEVER
+  fetched at register time (reference registry, not an importer —
+  `importFromUrl()` keeps the SSRF machinery for re-hosting). Optional engine
+  config `external: { allowedOrigins?: string[] }` rejects other origins with
+  403 `media.external.origin_not_allowed` (entries origin-normalized;
+  malformed entries fail closed). Zod: `registerExternalSchema` (validators +
+  `/schemas` subpath), `externalConfigSchema` wired into `mediaConfigSchema`.
+- **Every storage-op call site is external-aware:**
+  - `hardDelete()` (and therefore `purgeDeleted` / `purgeExpired` /
+    `purgeStalePending` / `deleteFolder` sweeps) is **DB-only** for external
+    records — no driver resolution, no `driver.delete`.
+  - `AssetTransformService.handle()`: raw serve of an external record →
+    **302 redirect** to the stored URL (the private-media auth gate still
+    runs FIRST, so private external records require a valid signature or
+    `authorize()` approval before the URL is disclosed); transform/variant
+    requests → 400 `media.serve.external_no_bytes` with the URL in the error
+    body — hosts should use `media.url` directly for external records.
+  - `getContextPayload()` → 400 `media.context.external` (fetch `media.url`
+    yourself — media-kit deliberately won't fetch arbitrary stored URLs
+    server-side, that would be an SSRF surface; routing through url-import's
+    pinned fetch is a possible future opt-in).
+  - `replace()` / `applyTransforms()` → 400 `media.external.no_bytes`.
+  - `move()` / `renameFolder()` (key-rewrite path) treat external records as
+    **DB-only folder updates** — the sentinel key is never rewritten into
+    storage copy/delete ops (`RewritableFile` gained an optional `provider`
+    field; `executeKeyRewrite` short-circuits).
+  - `getAssetUrl()` / `getSignedAssetUrl()` work unchanged (they never read
+    bytes; a signed serve URL for a private external record resolves to the
+    gated 302).
+- Docs: "Registering externally-hosted media" in
+  `docs/guides/upload-profiles.mdx`; README verb table; skill section.
+- Tests: `tests/unit/external-media.test.ts` (URL/origin validation, sentinel
+  shape, confirm-guard rejection, zod bounds) +
+  `tests/integration/external-media.test.ts` (record shape, tenancy,
+  visibility precedence, storage-op safety with driver spies, serve matrix).
+
+### Added — `CloudflareImagesProvider` (`/providers/cloudflare-images`) + Cloudflare R2 recipe
+
+New zero-dependency storage driver for **Cloudflare Images** (native `fetch`
++ `node:crypto`, no SDK), following the imgbb/Cloudinary API-hosted provider
+pattern (`LazySecret` apiToken, delivery-URL proxy reads, feature-detected
+optional ops). New subpath export `./providers/cloudflare-images`.
+
+- **Config:** `{ accountId, apiToken, accountHash, defaultVariant? = 'public',
+  signing?: { key } }`. `apiToken` accepts the lazy resolver form.
+- **Public mode (default):** `write()` uploads with a Cloudflare **custom ID
+  equal to the generated key** — CF custom IDs support path-like values
+  (≤1024 chars, subpaths, no leading/trailing slash, not a UUID), which
+  media-kit keys always satisfy, so keys are preserved verbatim (no composite
+  encoding). `getSignedUploadUrl()` creates a one-time direct-creator-upload
+  URL carrying the same custom ID, so the presign → `confirmUpload()` flow
+  keeps the generated key and its tenant binding. ⚠ Client contract differs
+  from S3/GCS: the one-time `uploadURL` takes a `multipart/form-data` POST
+  with a `file` field, NOT a raw PUT. `expiresIn` clamps to CF's window
+  (2 min – 6 h).
+- **Private mode (`signing.key` from dashboard → Images → Keys):** uploads
+  set `requireSignedURLs: true`; CF forbids custom IDs on signed images, so
+  stored keys are CF UUIDs. `getSignedUrl()` /
+  `getSignedVariantUrl()` mint CF's documented HMAC-SHA256 `?exp=…&sig=…`
+  delivery tokens (hex over `pathname?params`). `getSignedUploadUrl()`
+  **throws a clear unsupported error** in this mode — the UUID key cannot
+  pass `confirmUpload()`'s generated-key-shape check; use server `upload()`.
+- **Honest platform caveats (documented, not papered over):** images only
+  (≤10 MB, ≤100 MP); `stat()` size/contentType describe the served
+  `defaultVariant` (details API has no byte size — a delivery HEAD fills it
+  in); `read()` streams the variant rendition and emulates byte-range locally
+  when the CDN ignores `Range` (undocumented on `imagedelivery.net`);
+  `list`/`copy`/`move`/multipart stay `undefined`.
+- **Extensions:** `getVariantUrl(key, variant)` (named or flexible-variant
+  strings like `w=400,sharpen=3`) and `getSignedVariantUrl()`.
+- **Cloudflare R2 needs no new provider** — documented recipe (README table +
+  `docs/api/providers.mdx`): `S3Provider` with
+  `endpoint: https://<ACCOUNT_ID>.r2.cloudflarestorage.com` (jurisdiction
+  buckets via `<ACCOUNT_ID>.<jurisdiction>.r2.cloudflarestorage.com`),
+  `region: 'auto'`, `forcePathStyle: true`, no `acl` (R2 has none). Presigned
+  PUT/GET confirmed (1 s – 7 days, S3 domain only, not custom domains);
+  S3 multipart confirmed; public delivery via custom domain or rate-limited
+  `r2.dev` dev URL + `publicUrl`.
+- Unit tests: `tests/unit/cloudflare-images-provider.test.ts` — mocked global
+  fetch, exact-token assertion for the signed-URL scheme, error-envelope
+  mapping, expiry clamping, unsupported-op errors.
+
+### Docs
+
+- New guide: `docs/guides/upload-profiles.mdx` — three named config bundles
+  (**chat**: client-processed via `@classytic/media-transform` + presigned
+  PUT + confirm with client hints + `existsByHash` handshake, originals
+  discarded; **cms**: server sharp pipeline, `__original` kept, on-read
+  transforms; **document**: the general byte-exact data-bucket posture,
+  validation only) and the explicit **video policy** (media-kit stores +
+  byte-range serves video, never transcodes; `videoAdapter` is
+  thumbnails/metadata only — renditions belong to native clients or an
+  external service). Positions media-kit as a provider-agnostic blob/data
+  bucket with image processing as optional enrichment. Linked from README,
+  `docs/README.mdx`, and the skill.
+- New guide: `docs/guides/react-media-integration.mdx` — host-route recipe for
+  `@classytic/react-media` clients: the 4 multipart endpoint handlers
+  (initiate / sign-more-parts / complete / status) with arc-style Fastify
+  implementations and the exact field mapping (`uploadUrl` → `url`,
+  `expiresIn` seconds → `expiresAt` ISO), the single-PUT small-file
+  alternative, the live-HLS recipe (`createHlsSegmentProvider` ↔
+  `generateBatchPutUrls` for segments + driver-level signing for the
+  stable-key `init.mp4`/`manifest.json` + one `registerExternal` for the
+  finished asset), the three integration rules (tenant continuity
+  initiate↔complete, forwarding media-transform display hints through
+  `/complete`, presign-orphan / segment bucket lifecycle rule), and the
+  layered abandoned-session defense (`pagehide` `sendBeacon` → beacon-friendly
+  abort route → `purgeStalePending()` + lifecycle rules as the guarantee;
+  segment PUTs as the live-HLS heartbeat). Linked from README,
+  `docs/README.mdx`, and the skill.
+
 ## [3.4.0] — 2026-07-06
 
 The next release after 3.3.1. Two bodies of work land together: **private

@@ -11,6 +11,22 @@ export const focalPointSchema = z.object({
   y: z.number().min(0).max(1),
 });
 
+/**
+ * Client-computed display hints (width/height/thumbhash/dominantColor) from
+ * client-side processing (e.g. @classytic/media-transform). All optional —
+ * see `ConfirmUploadInput` in types.ts for the trust contract.
+ * ThumbHash is ~25 bytes → ~36 base64 chars; 128 is a generous ceiling.
+ */
+const clientMetadataFields = {
+  width: z.number().int().positive().max(65535).optional(),
+  height: z.number().int().positive().max(65535).optional(),
+  thumbhash: z.string().max(128).optional(),
+  dominantColor: z
+    .string()
+    .regex(/^#[0-9a-fA-F]{6}$/)
+    .optional(),
+} as const;
+
 export const uploadInputSchema = z.object({
   filename: z.string().min(1),
   mimeType: z.string().min(1),
@@ -25,6 +41,7 @@ export const uploadInputSchema = z.object({
   provider: z.string().optional(),
   expiresAt: z.coerce.date().optional(),
   visibility: z.enum(['public', 'private']).optional(),
+  ...clientMetadataFields,
 });
 
 export const confirmUploadSchema = z.object({
@@ -40,6 +57,7 @@ export const confirmUploadSchema = z.object({
   etag: z.string().optional(),
   process: z.boolean().optional(),
   visibility: z.enum(['public', 'private']).optional(),
+  ...clientMetadataFields,
 });
 
 export const initiateMultipartSchema = z.object({
@@ -66,6 +84,7 @@ export const completeMultipartSchema = z.object({
   alt: z.string().optional(),
   title: z.string().optional(),
   process: z.boolean().optional(),
+  ...clientMetadataFields,
 });
 
 export const batchPresignSchema = z.object({
@@ -80,6 +99,27 @@ export const batchPresignSchema = z.object({
     .min(1),
   folder: z.string().optional(),
   expiresIn: z.number().int().min(1).optional(),
+});
+
+/**
+ * Input schema for `registerExternal()` — registering an externally-hosted
+ * asset as a reference-only media record. `url` must be an absolute http(s)
+ * URL (the repository re-asserts protocol + optional origin allowlist with
+ * typed HttpErrors); the URL is never fetched.
+ */
+export const registerExternalSchema = z.object({
+  url: z.url({ protocol: /^https?$/ }).max(2048),
+  filename: z.string().min(1).max(512).optional(),
+  mimeType: z.string().min(1).max(255).optional(),
+  size: z.number().int().min(0).optional(),
+  folder: z.string().optional(),
+  visibility: z.enum(['public', 'private']).optional(),
+  tags: z.array(z.string()).optional(),
+  alt: z.string().optional(),
+  title: z.string().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+  sourceProvider: z.string().min(1).max(128).optional(),
+  ...clientMetadataFields,
 });
 
 export const importFromUrlSchema = z.object({

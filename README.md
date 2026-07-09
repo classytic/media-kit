@@ -21,6 +21,9 @@ Requires Node ≥22, Mongoose ≥9.4.1, Zod ≥4.0.0.
 | **Local** | `@classytic/media-kit/providers/local` | — | Filesystem (dev / self-hosted) |
 | **imgbb** | `@classytic/media-kit/providers/imgbb` | — | Free public image hosting; no extra dep |
 | **ImageKit** | `@classytic/media-kit/providers/imagekit` | — | Managed CDN; use with `processing: false` |
+| **Cloudinary** | `@classytic/media-kit/providers/cloudinary` | — | Transformation-first CDN; no SDK dep |
+| **Cloudflare Images** | `@classytic/media-kit/providers/cloudflare-images` | — | Managed image pipeline + variants; images only (≤10 MB); no SDK dep |
+| **Cloudflare R2** | `@classytic/media-kit/providers/s3` | `@aws-sdk/client-s3` | S3Provider with `endpoint` + `region: 'auto'` — see [providers doc](docs/api/providers.mdx) |
 | **Router** | `@classytic/media-kit/providers/router` | — | Route uploads across multiple drivers |
 
 ---
@@ -82,7 +85,7 @@ The package **owns its models** — you pass a `connection`, not a model. One `c
 |---|---|
 | `getById`, `getAll`, `getByQuery`, `count`, `exists`, `aggregate` | `upload`, `uploadMany`, `replace` |
 | `create`, `update`, `delete`, `restore` (via softDelete) | `hardDelete`, `hardDeleteMany`, `purgeDeleted`, `purgeStalePending` |
-| `getDeleted`, soft-delete TTL, keyset pagination | `move`, `importFromUrl`, `addTags`, `removeTags` |
+| `getDeleted`, soft-delete TTL, keyset pagination | `move`, `importFromUrl`, `registerExternal` (reference-only third-party URLs), `addTags`, `removeTags` |
 | Transactions, plugins, hooks, QueryParser | `setFocalPoint`, folder operations, presigned URLs |
 | | Bridge verbs: `resolveSource`, `getAssetUrl`, `applyTransforms` |
 
@@ -478,6 +481,29 @@ processing: {
   },
 }
 ```
+
+---
+
+## Upload profiles
+
+Media-kit is a provider-agnostic **blob/data-bucket layer** (video, documents, arbitrary binary
+data — storage primitives + Mongo metadata + content hashing + lifecycle + access control); image
+processing is an optional enrichment layer on top, not the package's identity. Three named config
+bundles instead of assembling flags — **chat** (WhatsApp-style: client compresses via
+`@classytic/media-transform`, presigned PUT, `confirmUpload` with client-computed
+width/height/thumbhash/dominantColor, `existsByHash()` pre-upload dedup handshake), **cms**
+(Payload-style: server sharp pipeline, `__original` kept, on-read transforms), and **document**
+(the general byte-exact data-bucket posture: validation only, bytes preserved exactly —
+content-addressed storage builds on this). Plus the explicit video policy: media-kit stores +
+byte-range serves any bytes, it never transcodes — renditions belong to native clients or an
+external service (Mux/CF Stream/ffmpeg worker); `videoAdapter` is thumbnails/metadata only.
+
+Full guide: [docs/guides/upload-profiles.mdx](./docs/guides/upload-profiles.mdx).
+
+Uploading from React? `@classytic/react-media`'s `createMediaKitProvider` (chunked multipart)
+and `createHlsSegmentProvider` (live HLS segments) pair with `initiateMultipartUpload` /
+`signUploadParts` / `completeMultipartUpload` / `generateBatchPutUrls` — the host-route recipe
+lives in [docs/guides/react-media-integration.mdx](./docs/guides/react-media-integration.mdx).
 
 ---
 

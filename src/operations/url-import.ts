@@ -53,7 +53,9 @@ export async function importFromUrl(
     // Determine MIME type (use detected or derive from filename)
     const finalMimeType = mimeType || getMimeType(filename);
 
-    // Build upload input — tags are passed here, upload() persists them via createMedia()
+    // Build upload input — tags are passed here, upload() persists them via
+    // createMedia(). `provider` routes the imported bytes (main file AND any
+    // processed variants) to the named driver; default provider when unset.
     const uploadInput: UploadInput = {
       buffer,
       filename,
@@ -62,6 +64,7 @@ export async function importFromUrl(
       alt: options?.alt,
       title: options?.title,
       tags: options?.tags,
+      provider: options?.provider,
     };
 
     // Run through standard upload flow

@@ -15,6 +15,7 @@ export const MEDIA_EVENTS = {
   ASSET_RESTORED: 'media:asset.restored',
   ASSET_MOVED: 'media:asset.moved',
   ASSET_IMPORTED: 'media:asset.imported',
+  ASSET_EXTERNAL_REGISTERED: 'media:asset.externalRegistered',
   ASSET_PURGED: 'media:asset.purged',
 
   // Tags

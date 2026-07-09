@@ -58,6 +58,11 @@ const EXPECTED_MAIN = [
   // URL signing (also standalone via ./signing)
   'createUrlSigner',
   'resolveVisibility',
+  // External (reference-only) media
+  'EXTERNAL_PROVIDER',
+  'EXTERNAL_KEY_PREFIX',
+  'isExternalMedia',
+  'buildExternalKey',
 ];
 
 for (const name of EXPECTED_MAIN) {
@@ -79,6 +84,14 @@ for (const key of ['ASSET_UPLOADED', 'ASSET_DELETED', 'ASSET_REPLACED', 'ASSET_M
   );
 }
 OK('MEDIA_EVENTS const — all entries follow media:resource.verb convention');
+
+// External media helpers — sentinel + discriminator sanity
+assert.equal(main.EXTERNAL_PROVIDER, 'external');
+assert.equal(main.isExternalMedia({ provider: 'external' }), true);
+assert.equal(main.isExternalMedia({ provider: 's3' }), false);
+assert.match(main.buildExternalKey('https://cdn.example.com/x.png'), /^__external__\/[0-9a-f]{16}$/);
+assert.ok(main.MEDIA_EVENTS.ASSET_EXTERNAL_REGISTERED, 'MEDIA_EVENTS.ASSET_EXTERNAL_REGISTERED missing');
+OK('external media — sentinel key + provider discriminator + event constant');
 
 // InProcessMediaBus should be instantiable
 const bus = new main.InProcessMediaBus();
@@ -123,6 +136,19 @@ OK('./providers/imagekit — ImageKitProvider exported');
 const cloudinary = await import('../../dist/providers/cloudinary.mjs').catch((err) => FAIL(`providers/cloudinary import failed: ${err.message}`));
 assert.ok(cloudinary.CloudinaryProvider, 'CloudinaryProvider missing');
 OK('./providers/cloudinary — CloudinaryProvider exported');
+
+const cfImages = await import('../../dist/providers/cloudflare-images.mjs').catch((err) => FAIL(`providers/cloudflare-images import failed: ${err.message}`));
+assert.ok(cfImages.CloudflareImagesProvider, 'CloudflareImagesProvider missing');
+{
+  const cf = new cfImages.CloudflareImagesProvider({
+    accountId: 'acc',
+    apiToken: 'token',
+    accountHash: 'hash',
+  });
+  assert.equal(cf.name, 'cloudflare-images');
+  assert.equal(cf.getPublicUrl('media/img.png'), 'https://imagedelivery.net/hash/media/img.png/public');
+}
+OK('./providers/cloudflare-images — CloudflareImagesProvider exported + delivery URL shape');
 
 // ── Subpath: transforms ────────────────────────────────────────
 const transforms = await import('../../dist/transforms.mjs').catch((err) => FAIL(`transforms import failed: ${err.message}`));
@@ -207,11 +233,15 @@ for (const rel of distStats) {
   const sz = statSync(url).size;
   totalMjsBytes += sz;
 }
+// Budget raised 200 → 220 KB in 3.4.0: the release legitimately grew the
+// core bundle (private serving + signing + external/reference records left
+// it at ~209 KB). Still a bloat tripwire — if this trips again, check for
+// stray fixtures/assets before raising it.
 assert.ok(
-  totalMjsBytes < 200_000,
-  `dist JS size ${totalMjsBytes} bytes exceeds 200KB budget`,
+  totalMjsBytes < 220_000,
+  `dist JS size ${totalMjsBytes} bytes exceeds 220KB budget`,
 );
-OK(`package.json — dist JS size ${(totalMjsBytes / 1024).toFixed(1)} KB (budget 200 KB)`);
+OK(`package.json — dist JS size ${(totalMjsBytes / 1024).toFixed(1)} KB (budget 220 KB)`);
 
 // Subpath exports all resolve (already verified above, but assert count)
 const subpathExports = Object.keys(pkg.exports).filter((k) => k !== '.' && k !== './package.json');

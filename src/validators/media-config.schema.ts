@@ -76,6 +76,15 @@ export const signingConfigSchema = z
     message: 'signing requires exactly one of `keys` or `secret`',
   });
 
+/**
+ * External (reference-only) media policy. `allowedOrigins` entries must be
+ * absolute URLs — they are origin-normalized at check time
+ * (`new URL(entry).origin`), so a path suffix is tolerated but pointless.
+ */
+export const externalConfigSchema = z.object({
+  allowedOrigins: z.array(z.url()).optional(),
+});
+
 export const schemaOptionsSchema = z
   .object({
     extraFields: z.record(z.string(), z.unknown()).optional(),
@@ -102,6 +111,7 @@ export const mediaConfigSchema = z.object({
   suppressWarnings: z.boolean().optional().default(false),
   visibility: visibilityConfigSchema.optional(),
   signing: signingConfigSchema.optional(),
+  external: externalConfigSchema.optional(),
 });
 
 export type MediaConfigValidated = z.infer<typeof mediaConfigSchema>;

@@ -24,5 +24,6 @@ export {
   completeMultipartSchema,
   batchPresignSchema,
   importFromUrlSchema,
+  registerExternalSchema,
   focalPointSchema,
 } from './upload-input.schema.js';

@@ -16,6 +16,63 @@ import type {
   RewriteResult,
 } from '../types';
 import { isAllowedMimeType } from '../utils/mime';
+import { isExternalMedia } from '../utils/external';
+
+/**
+ * Rebind an OperationDeps bag to a specific storage driver.
+ *
+ * Operation helpers that touch storage (`processImage`, variant cleanup)
+ * write through `deps.driver`. In multi-provider setups the caller resolves
+ * the target driver per upload/replace (`input.provider` → registry) — this
+ * helper produces a deps view whose `driver` IS that resolved driver, so
+ * variants land in the SAME provider as the main file instead of silently
+ * defaulting.
+ *
+ * `processor` is forwarded through a getter (not copied): the repository's
+ * own deps expose it lazily because `processorReady` may null it out after
+ * construction (sharp unavailable). Copying the value here would freeze a
+ * possibly-stale processor before that promise settles.
+ */
+export function withDriver(deps: OperationDeps, driver: StorageDriver): OperationDeps {
+  if (deps.driver === driver) return deps;
+  return {
+    config: deps.config,
+    driver,
+    registry: deps.registry,
+    repository: deps.repository,
+    get processor() {
+      return deps.processor;
+    },
+    processorReady: deps.processorReady,
+    events: deps.events,
+    uploadSemaphore: deps.uploadSemaphore,
+    logger: deps.logger,
+  };
+}
+
+/**
+ * Best-effort delete of storage keys through a SPECIFIC driver — the shared
+ * primitive behind every orphan-rollback path (processImage's internal
+ * cleanup, upload/replace rollback, presigned reprocess rollback).
+ *
+ * Delete errors never rethrow — they are reported to `onFailure` (when
+ * given) and otherwise swallowed. Deleting an already-deleted key is a
+ * driver-level no-op, so two cleanup layers (e.g. processImage's internal
+ * cleanup AND a caller's `onWrite`-fed rollback list) can safely overlap.
+ */
+export async function deleteKeysBestEffort(
+  driver: StorageDriver,
+  keys: readonly string[],
+  onFailure?: (key: string, error: Error) => void,
+): Promise<void> {
+  for (const key of keys) {
+    try {
+      await driver.delete(key);
+    } catch (err) {
+      onFailure?.(key, err as Error);
+    }
+  }
+}
 
 /**
  * Log helper that safely no-ops if logger is undefined.
@@ -182,6 +239,17 @@ export function assertGeneratedKeyShape(key: string): GeneratedKeyShape {
 }
 
 /**
+ * Derive aspect ratio from dimensions — the SAME convention processImage
+ * uses when it stores server-computed dimensions (`width / height`,
+ * unrounded; undefined unless both are positive). Used to derive
+ * `aspectRatio` from client-computed display hints so client-processed and
+ * server-processed records store the same shape.
+ */
+export function deriveAspectRatio(width?: number, height?: number): number | undefined {
+  return width && height ? width / height : undefined;
+}
+
+/**
  * Auto-generate a human-readable title from a filename.
  */
 export function generateTitle(filename: string): string {
@@ -261,6 +329,8 @@ export interface RewritableFile {
   key: string;
   folder: string;
   variants?: GeneratedVariant[];
+  /** Storage provider name — `'external'` marks reference-only records (no storage ops). */
+  provider?: string | undefined;
 }
 
 /**
@@ -273,6 +343,13 @@ interface RewritePlan {
   fileId: string;
   oldKey: string;
   newKey: string;
+  /**
+   * The driver that stored THIS file (`file.provider` → registry, default
+   * when absent). Files in one folder can span providers, so every copy /
+   * delete / rollback for this plan must go through this driver — a single
+   * deps-level driver would copy from (and delete in) the wrong backend.
+   */
+  driver: StorageDriver;
   /** Old variant keys we deleted-after — empty when no variants moved. */
   oldVariantKeys: string[];
   /** New keys we copied to (main + variants) — used for orphan rollback. */
@@ -288,6 +365,13 @@ interface RewritePlan {
  * Phase 2: Bulk update DB; capture per-file success/fail.
  * Phase 3a: Delete old keys ONLY for files whose DB update succeeded.
  * Phase 3b: Delete orphaned new copies for files whose DB update failed.
+ *
+ * **Per-file provider routing.** Files in a single folder can span storage
+ * providers (each doc stores its own `provider`), so the driver is resolved
+ * PER FILE (`registry.resolve(file.provider)`, default when absent) and
+ * every phase (copy, old-key delete, orphan rollback) goes through that
+ * file's own driver. External (reference-only) records never reach storage
+ * ops — their sentinel key takes the key-unchanged, DB-only branch.
  *
  * **Storage-DB consistency contract.** A document's `key` field always
  * points to an object that exists in storage. If the DB update fails, the
@@ -320,7 +404,13 @@ export async function executeKeyRewrite(
     files.map((file) =>
       deps.uploadSemaphore.run(async () => {
         const fileId = file._id.toString();
-        const { newKey, newFolder } = mapFile(file);
+        const mapped = mapFile(file);
+        const newFolder = mapped.newFolder;
+        // External (reference-only) records: the `__external__/…` sentinel
+        // key is NOT a storage location — it must never be rewritten into
+        // copy/delete ops. A folder move/rename is DB-only for them (the
+        // key-unchanged branch below).
+        const newKey = isExternalMedia(file) ? file.key : mapped.newKey;
 
         // Key unchanged — folder-only update, no storage work
         if (file.key === newKey) {
@@ -341,8 +431,14 @@ export async function executeKeyRewrite(
 
         const newKeysCopied: string[] = [];
         const oldVariantKeys: string[] = [];
+        // Resolve THIS file's driver (doc-stored provider, default when
+        // absent). Inside the try: an unregistered provider name records a
+        // per-file failure instead of failing the whole batch. External
+        // records never reach here (key-unchanged branch above).
+        let fileDriver: StorageDriver | undefined;
         try {
-          const writeResult = await copyStorageFile(deps.driver, file.key, newKey);
+          fileDriver = deps.registry.resolve(file.provider);
+          const writeResult = await copyStorageFile(fileDriver, file.key, newKey);
           newKeysCopied.push(writeResult.key);
 
           const newVariants: GeneratedVariant[] = [];
@@ -352,7 +448,7 @@ export async function executeKeyRewrite(
               newVariants.push(variant);
               continue;
             }
-            const varResult = await copyStorageFile(deps.driver, variant.key, newVarKey);
+            const varResult = await copyStorageFile(fileDriver, variant.key, newVarKey);
             newKeysCopied.push(varResult.key);
             oldVariantKeys.push(variant.key);
             newVariants.push({ ...variant, key: varResult.key, url: varResult.url });
@@ -362,6 +458,7 @@ export async function executeKeyRewrite(
             fileId,
             oldKey: file.key,
             newKey: writeResult.key,
+            driver: fileDriver,
             oldVariantKeys,
             newKeysCopied,
             updateData: {
@@ -388,11 +485,15 @@ export async function executeKeyRewrite(
           // Roll back any partial copies for THIS file before bailing out.
           // Without this, a variant-copy failure mid-way would leave the
           // first few new keys orphaned even though no DB update lands.
-          for (const orphan of newKeysCopied) {
-            try {
-              await deps.driver.delete(orphan);
-            } catch {
-              /* ignore */
+          // (fileDriver is always assigned when newKeysCopied is non-empty —
+          // resolve() runs before the first copy.)
+          if (fileDriver) {
+            for (const orphan of newKeysCopied) {
+              try {
+                await fileDriver.delete(orphan);
+              } catch {
+                /* ignore */
+              }
             }
           }
           void deps.events.emit(progressEvent, {
@@ -433,7 +534,7 @@ export async function executeKeyRewrite(
     for (const plan of plans) {
       for (const key of plan.newKeysCopied) {
         try {
-          await deps.driver.delete(key);
+          await plan.driver.delete(key);
         } catch {
           /* ignore rollback failure */
         }
@@ -450,7 +551,7 @@ export async function executeKeyRewrite(
     if (!succeededIds.has(plan.fileId)) continue;
     for (const oldKey of [plan.oldKey, ...plan.oldVariantKeys]) {
       try {
-        await deps.driver.delete(oldKey);
+        await plan.driver.delete(oldKey);
       } catch (err) {
         log(deps, 'warn', 'Failed to delete old file after key rewrite', {
           key: oldKey,
@@ -467,7 +568,7 @@ export async function executeKeyRewrite(
     if (succeededIds.has(plan.fileId)) continue;
     for (const newKey of plan.newKeysCopied) {
       try {
-        await deps.driver.delete(newKey);
+        await plan.driver.delete(newKey);
       } catch {
         /* ignore rollback failure */
       }

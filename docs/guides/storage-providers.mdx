@@ -308,6 +308,37 @@ const media = createMedia({
 });
 ```
 
+## Multi-Provider Routing
+
+With `providers` + `defaultProvider`, every media document stores the registry key of
+the driver that holds its bytes (`media.provider`), and operations route through it:
+
+- **`upload({ provider })` / `replace({ provider })`** — main file AND all processed
+  variants (`__original`, size variants, video `__thumbnail`) are written to the same
+  named provider. `replace()` without `provider` stays on the existing doc's provider.
+- **`importFromUrl(url, { provider })`** — imported bytes (and variants) land in the
+  named provider; default provider when unset.
+- **`hardDelete` / `move` / `renameFolder`** — resolve the driver per document, so a
+  folder whose files span providers copies/deletes each file in its own backend.
+- **Serving (`AssetTransformService`)** — when constructed with
+  `createAssetTransform({ media: engine })`, the engine's `resolveDriver` streams each
+  doc from its own provider. Hosts constructing the service manually can pass a
+  `resolveDriver` in the service config; without one, all reads use `media.driver`
+  (single-driver behavior).
+- **Transform cache** — `StorageTransformCache` lives on the driver it was constructed
+  with (typically the engine default), regardless of the source doc's provider. The
+  cache is engine-owned derived data; get/set always use the same driver, and cache
+  keys embed the file id, so entries from different providers never collide.
+
+**Presigned flows are the exception — they always target the DEFAULT provider.**
+`getSignedUploadUrl`, `generateBatchPutUrls`, and the multipart/resumable suite have no
+per-call `provider` option by design: the URL minted at presign time and the object
+verified at confirm time must come from the same driver. `confirmUpload()` /
+`completeMultipartUpload()` stamp `provider: <defaultProvider>` on the created doc so
+later routing stays correct even if you change `defaultProvider`. To land
+client-completed uploads in a different backend, run a separate engine whose default is
+that provider.
+
 ## Next Steps
 
 - [Events](./events.mdx) - Hook into storage operations

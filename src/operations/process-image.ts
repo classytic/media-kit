@@ -14,7 +14,7 @@ import type {
   QualityMap,
 } from '../types';
 import { isImage, isRawImage, isVideo, updateFilenameExtension } from '../utils/mime';
-import { getContentType, getAspectRatio, generateKey, log } from './helpers';
+import { getContentType, getAspectRatio, generateKey, deleteKeysBestEffort, log } from './helpers';
 import { generateThumbHash } from '../processing/thumbhash';
 
 export interface ProcessImageParams {
@@ -31,6 +31,20 @@ export interface ProcessImageParams {
   format?: 'webp' | 'jpeg' | 'png' | 'avif' | 'original';
   maxWidth?: number;
   maxHeight?: number;
+  /**
+   * Called synchronously after EVERY successful storage write (`__original`,
+   * size variants, video thumbnails) with the written key, in write order.
+   *
+   * processImage owns cleanup of its own writes when IT fails internally —
+   * the collector exists for the caller's post-return window: keys written
+   * here become orphans if the CALLER fails after processImage returns but
+   * before its DB write lands, so callers feed a rollback list from this.
+   *
+   * A key reported here may already have been deleted by processImage's
+   * internal-failure cleanup by the time the caller rolls back — rollback
+   * deletes must stay best-effort (double-delete is a driver-level no-op).
+   */
+  onWrite?: ((key: string) => void) | undefined;
 }
 
 export interface ProcessImageResult {
@@ -73,11 +87,86 @@ function resolveOriginalHandling(config?: ProcessingConfig): OriginalHandling {
 }
 
 /**
+ * Tracks every storage key successfully written by ONE processImage call,
+ * in write order. processImage owns cleanup of these on ANY internal
+ * failure — whether the failure rethrows or swallows-and-falls-back-to-
+ * original — so a mid-pipeline crash can never strand variant objects in
+ * storage that neither the returned variants list nor the caller knows about.
+ */
+interface WriteTracker {
+  readonly keys: string[];
+  record(key: string): void;
+}
+
+/**
+ * Best-effort delete of every key the tracker has seen, through the SAME
+ * driver the writes went to (`deps.driver` — per-provider bound by the
+ * caller via `withDriver` / `_opDepsWith`). Also drops the cleaned keys
+ * from `variants` (when given) so a swallow-fallback result never
+ * references a deleted object. Resets the tracker so overlapping cleanup
+ * layers (inner swallow catch + outer rethrow net) don't double-run.
+ */
+async function cleanupTrackedWrites(
+  deps: OperationDeps,
+  tracker: WriteTracker,
+  variants: GeneratedVariant[] | undefined,
+  filename: string,
+  reason: string,
+): Promise<void> {
+  if (tracker.keys.length === 0) return;
+  const keys = tracker.keys.splice(0, tracker.keys.length);
+  if (variants) {
+    for (let i = variants.length - 1; i >= 0; i--) {
+      const variant = variants[i];
+      if (variant && keys.includes(variant.key)) variants.splice(i, 1);
+    }
+  }
+  await deleteKeysBestEffort(deps.driver, keys, (key, error) => {
+    log(deps, 'warn', 'Failed to delete orphaned variant after processing failure', {
+      filename,
+      key,
+      reason,
+      error: error.message,
+    });
+  });
+}
+
+/**
  * Process an image buffer and generate size variants.
  * Returns the (possibly transformed) buffer, dimensions, and uploaded variants.
- * On processing failure, returns the original buffer unchanged.
+ * On processing failure, returns the original buffer unchanged — and deletes
+ * any variant objects (`__original`, size variants, video thumbnails) it had
+ * already written, so a partial failure never strands storage orphans nor
+ * returns variants pointing at deleted keys. Callers that need to roll back
+ * the post-return window pass {@link ProcessImageParams.onWrite}.
  */
 export async function processImage(deps: OperationDeps, params: ProcessImageParams): Promise<ProcessImageResult> {
+  const writtenKeys: string[] = [];
+  const tracker: WriteTracker = {
+    keys: writtenKeys,
+    record: (key: string): void => {
+      writtenKeys.push(key);
+      params.onWrite?.(key);
+    },
+  };
+  try {
+    return await runProcessImage(deps, params, tracker);
+  } catch (err) {
+    // Rethrow-path safety net. The pipeline's internal failures swallow and
+    // fall back (cleaning up as they go), so nothing in the CURRENT body
+    // rethrows after a write — but any future rethrow path must not strand
+    // written keys the caller never learns about (it only sees the return
+    // value, which a throw destroys).
+    await cleanupTrackedWrites(deps, tracker, undefined, params.filename, (err as Error).message);
+    throw err;
+  }
+}
+
+async function runProcessImage(
+  deps: OperationDeps,
+  params: ProcessImageParams,
+  tracker: WriteTracker,
+): Promise<ProcessImageResult> {
   let { buffer, filename, mimeType } = params;
   const { skipProcessing, contentType, focalPoint, targetFolder, context } = params;
 
@@ -131,6 +220,10 @@ export async function processImage(deps: OperationDeps, params: ProcessImagePara
       autoOrient: deps.config.processing?.autoOrient,
     };
 
+    // Snapshot for the swallow-fallback below — finalFilename may already
+    // carry a RAW-conversion extension update at this point.
+    const preProcessFilename = finalFilename;
+
     try {
       // Get dimensions early (needed for smart skip check)
       try {
@@ -171,6 +264,7 @@ export async function processImage(deps: OperationDeps, params: ProcessImagePara
         const origFilename = updateFilenameExtension(`${filename.replace(/\.[^.]+$/, '')}__original`, mimeType);
         const origKey = generateKey(origFilename, targetFolder);
         const origWrite = await deps.driver.write(origKey, buffer, mimeType);
+        tracker.record(origWrite.key);
         variants.push({
           name: '__original',
           key: origWrite.key,
@@ -225,6 +319,7 @@ export async function processImage(deps: OperationDeps, params: ProcessImagePara
               variantResult.buffer,
               variantResult.mimeType,
             );
+            tracker.record(variantWriteResult.key);
 
             variants.push({
               name: variant.name,
@@ -248,6 +343,20 @@ export async function processImage(deps: OperationDeps, params: ProcessImagePara
         aspectRatio = width && height ? width / height : undefined;
       }
     } catch (err) {
+      // Swallow-fallback path (documented contract: "On processing failure,
+      // returns the original buffer unchanged"). Anything already written
+      // (`__original`, earlier size variants) would otherwise be stranded in
+      // storage as a silent orphan OR returned as a partial/inconsistent
+      // variant set — delete the written keys and reset every field the
+      // partial pipeline may have set, so the fallback really IS the
+      // original: dimensions are re-derived from `buffer` below.
+      await cleanupTrackedWrites(deps, tracker, variants, filename, (err as Error).message);
+      finalBuffer = buffer;
+      finalMimeType = mimeType;
+      finalFilename = preProcessFilename;
+      width = undefined;
+      height = undefined;
+      aspectRatio = undefined;
       log(deps, 'warn', 'Image processing failed, uploading original', {
         filename,
         error: (err as Error).message,
@@ -324,6 +433,7 @@ export async function processImage(deps: OperationDeps, params: ProcessImagePara
         const thumbFilename = `${filename.replace(/\.[^.]+$/, '')}__thumbnail.jpg`;
         const thumbKey = generateKey(thumbFilename, targetFolder);
         const writeResult = await deps.driver.write(thumbKey, thumbResult.value.buffer, thumbResult.value.mimeType);
+        tracker.record(writeResult.key);
         variants.push({
           name: '__thumbnail',
           key: writeResult.key,
@@ -349,6 +459,11 @@ export async function processImage(deps: OperationDeps, params: ProcessImagePara
         height = height ?? metaResult.value.height;
       }
     } catch (err) {
+      // Same swallow contract as the image block: a written thumbnail must
+      // not outlive a failure that keeps it out of the persisted result.
+      // (Video and image mime types are mutually exclusive, so the tracker
+      // holds only THIS block's writes here.)
+      await cleanupTrackedWrites(deps, tracker, variants, filename, (err as Error).message);
       log(deps, 'warn', 'Video processing failed', { filename, error: (err as Error).message });
     } finally {
       try {

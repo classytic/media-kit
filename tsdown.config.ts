@@ -9,6 +9,7 @@ export default defineConfig({
     'providers/imgbb': 'src/providers/imgbb.provider.ts',
     'providers/imagekit': 'src/providers/imagekit.provider.ts',
     'providers/cloudinary': 'src/providers/cloudinary.provider.ts',
+    'providers/cloudflare-images': 'src/providers/cloudflare-images.provider.ts',
     'providers/router': 'src/providers/router.ts',
     transforms: 'src/transforms/index.ts',
     schemas: 'src/validators/index.ts',

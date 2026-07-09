@@ -1,0 +1,179 @@
+# Upload Profiles
+
+Media-kit is a provider-agnostic **blob/data-bucket layer** — video, documents, arbitrary binary data — built on storage-provider primitives (write, byte-range read, delete, stat, list, copy, multipart/resumable, signed URLs) plus Mongo metadata, content hashing (dedup / `existsByHash` — content-addressed lookup), lifecycle sweeps, and access control. Image processing (sharp, variants, thumbhash) is an **optional enrichment layer** on top of that bucket, not the identity of the package.
+
+The flags compose into a handful of coherent postures. Instead of assembling `processing` / `originalHandling` / `deduplication` / presign flags one by one, pick the named profile that matches your product and copy its bundle. Three profiles cover almost every host — they differ only in **where (or whether) enrichment happens**:
+
+| | **chat** (WhatsApp-style) | **cms** (Payload-style) | **document** (byte-exact data bucket) |
+|---|---|---|---|
+| Who processes | Client (`@classytic/media-transform`) | Server (sharp) | Nobody |
+| Upload path | Presigned PUT → `confirmUpload` | Server `upload()` | Either |
+| Original bytes | Discarded (compressed copy IS the file) | Kept as `__original` variant | Preserved byte-exact |
+| Placeholder metadata | Client-computed, sent at confirm | Server-computed | None |
+| Dedup | Enabled + `existsByHash` handshake | Optional | Optional |
+| Visibility | `private` typical | `public` typical | `private` typical |
+
+## Profile: chat (WhatsApp-style)
+
+The client compresses the image in the browser **before** upload (`@classytic/media-transform`), PUTs the compressed bytes straight to storage via a presigned URL, and confirms with the metadata it computed locally. The server never runs sharp — there is nothing left to process.
+
+```ts
+const engine = await createMedia({
+  connection,
+  driver: new S3Provider({ bucket: 'chat-media', acl: 'private' }),
+  processing: { enabled: false },          // client already processed; nothing server-side
+  deduplication: { enabled: true },        // powers the existsByHash handshake below
+  visibility: { default: 'private' },      // chat media is not world-readable
+  signing: { secret: process.env.MEDIA_SIGNING_SECRET, servePath: '/media/content' },
+});
+```
+
+Notes on the bundle:
+
+- `processing: { enabled: false }` is the engine-wide switch. If the same engine also serves a `cms`-style surface, keep processing enabled and skip per-upload instead (`confirmUpload` simply doesn't pass `process: true`; buffer uploads pass `skipProcessing: true`).
+- The **original is discarded by design** — the client-compressed copy IS the stored file, which is exactly WhatsApp's model (`originalHandling: 'replace'` posture). Since server processing never runs, there is no `__original` variant to configure away.
+- `visibility: 'private'` + `signing` serves bytes through the HMAC proxy — see [Private Media](./private-media.mdx).
+
+### Flow
+
+```
+1. Client compresses + computes width/height/thumbhash/dominantColor/SHA-256
+2. Client → POST /api/media/exists { hash }          — dedup handshake
+   ├─ hit  → reuse existing media id, DONE (zero bytes uploaded)
+   └─ miss → continue
+3. Client → POST /api/media/presigned-url            — getSignedUploadUrl()
+4. Client → PUT compressed bytes to storage directly
+5. Client → POST /api/media/confirm                  — confirmUpload() WITH client metadata
+```
+
+### Confirm with client-computed metadata
+
+`ConfirmUploadInput` (and `CompleteMultipartInput` / `UploadInput`) accept optional `width`, `height`, `thumbhash` (base64), and `dominantColor` (`#rrggbb`) — display hints computed client-side. Without them, a skip-processing confirm stores a record with **no** dimensions or blur-up placeholder.
+
+```ts
+await engine.repositories.media.confirmUpload(
+  {
+    key, filename, mimeType, size,
+    // From @classytic/media-transform's compress() result:
+    width: 1280,
+    height: 960,
+    thumbhash: '3OcRJYB4d3h/iIeHeEh3eIhw+j2w', // base64
+    dominantColor: '#8a6f4b',
+  },
+  { organizationId },
+);
+```
+
+`aspectRatio` is derived server-side (`width / height`) when both dimensions are present. Trust model: these are display hints only — a lying client wrongs its own tenant's placeholder rendering, nothing else reads them. If you later pass `process: true` (or reprocess), server-computed values **overwrite** the client's.
+
+### The `existsByHash` dedup handshake
+
+WhatsApp's "forward is instant" trick: hash first, ask the server, skip the upload on a hit.
+
+```ts
+// Client — hash before uploading
+const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+
+// Host endpoint — MUST be authenticated
+app.post('/api/media/exists', requireAuth, async (req, res) => {
+  const { exists, media } = await engine.repositories.media.existsByHash(
+    req.body.hash,
+    { organizationId: req.user.orgId },
+  );
+  res.json(exists ? { exists, id: String(media!._id), url: media!.url } : { exists });
+});
+```
+
+On a hit the client reuses the existing media id and uploads nothing. Two hard rules:
+
+- **Per-tenant only.** `existsByHash` scopes through the normal tenant-routed read and never answers across tenants — a global answer would be an existence oracle ("has *anyone* uploaded this file?"). The same content under another tenant reports `exists: false` by design, and uploads once per tenant.
+- **Require auth on the endpoint.** Even tenant-scoped, it lets a caller probe their own tenant's library by hash — that's a feature for members, not for the public internet.
+
+For the handshake to ever hit, stored hashes must be real content hashes: confirm with `hashStrategy: 'sha256'`, or run dedup through server `upload()`. The default presign confirm (`hashStrategy: 'skip'`) stores a key-derived placeholder that will never match a client-side SHA-256.
+
+## Profile: cms (Payload-style)
+
+Originals go to the server, the server processes: format conversion, size variants, thumbhash, EXIF strip. The untouched original is kept as the `__original` variant so future re-processing starts from full quality. On-read transforms serve arbitrary sizes.
+
+```ts
+const engine = await createMedia({
+  connection,
+  driver: new S3Provider({ bucket: 'cms-media' }),
+  processing: {
+    enabled: true,
+    originalHandling: 'keep-variant',      // default posture: keep the pristine original
+    format: 'webp',
+    responsivePreset: 'nextjs',
+    thumbhash: true,
+    dominantColor: true,
+  },
+});
+
+await engine.repositories.media.upload({ buffer, filename, mimeType });
+```
+
+Client-computed metadata is irrelevant here — the server computes everything, and server values always win. Pair with [Asset Transforms](./asset-transforms.mdx) for on-the-fly variants and [Image Processing](./image-processing.mdx) for the full option set.
+
+## Profile: document (byte-exact data bucket)
+
+The general data-bucket posture — not just "send as file" in chat apps. PDFs, zips, exports, backups, arbitrary binary blobs: no enrichment anywhere, the stored bytes are byte-for-byte what was uploaded. Validation (MIME allowlist, max size) still applies, and every bucket primitive — content hashing, `existsByHash`, tenant scoping, lifecycle sweeps, signed URLs, byte-range reads — works the same as in the other profiles.
+
+This is the profile to start from when building content-addressed storage on media-kit's primitives (hash-addressed byte-exact blobs + `existsByHash` lookup + provider abstraction — the same shape a git-style object store uses, though media-kit itself implements storage, not git semantics).
+
+```ts
+const engine = await createMedia({
+  connection,
+  driver,
+  fileTypes: { allowed: ['application/pdf', 'application/zip', 'image/*'], maxSize: 100 * 1024 * 1024 },
+  visibility: { default: 'private' },
+});
+
+// Per-upload: skip processing even if the engine has it enabled
+await engine.repositories.media.upload({ buffer, filename, mimeType, skipProcessing: true });
+```
+
+`skipProcessing: true` (or engine-wide `processing: { enabled: false }`) guarantees the original is preserved byte-exact — no recompression, no metadata strip, no variants. Images sent this way keep their EXIF (deliberate: "as file" means untouched).
+
+## Registering externally-hosted media
+
+Some assets should be first-class media records without media-kit owning the bytes: a Cloudflare Images delivery URL, an asset already on your CDN, a partner's hosted image. `registerExternal()` registers the URL as a **reference-only** record — tenancy, visibility, folders, tags, listing, and events all work like any other record.
+
+```ts
+const media = await engine.repositories.media.registerExternal(
+  {
+    url: 'https://imagedelivery.net/<acct>/<image-id>/public',   // required, absolute http(s)
+    mimeType: 'image/png',
+    sourceProvider: 'cloudflare-images',   // freeform label, default 'external'
+    folder: 'landing/heroes',
+    width: 1280, height: 960,              // optional display hints (never verified)
+    thumbhash: '3OcRJYB4d3h/iIeHeEh3eIhw+j2w',
+  },
+  { organizationId },
+);
+
+media.provider;  // 'external'                       — the canonical discriminator
+media.key;       // '__external__/<sha256-hex-16>'   — sentinel, never a storage location
+media.url;       // the registered URL — use this directly on the frontend
+```
+
+The contract:
+
+- **The URL is never fetched.** This is a reference registry, not an importer — validation is shape-only (absolute `http(s)`; `javascript:`/`data:`/relative URLs → 400 `media.external.invalid_url`). To pull the bytes in and own them, use `importFromUrl()` (which carries the SSRF machinery).
+- **Optional origin allowlist.** Engine config `external: { allowedOrigins: ['https://imagedelivery.net'] }` rejects other origins with 403 `media.external.origin_not_allowed`.
+- **Storage-op verbs are external-aware.** `hardDelete()` and every purge sweep are DB-only (no driver calls); `move()`/`renameFolder()` update the `folder` field without touching the sentinel key; the serve pipeline 302-redirects raw requests to the stored URL (the private-media gate still runs first) and answers transform/variant requests with 400 `media.serve.external_no_bytes` — use `media.url` directly instead.
+- **No bytes, no byte verbs.** `getContextPayload()` throws 400 `media.context.external` (fetch `media.url` yourself — media-kit won't fetch arbitrary stored URLs server-side, that would be an SSRF surface); `replace()` / `applyTransforms()` throw 400 `media.external.no_bytes`.
+- **`hash` is the SHA-256 of the URL string**, so `existsByHash(sha256(url))` answers "is this URL already registered?" per tenant. Registering the same URL twice creates two records (both DB-only deletes — harmless, but dedupe host-side if you care). The 16-hex-char key suffix is a namespace marker only; collisions are irrelevant to storage.
+- Emits `media:asset.externalRegistered`. Input validation schema for hosts: `registerExternalSchema` (zod).
+
+## Video policy
+
+Explicitly, and by design: **media-kit stores and byte-range serves video; it does not transcode.** This is the same posture as the rest of the package — store + serve any bytes; enrichment is optional. There is no ffmpeg in the dependency tree and no rendition pipeline. Renditions (HLS ladders, resolution variants, web-safe re-encodes) are the job of either your users' native clients or an external service — Mux, Cloudflare Stream, or your own ffmpeg worker feeding results back in as uploads.
+
+The `videoAdapter` hook is **thumbnails and metadata only**: it extracts a poster frame (stored as the `__thumbnail` variant) and duration/codec/fps metadata. It is not a transcoding entry point. If you need WhatsApp-style client-side video compression, that — like images — belongs on the client before the presigned PUT.
+
+## See also
+
+- [Presigned Uploads](./presigned-uploads.mdx) — the full presign → PUT → confirm mechanics
+- [Private Media](./private-media.mdx) — signed URLs, revocation, `authorize`
+- [Image Processing](./image-processing.mdx) — everything the `cms` profile can do

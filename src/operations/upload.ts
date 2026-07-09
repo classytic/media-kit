@@ -21,7 +21,15 @@ import { generateAltText, generateAltTextWithOptions } from '../utils/alt-text';
 import { assertAndClaim } from '@classytic/primitives/state-machine';
 import { MEDIA_MACHINE } from '../models/media-state-machine.js';
 import { processImage } from './process-image';
-import { log, requireTenant, generateKey, generateTitle, validateFile } from './helpers';
+import {
+  deleteKeysBestEffort,
+  log,
+  requireTenant,
+  generateKey,
+  generateTitle,
+  validateFile,
+  withDriver,
+} from './helpers';
 
 /**
  * Upload a single file with status-driven flow.
@@ -91,6 +99,7 @@ export async function upload(
         format: input.format,
         maxWidth: input.maxWidth,
         maxHeight: input.maxHeight,
+        provider: input.provider,
       });
     });
 
@@ -145,6 +154,7 @@ async function performUpload(
     format?: 'webp' | 'jpeg' | 'png' | 'avif' | 'original';
     maxWidth?: number;
     maxHeight?: number;
+    provider?: string;
   },
 ): Promise<IMediaDocument> {
   const {
@@ -210,6 +220,14 @@ async function performUpload(
   // Generate initial storage key
   let key = generateKey(filename, targetFolder);
 
+  // Resolve which driver handles this upload — store the REGISTRY KEY (not
+  // the driver's own `name`), same contract as MediaRepository._performUpload:
+  // two drivers can share a generic `name` while living under distinct
+  // registry keys. Falls back to the default provider when unspecified.
+  const providerKey = params.provider ?? deps.registry.defaultName;
+  const driver = deps.registry.resolve(providerKey);
+  const boundDeps = withDriver(deps, driver);
+
   // Step 1: Create DB record with status: 'pending'
   let media = await deps.repository.createMedia(
     {
@@ -218,9 +236,10 @@ async function performUpload(
       title: finalTitle,
       mimeType,
       size: buffer.length,
-      url: deps.driver.getPublicUrl(key),
+      url: driver.getPublicUrl(key),
       key,
       hash,
+      provider: providerKey,
       status: 'pending',
       folder: targetFolder,
       alt,
@@ -238,6 +257,15 @@ async function performUpload(
 
   // Track variants outside try so we can clean up orphans on failure
   const variants: GeneratedVariant[] = [];
+
+  // Rollback bookkeeping (same contract as MediaRepository._performUpload):
+  // writtenKeys is fed by processImage's onWrite (superset of the returned
+  // variants — it also sees keys processImage cleaned internally; re-delete
+  // is a no-op); mainWriteKey is orphaned when a format change regenerated
+  // the key so the error-state doc never came to reference it.
+  const pendingDocKey = key;
+  const writtenKeys: string[] = [];
+  let mainWriteKey: string | undefined;
 
   try {
     // Step 2: pending → processing. State machine + atomic CAS via
@@ -257,8 +285,9 @@ async function performUpload(
     }
     media = processing;
 
-    // Process image + generate variants
-    const processed = await processImage(deps, {
+    // Process image + generate variants (variants written via the resolved
+    // provider's driver — same backend as the main file)
+    const processed = await processImage(boundDeps, {
       buffer,
       filename,
       mimeType,
@@ -271,6 +300,9 @@ async function performUpload(
       format,
       maxWidth,
       maxHeight,
+      onWrite: (writtenKey) => {
+        writtenKeys.push(writtenKey);
+      },
     });
     const { finalBuffer, finalMimeType, finalFilename, width, height, aspectRatio } = processed;
     variants.push(...processed.variants);
@@ -280,8 +312,9 @@ async function performUpload(
       key = generateKey(finalFilename, targetFolder);
     }
 
-    // Step 3: Upload to storage via driver.write()
-    const writeResult = await deps.driver.write(key, finalBuffer, finalMimeType);
+    // Step 3: Upload to storage via the resolved provider's driver
+    const writeResult = await driver.write(key, finalBuffer, finalMimeType);
+    mainWriteKey = writeResult.key;
 
     // Step 4: processing → ready. State transition + payload write
     // land in one atomic CAS via assertAndClaim — partial-failure
@@ -337,18 +370,27 @@ async function performUpload(
       });
     }
 
-    // Best-effort cleanup of orphaned variant files written before the failure
-    if (variants.length > 0) {
-      for (const variant of variants) {
-        try {
-          await deps.driver.delete(variant.key);
-        } catch {
-          // Ignore cleanup failures — variant is already orphaned
-        }
-      }
-      log(deps, 'warn', 'Cleaned up orphaned variant files after upload failure', {
+    // Best-effort cleanup of every orphaned storage write (same provider
+    // that processImage wrote them to). writtenKeys covers ALL variant
+    // writes — including keys processImage already cleaned internally
+    // (re-delete is a no-op); the main object is rolled back when the
+    // error-state doc never came to reference it (format change regenerated
+    // the key after the pending doc was created).
+    const orphanKeys = [...writtenKeys];
+    if (mainWriteKey !== undefined && mainWriteKey !== pendingDocKey) {
+      orphanKeys.push(mainWriteKey);
+    }
+    if (orphanKeys.length > 0) {
+      await deleteKeysBestEffort(driver, orphanKeys, (orphanKey, deleteErr) => {
+        log(deps, 'warn', 'Failed to delete orphaned storage key after upload failure', {
+          id: mediaId,
+          key: orphanKey,
+          error: deleteErr.message,
+        });
+      });
+      log(deps, 'warn', 'Cleaned up orphaned storage keys after upload failure', {
         id: mediaId,
-        variants: variants.map((v) => v.key),
+        keys: orphanKeys,
       });
     }
 

@@ -1,6 +1,19 @@
 /**
  * Presigned upload operations — generate signed URL, confirm upload,
  * multipart orchestration (S3/GCS), and batch presigned URLs.
+ *
+ * **Provider routing: presigned flows target the DEFAULT provider by
+ * design.** The presign URL, existence/stat checks at confirm time, and the
+ * assembled multipart object all live in `deps.driver` (the registry's
+ * default driver) — there is deliberately no per-call `provider` option:
+ * the URL minted at presign time and the object verified at confirm time
+ * MUST come from the same driver, and splitting them across two calls with
+ * independent provider params would reintroduce the mismatch this package
+ * guards against. Confirm/complete stamp `provider: registry.defaultName`
+ * on the created doc so later per-doc routing (delete, read, transforms,
+ * move) stays correct even if the engine's default provider changes.
+ * To land client-completed uploads in a non-default provider, run a
+ * dedicated engine whose default IS that provider.
  */
 
 import type { OperationDeps } from './types';
@@ -31,6 +44,8 @@ import {
   generateTitle,
   assertGeneratedKeyShape,
   tenantKeySegment,
+  deleteKeysBestEffort,
+  deriveAspectRatio,
 } from './helpers';
 import { processImage } from './process-image';
 import { resolveVisibility } from '../utils/visibility';
@@ -117,6 +132,9 @@ function assertTenantBinding(tenantSegment: string | undefined, organizationId: 
  * Generate a presigned upload URL for direct browser → cloud uploads.
  * After the client PUTs the file, call confirmUpload() to register it in the DB.
  * Tenant-scoped calls mint tenant-bound keys — see generateScopedKey().
+ *
+ * Always signs against the DEFAULT provider — see the module JSDoc for why
+ * presigned flows have no per-call `provider` option.
  */
 export async function getSignedUploadUrl(
   deps: OperationDeps,
@@ -297,6 +315,13 @@ export async function confirmUpload(
     // Generate title
     const title = input.title || generateTitle(input.filename);
 
+    // Client-computed display hints (width/height/thumbhash/dominantColor)
+    // — the client-processed flow (e.g. @classytic/media-transform) skips
+    // server processing, so these are the only source of placeholder
+    // metadata. If `process: true` runs below, server-computed values
+    // overwrite them in the processing → ready patch.
+    const clientAspectRatio = deriveAspectRatio(input.width, input.height);
+
     let media = await deps.repository.createMedia(
       {
         filename: input.filename,
@@ -307,6 +332,10 @@ export async function confirmUpload(
         url,
         key: input.key,
         hash,
+        // Presigned flows always land in the default provider (see module
+        // JSDoc). Stamp its registry key so per-doc routing survives a
+        // later defaultProvider change.
+        provider: deps.registry.defaultName,
         status: 'ready',
         folder,
         alt: input.alt,
@@ -318,6 +347,11 @@ export async function confirmUpload(
         metadata: {},
         ...(organizationId && { organizationId }),
         ...(input.expiresAt && { expiresAt: input.expiresAt }),
+        ...(input.width !== undefined && { width: input.width }),
+        ...(input.height !== undefined && { height: input.height }),
+        ...(clientAspectRatio !== undefined && { aspectRatio: clientAspectRatio }),
+        ...(input.thumbhash !== undefined && { thumbhash: input.thumbhash }),
+        ...(input.dominantColor !== undefined && { dominantColor: input.dominantColor }),
       },
       context,
     );
@@ -325,6 +359,13 @@ export async function confirmUpload(
     // Optional post-confirm processing (ThumbHash, dominant color, variants)
     if (input.process && deps.processor && isImage(effectiveMimeType)) {
       const mediaIdStr = media._id.toString();
+      // Rollback list for the reprocess window, fed by processImage's onWrite.
+      // processImage cleans up its OWN internal failures; this list covers
+      // variant keys that landed in storage but were never persisted to the
+      // doc because the finalising CAS below threw or lost its race — nothing
+      // references those keys, so they must not outlive this block.
+      // (Re-deleting a key processImage already cleaned is a no-op.)
+      const reprocessKeys: string[] = [];
       try {
         // ready → processing — declared transition in MEDIA_MACHINE
         // for the post-confirm reprocess flow. assertAndClaim
@@ -361,6 +402,9 @@ export async function confirmUpload(
             skipProcessing: false,
             targetFolder: folder,
             context,
+            onWrite: (key) => {
+              reprocessKeys.push(key);
+            },
           });
 
           // processing → ready with payload merge in the same CAS.
@@ -382,7 +426,19 @@ export async function confirmUpload(
             patch: payload,
             options: context as Record<string, unknown>,
           });
-          if (finalised) media = finalised;
+          if (finalised) {
+            media = finalised;
+          } else {
+            // Race lost — another worker moved the record out of
+            // 'processing', so the variants we just wrote were never
+            // persisted to the doc. Delete them or they orphan silently.
+            await deleteKeysBestEffort(deps.driver, reprocessKeys, (orphanKey, deleteErr) => {
+              log(deps, 'warn', 'Failed to delete orphaned reprocess variant', {
+                key: orphanKey,
+                error: deleteErr.message,
+              });
+            });
+          }
         }
       } catch (processError) {
         // Processing failure is non-blocking — file is already uploaded and accessible.
@@ -399,6 +455,14 @@ export async function confirmUpload(
         } catch {
           /* ignore revert failure */
         }
+        // Variants written before the failure were never persisted to the
+        // doc (the finalising CAS is the only thing that references them).
+        await deleteKeysBestEffort(deps.driver, reprocessKeys, (orphanKey, deleteErr) => {
+          log(deps, 'warn', 'Failed to delete orphaned reprocess variant', {
+            key: orphanKey,
+            error: deleteErr.message,
+          });
+        });
         log(deps, 'warn', 'Post-confirm processing failed (file still available)', {
           key: input.key,
           error: (processError as Error).message,
@@ -597,6 +661,10 @@ export async function completeMultipartUpload(
     const url = deps.driver.getPublicUrl(input.key);
     const title = input.title || generateTitle(input.filename);
 
+    // Client-computed display hints — same contract as confirmUpload():
+    // server-computed values overwrite these when `process: true` runs.
+    const clientAspectRatio = deriveAspectRatio(input.width, input.height);
+
     // Create DB record
     let media = await deps.repository.createMedia(
       {
@@ -608,6 +676,10 @@ export async function completeMultipartUpload(
         url,
         key: input.key,
         hash,
+        // Presigned/multipart flows always land in the default provider (see
+        // module JSDoc). Stamp its registry key so per-doc routing survives
+        // a later defaultProvider change.
+        provider: deps.registry.defaultName,
         status: 'ready',
         folder,
         alt: input.alt,
@@ -618,6 +690,11 @@ export async function completeMultipartUpload(
         tags: [],
         metadata: {},
         ...(organizationId && { organizationId }),
+        ...(input.width !== undefined && { width: input.width }),
+        ...(input.height !== undefined && { height: input.height }),
+        ...(clientAspectRatio !== undefined && { aspectRatio: clientAspectRatio }),
+        ...(input.thumbhash !== undefined && { thumbhash: input.thumbhash }),
+        ...(input.dominantColor !== undefined && { dominantColor: input.dominantColor }),
       },
       context,
     );
@@ -625,6 +702,10 @@ export async function completeMultipartUpload(
     // Optional post-upload processing (same as confirmUpload process flag)
     if (input.process && deps.processor && isImage(input.mimeType)) {
       const mediaIdStr = media._id.toString();
+      // Same reprocess rollback contract as confirmUpload — see the comment
+      // there. Keys written by processImage but never persisted by the
+      // finalising CAS must not outlive this block.
+      const reprocessKeys: string[] = [];
       try {
         // ready → processing — same MEDIA_MACHINE transition used by
         // confirmUpload's reprocess flow.
@@ -655,6 +736,9 @@ export async function completeMultipartUpload(
             skipProcessing: false,
             targetFolder: folder,
             context,
+            onWrite: (key) => {
+              reprocessKeys.push(key);
+            },
           });
 
           const payload: Record<string, unknown> = {
@@ -675,7 +759,17 @@ export async function completeMultipartUpload(
             patch: payload,
             options: context as Record<string, unknown>,
           });
-          if (finalised) media = finalised;
+          if (finalised) {
+            media = finalised;
+          } else {
+            // Race lost — the variants we wrote were never persisted.
+            await deleteKeysBestEffort(deps.driver, reprocessKeys, (orphanKey, deleteErr) => {
+              log(deps, 'warn', 'Failed to delete orphaned reprocess variant', {
+                key: orphanKey,
+                error: deleteErr.message,
+              });
+            });
+          }
         }
       } catch (processError) {
         // Best-effort revert if we left the record stuck in 'processing'.
@@ -689,6 +783,13 @@ export async function completeMultipartUpload(
         } catch {
           /* ignore */
         }
+        // Variants written before the failure were never persisted to the doc.
+        await deleteKeysBestEffort(deps.driver, reprocessKeys, (orphanKey, deleteErr) => {
+          log(deps, 'warn', 'Failed to delete orphaned reprocess variant', {
+            key: orphanKey,
+            error: deleteErr.message,
+          });
+        });
         log(deps, 'warn', 'Post-multipart processing failed (file still available)', {
           key: input.key,
           error: (processError as Error).message,

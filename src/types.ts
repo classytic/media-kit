@@ -302,6 +302,23 @@ export interface CompleteMultipartInput {
   title?: string;
   /** Run post-upload processing (ThumbHash, variants, etc.) */
   process?: boolean;
+
+  // --- Client-computed display hints (see ConfirmUploadInput for the full contract) ---
+
+  /**
+   * Client-computed image width in pixels — a DISPLAY HINT from client-side
+   * processing (e.g. `@classytic/media-transform`). Accepted because the
+   * server skips processing in the client-processed flow; when
+   * `process: true` runs, server-computed values OVERWRITE these. Worst case
+   * a lying client wrongs its own tenant's placeholder rendering.
+   */
+  width?: number | undefined;
+  /** Client-computed image height in pixels. Same contract as `width`. */
+  height?: number | undefined;
+  /** Client-computed ThumbHash placeholder (base64). Same contract as `width`. */
+  thumbhash?: string | undefined;
+  /** Client-computed dominant color hex (e.g. '#aabbcc'). Same contract as `width`. */
+  dominantColor?: string | undefined;
 }
 
 /** Input for batch presigned URL generation */
@@ -935,6 +952,70 @@ export interface ImportOptions {
 }
 
 /**
+ * Policy for EXTERNAL (reference-only) media records — see
+ * `MediaRepository.registerExternal()`.
+ */
+export interface ExternalMediaConfig {
+  /**
+   * Origin allowlist for registered external URLs. When set (non-empty),
+   * `registerExternal()` rejects any URL whose origin isn't listed with a
+   * 403 (`code: 'media.external.origin_not_allowed'`). Entries are
+   * normalized via `new URL(entry).origin`, so `'https://cdn.example.com'`
+   * and `'https://cdn.example.com/'` are equivalent. Unset/empty = any
+   * http(s) origin.
+   */
+  allowedOrigins?: string[] | undefined;
+}
+
+/**
+ * Input for `MediaRepository.registerExternal()` — register media hosted on
+ * a third party (Cloudflare Images, an existing CDN asset, a partner's
+ * hosted image) as a first-class media record WITHOUT media-kit owning the
+ * bytes. The URL is never fetched — this is a reference registry, not an
+ * importer (use `importFromUrl()` to re-host).
+ */
+export interface RegisterExternalInput {
+  /** Absolute http(s) URL of the externally-hosted asset. REQUIRED. */
+  url: string;
+  /** Display filename. Default: last path segment of the URL, or `external-<hash>`. */
+  filename?: string | undefined;
+  /** MIME type, if known. Default: 'application/octet-stream'. */
+  mimeType?: string | undefined;
+  /** Size in bytes, if known. Default: 0 (unknown — never verified). */
+  size?: number | undefined;
+  /** Target folder (same normalization/visibility rules as uploads). */
+  folder?: string | undefined;
+  /** Access visibility — same precedence as uploads (explicit > byFolder > default). */
+  visibility?: MediaVisibility | undefined;
+  /** Searchable tags. */
+  tags?: string[] | undefined;
+  /** Alt text. */
+  alt?: string | undefined;
+  /** Display title (defaults to humanized filename). */
+  title?: string | undefined;
+  /** Custom metadata bag (stored as-is on `metadata`). */
+  metadata?: Record<string, unknown> | undefined;
+  /**
+   * Freeform label of where the asset actually lives (e.g.
+   * 'cloudflare-images'). Default 'external'. Stored on
+   * `providerMetadata.sourceProvider` — the record's `provider` field is
+   * ALWAYS the `'external'` sentinel.
+   */
+  sourceProvider?: string | undefined;
+
+  // --- Client-computed display hints (same trust contract as ConfirmUploadInput) ---
+
+  /** Known image width in pixels — display hint, never verified. */
+  width?: number | undefined;
+  /** Known image height in pixels. See `width`. */
+  height?: number | undefined;
+  /** ThumbHash placeholder (base64). See `width`. */
+  thumbhash?: string | undefined;
+  /** Dominant color hex (e.g. '#aabbcc'). See `width`. */
+  dominantColor?: string | undefined;
+}
+
+/**
  * Default-visibility policy for new uploads.
  *
  * Precedence at upload time (first match wins):
@@ -1025,6 +1106,8 @@ export interface MediaKitConfig {
   visibility?: VisibilityConfig;
   /** HMAC URL-signing config — enables `getSignedAssetUrl()` + signed private serving. */
   signing?: MediaSigningConfig;
+  /** External (reference-only) media policy — see `registerExternal()`. */
+  external?: ExternalMediaConfig | undefined;
 }
 
 /**
@@ -1102,6 +1185,23 @@ export interface UploadInput {
    * `visibility.byFolder` / `visibility.default` policy. Default: 'public'.
    */
   visibility?: MediaVisibility;
+
+  // --- Client-computed display hints (see ConfirmUploadInput for the full contract) ---
+
+  /**
+   * Client-computed image width in pixels — a DISPLAY HINT from client-side
+   * processing (e.g. `@classytic/media-transform`). Honored ONLY when server
+   * processing is skipped/disabled; when `processImage` runs, its computed
+   * values overwrite these. Worst case a lying client wrongs its own
+   * tenant's placeholder rendering.
+   */
+  width?: number | undefined;
+  /** Client-computed image height in pixels. Same contract as `width`. */
+  height?: number | undefined;
+  /** Client-computed ThumbHash placeholder (base64). Same contract as `width`. */
+  thumbhash?: string | undefined;
+  /** Client-computed dominant color hex (e.g. '#aabbcc'). Same contract as `width`. */
+  dominantColor?: string | undefined;
 }
 
 /**
@@ -1143,6 +1243,29 @@ export interface ConfirmUploadInput {
    * private objects use a private bucket (recommended for private serving).
    */
   visibility?: MediaVisibility;
+
+  // --- Client-computed display hints ---
+
+  /**
+   * Client-computed image width in pixels.
+   *
+   * These four fields are DISPLAY HINTS computed by client-side processing
+   * (e.g. `@classytic/media-transform`, which compresses in the browser
+   * before the presigned PUT). They are accepted because the server SKIPS
+   * processing in that flow — without them the record would have no
+   * dimensions/placeholder at all. Trust model: worst case a lying client
+   * wrongs its own tenant's placeholder rendering; nothing security-relevant
+   * reads them. When `process: true` runs, server-computed values OVERWRITE
+   * these. `aspectRatio` is derived server-side when both `width` and
+   * `height` are present.
+   */
+  width?: number | undefined;
+  /** Client-computed image height in pixels. See `width` for the contract. */
+  height?: number | undefined;
+  /** Client-computed ThumbHash placeholder (base64, ~36 chars). See `width` for the contract. */
+  thumbhash?: string | undefined;
+  /** Client-computed dominant color hex (e.g. '#aabbcc'). See `width` for the contract. */
+  dominantColor?: string | undefined;
 }
 
 /**

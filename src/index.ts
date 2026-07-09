@@ -91,6 +91,7 @@ export type {
   AssetRestoredPayload,
   AssetMovedPayload,
   AssetImportedPayload,
+  AssetExternalRegisteredPayload,
   AssetPurgedPayload,
   AssetTaggedPayload,
   AssetUntaggedPayload,
@@ -143,6 +144,9 @@ export type {
 } from './signing/index.js';
 export { resolveVisibility } from './utils/visibility.js';
 
+// ── External (reference-only) media ─────────────────────────
+export { EXTERNAL_PROVIDER, EXTERNAL_KEY_PREFIX, isExternalMedia, buildExternalKey } from './utils/external.js';
+
 // ── Types — Storage Driver ───────────────────────────────────
 export type {
   StorageDriver,
@@ -194,12 +198,14 @@ export type {
   VisibilityConfig,
   MediaSigningConfig,
   ServeAuthorize,
+  ExternalMediaConfig,
 } from './types.js';
 
 // ── Types — Operations ──────────────────────────────────────
 export type {
   UploadInput,
   ConfirmUploadInput,
+  RegisterExternalInput,
   ImportOptions,
   BulkResult,
   RewriteResult,

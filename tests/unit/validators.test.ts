@@ -8,6 +8,7 @@ import {
   uploadInputSchema,
   confirmUploadSchema,
   initiateMultipartSchema,
+  completeMultipartSchema,
   importFromUrlSchema,
 } from '../../src/validators/index.js';
 
@@ -26,9 +27,7 @@ describe('Zod schemas', () => {
     });
 
     it('rejects invalid fieldType on tenant config', () => {
-      expect(() =>
-        mediaConfigSchema.parse({ tenant: { fieldType: 'wrong' } as any }),
-      ).toThrow();
+      expect(() => mediaConfigSchema.parse({ tenant: { fieldType: 'wrong' } as any })).toThrow();
     });
 
     it('accepts tenant as a boolean shorthand', () => {
@@ -70,9 +69,7 @@ describe('Zod schemas', () => {
     });
 
     it('rejects negative ttlDays', () => {
-      expect(() =>
-        mediaConfigSchema.parse({ softDelete: { enabled: true, ttlDays: -1 } }),
-      ).toThrow();
+      expect(() => mediaConfigSchema.parse({ softDelete: { enabled: true, ttlDays: -1 } })).toThrow();
     });
   });
 
@@ -86,9 +83,7 @@ describe('Zod schemas', () => {
     });
 
     it('rejects empty filename', () => {
-      expect(() =>
-        uploadInputSchema.parse({ filename: '', mimeType: 'image/jpeg' }),
-      ).toThrow();
+      expect(() => uploadInputSchema.parse({ filename: '', mimeType: 'image/jpeg' })).toThrow();
     });
 
     it('validates focalPoint range 0-1', () => {
@@ -152,6 +147,71 @@ describe('Zod schemas', () => {
           hashStrategy: 'md5',
         }),
       ).toThrow();
+    });
+  });
+
+  describe('client-computed metadata (width/height/thumbhash/dominantColor)', () => {
+    const base = { key: 'x', filename: 'x', mimeType: 'image/jpeg', size: 100 };
+
+    it('accepts valid client metadata on confirmUploadSchema', () => {
+      const parsed = confirmUploadSchema.parse({
+        ...base,
+        width: 1280,
+        height: 960,
+        thumbhash: '3OcRJYB4d3h/iIeHeEh3eIhw+j2w',
+        dominantColor: '#AaBbCc',
+      });
+      expect(parsed.width).toBe(1280);
+      expect(parsed.dominantColor).toBe('#AaBbCc');
+    });
+
+    it('all four fields are optional', () => {
+      const parsed = confirmUploadSchema.parse(base);
+      expect(parsed.width).toBeUndefined();
+      expect(parsed.thumbhash).toBeUndefined();
+    });
+
+    it('rejects non-hex dominantColor values', () => {
+      for (const dominantColor of ['red', '#12345', '#12345g', 'aabbcc', '#aabbccdd']) {
+        expect(() => confirmUploadSchema.parse({ ...base, dominantColor })).toThrow();
+      }
+    });
+
+    it('rejects an oversize thumbhash (>128 chars)', () => {
+      expect(() => confirmUploadSchema.parse({ ...base, thumbhash: 'a'.repeat(129) })).toThrow();
+      expect(confirmUploadSchema.parse({ ...base, thumbhash: 'a'.repeat(128) }).thumbhash).toHaveLength(128);
+    });
+
+    it('rejects non-positive, non-integer, and oversized dimensions', () => {
+      for (const width of [0, -1, 1.5, 65536]) {
+        expect(() => confirmUploadSchema.parse({ ...base, width })).toThrow();
+      }
+      for (const height of [0, -100, 70000]) {
+        expect(() => confirmUploadSchema.parse({ ...base, height })).toThrow();
+      }
+    });
+
+    it('completeMultipartSchema accepts and validates the same fields', () => {
+      const multipartBase = {
+        key: 'x',
+        uploadId: 'u1',
+        parts: [{ partNumber: 1, etag: 'e1' }],
+        filename: 'x',
+        mimeType: 'image/jpeg',
+        size: 100,
+      };
+      const parsed = completeMultipartSchema.parse({ ...multipartBase, width: 640, height: 480 });
+      expect(parsed.width).toBe(640);
+      expect(() => completeMultipartSchema.parse({ ...multipartBase, dominantColor: 'red' })).toThrow();
+      expect(() => completeMultipartSchema.parse({ ...multipartBase, width: -1 })).toThrow();
+    });
+
+    it('uploadInputSchema accepts and validates the same fields', () => {
+      const uploadBase = { filename: 'x.jpg', mimeType: 'image/jpeg' };
+      const parsed = uploadInputSchema.parse({ ...uploadBase, width: 640, height: 480, dominantColor: '#001122' });
+      expect(parsed.height).toBe(480);
+      expect(() => uploadInputSchema.parse({ ...uploadBase, dominantColor: '#12345' })).toThrow();
+      expect(() => uploadInputSchema.parse({ ...uploadBase, thumbhash: 'a'.repeat(129) })).toThrow();
     });
   });
 
