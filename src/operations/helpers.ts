@@ -138,7 +138,10 @@ export function getAspectRatio(deps: ConfigOnlyDeps, contentType: string): Aspec
  *  trims, drops leading/trailing slashes, collapses repeats. Empty → ''. */
 export function normalizeKeyPrefix(keyPrefix?: string): string {
   if (!keyPrefix) return '';
-  return keyPrefix.trim().replace(/^\/+|\/+$/g, '').replace(/\/{2,}/g, '/');
+  return keyPrefix
+    .trim()
+    .replace(/^\/+|\/+$/g, '')
+    .replace(/\/{2,}/g, '/');
 }
 
 /**
