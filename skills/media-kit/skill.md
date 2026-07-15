@@ -12,7 +12,7 @@ description: |
   private media, signed url, authenticated media, serve private image, revoke access,
   media for llm, base64 for vision, getContextPayload, visibility public private,
   external media, registerExternal, register cdn url, cloudflare images reference.
-version: 3.5.0
+version: 3.7.0
 license: MIT
 metadata:
   author: Classytic

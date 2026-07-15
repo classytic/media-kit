@@ -1,0 +1,98 @@
+# TUS Resumable Uploads
+
+`@classytic/media-kit/resumable` (3.8+) ships a framework-agnostic server for
+the [tus.io](https://tus.io/) resumable upload protocol v1.0.0 — the same
+protocol Supabase Storage exposes. Standard clients work unchanged:
+**tus-js-client**, **Uppy** (with progress bars and pause/resume UI),
+`tus-py-client`. A flaky mobile upload resumes from the last confirmed byte
+instead of restarting from zero.
+
+**When to use which upload path:**
+
+| Path | Best for |
+|---|---|
+| Direct `upload()` | Server-side files, small user uploads |
+| [Presigned PUT](./presigned-uploads.mdx) | Browser uploads ≤ ~50 MB on stable networks (fewest moving parts) |
+| [Multipart](./presigned-uploads.mdx) | Huge files direct-to-S3/GCS |
+| **TUS** | Unstable networks, mobile, pause/resume UX, standard-client interop |
+
+Chunks stage to a local directory; when the final byte lands, the assembled
+file runs through the **normal `upload()` pipeline** — validation, scan
+bridge, hashing/dedup, image processing, events. A TUS upload produces exactly
+the same media document as any other path.
+
+## Server
+
+```ts
+import { createTusUpload } from '@classytic/media-kit/resumable';
+
+const tus = createTusUpload({
+  media: engine.repositories.media,
+  stagingDir: '/var/lib/myapp/tus-staging',  // ABSOLUTE path, persistent volume
+  basePath: '/uploads/tus',                  // must match your route
+  maxSize: 200 * 1024 * 1024,                // default 500 MiB
+  onComplete: (media) => console.log('uploaded', media._id),
+});
+```
+
+Wire the two routes (Fastify shown; the service takes plain request objects,
+so Express/Hono/raw Node work the same way):
+
+```ts
+// TUS PATCH bodies are application/offset+octet-stream — tell Fastify to
+// leave the raw stream alone:
+fastify.addContentTypeParser(
+  'application/offset+octet-stream',
+  (_req, _payload, done) => done(null),
+);
+
+async function handle(req, reply) {
+  const res = await tus.handle(
+    {
+      method: req.method,
+      uploadId: (req.params as { id?: string }).id ?? null,
+      headers: req.headers,
+      body: req.raw,                          // the raw Node stream
+    },
+    {
+      // Host owns auth — resolve tenant/user BEFORE calling handle():
+      ctx: { organizationId: req.orgId, userId: req.userId },
+      folder: 'uploads',
+    },
+  );
+  reply.status(res.status).headers(res.headers).send();
+}
+
+fastify.all('/uploads/tus', handle);
+fastify.all('/uploads/tus/:id', handle);
+```
+
+## Client (Uppy)
+
+```ts
+import Uppy from '@uppy/core';
+import Tus from '@uppy/tus';
+
+new Uppy().use(Tus, {
+  endpoint: 'https://api.example.com/uploads/tus',
+  chunkSize: 6 * 1024 * 1024,
+  headers: { authorization: `Bearer ${token}` },
+});
+```
+
+Uppy sends `filename`/`filetype` in `Upload-Metadata` — the service decodes
+them into the pipeline's `filename`/`mimeType`.
+
+## Operational notes
+
+- **Sessions** live in a pluggable `TusSessionStore` (in-memory default). An
+  app restart forgets in-flight sessions — clients restart the upload; the
+  protocol handles it. Bring a Redis/DB store for restart-safe resumption.
+- **Sweep abandoned sessions** (staged bytes on disk) on a cron:
+  `await tus.sweepExpired()` — sessions default to a 24 h TTL.
+- **Memory:** finalization buffers the assembled file (the pipeline hashes and
+  processes buffers). Size `maxSize` accordingly; for multi-GB direct-to-bucket
+  uploads use [multipart](./presigned-uploads.mdx) instead.
+- **Concurrency:** one PATCH at a time per upload (second writer gets
+  `423 Locked`); offset mismatches return `409` with the authoritative
+  `Upload-Offset`, which standard clients use to resume correctly.

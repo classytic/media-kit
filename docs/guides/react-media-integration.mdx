@@ -265,7 +265,11 @@ app.post('/api/media/multipart/complete', async (req) => {
 ```typescript
 app.post('/api/media/multipart/abort', async (req) => {
   const { key, uploadId } = req.body as { key: string; uploadId: string };
-  await media.abortMultipartUpload(key, uploadId);
+  // Passing the ctx (media-kit >=3.7) opts into the SAME guard as confirm —
+  // key-shape check + both-ways tenant binding — so a leaked key+uploadId
+  // can't kill another tenant's in-flight upload. Ctx-less calls keep the
+  // trusted server-side behavior (no guard).
+  await media.abortMultipartUpload(key, uploadId, ctxOf(req));
   pending.delete(uploadId);
   return { success: true };
 });

@@ -816,8 +816,26 @@ export async function completeMultipartUpload(
 
 /**
  * Abort a multipart upload and clean up parts in storage.
+ *
+ * When a `context` is provided (wire-facing callers — e.g. an arc-media
+ * abort route), the key runs the SAME guard as confirm: generated-shape
+ * check + both-ways tenant binding (403 `media.confirm.tenant_mismatch`),
+ * so an authenticated caller can only abort sessions minted for their own
+ * scope — knowing another tenant's key+uploadId is not enough to kill their
+ * in-flight upload. Trusted server-side cleanup can omit `context`
+ * (pre-3.7 behavior, no guard).
  */
-export async function abortMultipartUpload(deps: OperationDeps, key: string, uploadId: string): Promise<void> {
+export async function abortMultipartUpload(
+  deps: OperationDeps,
+  key: string,
+  uploadId: string,
+  context?: OperationContext,
+): Promise<void> {
+  if (context !== undefined) {
+    const organizationId = requireTenant(deps, context);
+    const keyShape = assertGeneratedKeyShape(key);
+    assertTenantBinding(keyShape.tenantSegment, organizationId);
+  }
   if (!deps.driver.abortMultipartUpload) {
     throw new Error(`Driver '${deps.driver.name}' does not support multipart abort`);
   }

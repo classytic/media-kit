@@ -1,0 +1,220 @@
+# Self-Hosting on a VPS — Durable Media That Survives Redeploys
+
+The #1 way self-hosted deployments lose media: `LocalProvider` pointed at a
+**relative path inside the app directory**. A redeploy that re-fetches git (or
+rebuilds a container image) replaces that directory — and every upload with it.
+
+```ts
+// ⛔ THE TRAP — './uploads' resolves against process.cwd(),
+// which is your app checkout. Redeploy = data gone.
+const driver = new LocalProvider({ basePath: './uploads', baseUrl: '/uploads' });
+```
+
+This guide covers the three durable setups, from zero-cost to production-grade,
+plus backup and the migration path between them. Metadata is never the problem —
+it lives in MongoDB. The **bytes** are what you must place outside the deploy path.
+
+---
+
+## Option 1 — Local disk, outside the deploy path (5 minutes, zero cost)
+
+Point `basePath` at an **absolute path** that deploys never touch:
+
+```ts
+import { LocalProvider } from '@classytic/media-kit/providers/local';
+
+const driver = new LocalProvider({
+  basePath: '/var/lib/myapp/media',   // absolute; survives git pulls + rebuilds
+  baseUrl: 'https://api.example.com/uploads',
+});
+```
+
+```bash
+sudo mkdir -p /var/lib/myapp/media
+sudo chown -R appuser:appuser /var/lib/myapp/media
+```
+
+**Docker:** the same rule expressed as a volume — the container filesystem is
+disposable, the volume is not:
+
+```yaml
+services:
+  app:
+    image: myapp:latest
+    volumes:
+      - media-data:/var/lib/myapp/media   # named volume survives image rebuilds
+volumes:
+  media-data:
+```
+
+**If you have data in the trap right now, rescue it before the next deploy:**
+
+```bash
+rsync -a /path/to/app/uploads/ /var/lib/myapp/media/
+```
+
+Limits: single-disk durability (no replication), no presigned direct-to-storage
+uploads (every byte proxies through your app). Fine for small communities;
+outgrow it with Option 2 or 3.
+
+---
+
+## Option 2 — MinIO on the same VPS (S3-compatible, still your hardware)
+
+[MinIO](https://min.io/) gives you the full S3 API on your own disk — the same
+setup Supabase self-hosted uses for its storage backend. media-kit's existing
+`S3Provider` works against it unchanged, which unlocks **presigned uploads**
+(clients PUT directly to storage; your app never proxies file bytes),
+**multipart**, and standard S3 tooling for backup.
+
+```yaml
+# docker-compose.yml
+services:
+  app:
+    image: myapp:latest
+    environment:
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: media
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data                  # ← the durability line
+    ports:
+      - '9000:9000'                       # S3 API (expose via reverse proxy for presigned uploads)
+      - '127.0.0.1:9001:9001'             # admin console (keep local)
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  minio-data:
+```
+
+Create the bucket once (MinIO console at `:9001`, or `mc mb local/media`), then:
+
+```ts
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+
+const driver = new S3Provider({
+  bucket: process.env.S3_BUCKET!,
+  region: 'us-east-1',                    // MinIO accepts any region string
+  endpoint: process.env.S3_ENDPOINT,      // http://minio:9000 inside compose
+  publicUrl: 'https://media.example.com/media',  // your reverse-proxied public base
+  forcePathStyle: true,                   // REQUIRED for MinIO
+  credentials: {
+    accessKeyId: process.env.S3_ACCESS_KEY!,
+    secretAccessKey: process.env.S3_SECRET_KEY!,
+  },
+});
+```
+
+**Presigned uploads from browsers** need the S3 port reachable from outside.
+Put nginx/Caddy in front (`media.example.com → minio:9000`) and set MinIO's
+`MINIO_SERVER_URL` accordingly so presigned URLs carry the public host.
+
+**Backup** is now standard S3 tooling — e.g. nightly to any offsite target:
+
+```bash
+rclone sync minio:media b2:myapp-media-backup --transfers 8
+```
+
+---
+
+## Option 3 — Cloudflare R2 (recommended when leaving the VPS is OK)
+
+Zero egress fees, S3-compatible (same `S3Provider`), durability independent of
+your VPS, and a custom domain puts Cloudflare's CDN in front automatically.
+Free tier: 10 GB. See the dedicated [R2 setup guide](./r2-setup.mdx).
+
+```ts
+const driver = new S3Provider({
+  bucket: 'media',
+  region: 'auto',
+  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  publicUrl: 'https://media.example.com',   // R2 custom domain (CDN-cached)
+  forcePathStyle: true,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+  },
+});
+```
+
+---
+
+## CDN in front (works with all three options)
+
+Proxy your media domain through Cloudflare (orange-cloud the DNS record) and
+media-kit's serve headers do the rest — public assets ship
+`Cache-Control: public, immutable, max-age=31536000`, so the edge caches them on
+first hit. Two optional upgrades:
+
+- **`CdnBridge`** rewrites asset URLs to a dedicated CDN domain without touching
+  stored documents — see [CDN integration](./cdn-integration.mdx).
+- **`CdnBridge.purge`** (3.8+) — implement it to evict deleted/replaced objects
+  from the edge immediately instead of waiting out the cache TTL:
+
+```ts
+const cdn: CdnBridge = {
+  transform: (key) => `https://media.example.com/${key}`,
+  async purge(keys) {
+    await fetch(`https://api.cloudflare.com/client/v4/zones/${ZONE}/purge_cache`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${CF_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files: keys.map((k) => `https://media.example.com/${k}`) }),
+    });
+  },
+};
+```
+
+---
+
+## Migrating existing local files without breaking URLs
+
+Route **new** uploads to the new backend and keep serving old keys from disk,
+then copy at leisure — no big-bang cutover:
+
+```ts
+import { StorageRouter } from '@classytic/media-kit/providers/router';
+
+const driver = new StorageRouter({
+  default: r2Driver,                       // new uploads land here
+  routes: [],                              // no prefix routing needed
+  // old docs carry provider: 'local' — the registry resolves reads per-doc
+});
+
+// Engine with both providers registered:
+const engine = await createMedia({
+  connection,
+  providers: { r2: r2Driver, local: localDriver },
+  defaultProvider: 'r2',
+});
+```
+
+Existing documents store `provider: 'local'`, so reads/deletes keep routing to
+disk; new uploads stamp `provider: 'r2'`. To finish the migration, run a
+one-time copy job (stream each `provider: 'local'` doc's key to R2, update the
+doc's `provider`/`url`), or simply let old assets age out.
+
+---
+
+## Checklist
+
+- [ ] `basePath` absolute + outside the deploy path (or bytes in MinIO/R2)
+- [ ] Docker: named volume for media/MinIO data
+- [ ] Presigned uploads: S3 endpoint publicly reachable (MinIO) or R2 CORS set
+- [ ] CDN: media domain proxied through Cloudflare, or `CdnBridge` wired
+- [ ] Backup: `rclone sync` cron to an offsite bucket
+- [ ] Cleanup crons: `purgeDeleted()` / `purgeExpired()` / `purgeStalePending()` scheduled

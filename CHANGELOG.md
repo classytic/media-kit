@@ -3,6 +3,110 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.0] — 2026-07-15
+
+### Note — validated on latest kits; sharp 0.35 compatibility
+
+- Suite validated green (770 tests) against mongokit 3.22.2 / repo-core
+  0.13.0 / primitives 0.11.0 (dev-only — PEER FLOORS DELIBERATELY
+  UNCHANGED: media-kit uses no post-3.14 mongokit API, and per fleet
+  convention peers stay open `>=` ranges at the true minimum).
+- The presigned lifecycle's `assertAndClaim` null-branches (skip
+  redundant reprocess / delete orphaned variants on finalize race /
+  best-effort revert) are LOAD-BEARING compensation logic — deliberately
+  NOT migrated to `applyTransition` (which throws); this is canonical
+  null-contract claim usage.
+- **Fixed for sharp `0.35.x` (latest)**: the apparent transform failure
+  (`vipspng: libpng read error`) was NOT a sharp regression — the test
+  suite's hand-crafted 1×1 PNG fixture carried a malformed zlib stream
+  that older libpng silently tolerated and 0.35's libpng correctly
+  rejects. Fixture regenerated with sharp itself; full suite green on
+  sharp 0.35.3. devDeps track `sharp@latest`; peer stays `>=0.34.5`.
+
+### Added — TUS resumable uploads (`@classytic/media-kit/resumable`)
+
+Framework-agnostic server for the tus.io resumable upload protocol v1.0.0
+(the protocol Supabase Storage speaks) — standard clients (Uppy,
+tus-js-client, tus-py-client) work unchanged, and a flaky mobile upload
+resumes from the last confirmed byte. Chunks stage to a host-provided
+`stagingDir`; the assembled file runs through the NORMAL `upload()` pipeline
+(validation, scan bridge, dedup, processing, events), so a TUS upload produces
+exactly the same media doc as a direct upload. Pluggable `TusSessionStore`
+(in-memory default), `sweepExpired()` for cron cleanup, 24 h session TTL,
+`423` concurrent-PATCH lock, `409` offset recovery from staged-file ground
+truth. New subpath export + guide: `docs/guides/tus-resumable-uploads.mdx`.
+Pinned by `tests/unit/tus-resumable.test.ts`.
+
+### Added — imgproxy URL builder (`createImgproxyUrlBuilder`, `/transforms`)
+
+Offload on-the-fly transforms to an imgproxy container instead of running
+Sharp in the app process (the Supabase architecture: imgproxy does pixels, the
+CDN caches them). Zero-dep signed URL generation (HMAC-SHA256 over
+salt+path, hex key/salt — same env values as imgproxy), base64url sources,
+`insecure` mode for keyless instances, and `asCdnBridge(defaults)` so every
+`getAssetUrl()` routes through it (signed-URL requests pass through untouched
+— private assets must reach media-kit's serve gate). Complements client-side
+upload compression (`@classytic/media-transform`): that optimizes bytes ON
+UPLOAD, this serves display sizes ON READ. Pinned by
+`tests/unit/imgproxy.test.ts`.
+
+### Added — `CdnBridge.purge?(keys, ctx)` — edge eviction on destructive ops
+
+Optional bridge method called best-effort after `hardDelete()` and after
+`replace()` (with the REPLACED keys) — the two moments a CDN keeps serving
+bytes the origin no longer has. Absent method = prior behavior (stale copies
+age out via cache TTL). A purge failure never fails the triggering operation.
+
+### Fixed — transformed responses were missing `Content-Type` in `headers`
+
+`AssetTransformService`'s transform path (fresh AND cache-hit) returned the
+mime type only as the top-level `contentType` field — but hosts iterate
+`result.headers` verbatim (the class's own documented integration does
+exactly that), so every transformed image shipped typeless. Both returns now
+carry `'Content-Type'` in `headers`, matching the raw-serve and range paths.
+Found by live smoke against the built dist; pinned in
+`tests/integration/multi-provider-integrity.test.ts`.
+
+### Docs — `VideoAdapter.extractMetadata` duration unit
+
+The `duration` field is in SECONDS (ffprobe's `format.duration`); media-kit
+converts to milliseconds before storing. The type now says so — an adapter
+returning milliseconds silently inflated `media.duration` 1000×.
+
+### Changed — `media.repository.ts` split into `repositories/verbs/` modules
+
+The 2k-line repository class is now a thin facade over per-group verb modules
+(upload / delete / import / annotate / folder / url / lookup) — no public API
+change, every signature and behavior identical.
+
+### Docs — self-hosting survival guide
+
+`docs/guides/vps-self-hosting.mdx`: the local-provider redeploy data-loss trap
+(cwd-relative `basePath` inside the deploy path), absolute-path + Docker-volume
+fixes, MinIO docker-compose (S3-compatible on your own VPS), rclone backup,
+Cloudflare CDN wiring, and no-URL-breakage migration via provider registry.
+Plus `docs/guides/r2-setup.mdx` (Cloudflare R2: zero-egress S3-compatible +
+custom-domain CDN, CORS for presigned uploads, multipart lifecycle rule).
+
+### Added — ctx-aware `abortMultipartUpload` (tenant-guarded abort for wire-facing routes)
+
+`MediaRepository.abortMultipartUpload(key, uploadId, ctx?)` (and the
+operations-level function) now accept an optional context. When a `ctx` is
+provided — the wire-facing posture, e.g. `@classytic/arc-media`'s abort
+route — the key runs the SAME guard as confirm: generated-key shape check
+(400 on hand-crafted keys) + both-ways tenant binding (403
+`media.confirm.tenant_mismatch`), so an authenticated caller can only abort
+multipart sessions minted for their own scope — knowing another tenant's
+leaked `key`+`uploadId` is not enough to kill their in-flight upload.
+Ctx-less calls keep the pre-3.7 trusted server-side behavior (no guard) —
+fully backward compatible. Regression suite:
+`tests/integration/presigned-security.test.ts`
+(`abortMultipartUpload — tenant binding`).
+
+This unblocks the react-media ↔ arc-media abort chain
+(react-media `designs/arc-media-convergence.md` §4): arc-media can now expose
+`POST /media/abort-multipart` safely.
+
 ## [3.6.0] — 2026-07-09
 
 ### Added — deployment `keyPrefix` for shared-bucket multi-tenancy

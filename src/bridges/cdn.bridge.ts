@@ -47,4 +47,16 @@ export interface CdnBridge {
    * Return the original `defaultUrl` to opt out (pass through).
    */
   transform(key: string, defaultUrl: string, ctx?: CdnContext): string | Promise<string>;
+
+  /**
+   * OPTIONAL — evict cached copies of the given storage keys from the CDN
+   * edge. Called best-effort (fire-and-forget, failures logged) after
+   * `hardDelete()` and after `replace()` (with the REPLACED keys) — the two
+   * moments a CDN can keep serving bytes the origin no longer has. The host
+   * maps keys back to its CDN URLs (it authored `transform()`, so it knows
+   * the mapping) and calls its CDN's purge API (Cloudflare
+   * `purge_cache`, CloudFront `CreateInvalidation`, ...). Absent method =
+   * pre-3.8 behavior: stale copies age out via cache TTL.
+   */
+  purge?(keys: string[], ctx?: CdnContext): void | Promise<void>;
 }

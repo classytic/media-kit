@@ -12,6 +12,7 @@ export default defineConfig({
     'providers/cloudflare-images': 'src/providers/cloudflare-images.provider.ts',
     'providers/router': 'src/providers/router.ts',
     transforms: 'src/transforms/index.ts',
+    resumable: 'src/resumable/index.ts',
     schemas: 'src/validators/index.ts',
     signing: 'src/signing/index.ts',
   },

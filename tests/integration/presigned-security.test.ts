@@ -287,6 +287,62 @@ describe('presigned upload security', () => {
     });
   });
 
+  describe('abortMultipartUpload — tenant binding (ctx-aware, 3.7)', () => {
+    let handle: TestEngineHandle;
+
+    beforeEach(async () => {
+      handle = await createTestEngine({
+        tenant: { enabled: true, fieldType: 'string', tenantField: 'organizationId', required: true },
+      });
+    });
+
+    afterEach(async () => {
+      await handle.cleanup();
+    });
+
+    it("tenant A cannot abort tenant B's in-flight session (same matrix as confirm)", async () => {
+      const repo = handle.engine.repositories.media;
+
+      const session = await repo.initiateMultipartUpload(
+        { filename: 'big.webm', contentType: 'video/webm' },
+        { organizationId: ORG_B },
+      );
+      expect(session.key).toContain(`/__t-${ORG_B}/`);
+
+      // A holds the leaked key+uploadId — rejected before any driver call
+      await expect(
+        repo.abortMultipartUpload(session.key, session.uploadId as string, { organizationId: ORG_A }),
+      ).rejects.toMatchObject({ status: 403, code: 'media.confirm.tenant_mismatch' });
+
+      // The session is still alive — B can complete or abort it
+      await repo.abortMultipartUpload(session.key, session.uploadId as string, {
+        organizationId: ORG_B,
+      });
+    });
+
+    it('a hand-crafted key is rejected at the shape check when a ctx is provided', async () => {
+      const repo = handle.engine.repositories.media;
+
+      await expect(
+        repo.abortMultipartUpload('../../etc/passwd', 'upload-1', { organizationId: ORG_A }),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it('ctx-less abort keeps the trusted server-side behavior (no guard)', async () => {
+      const repo = handle.engine.repositories.media;
+
+      const session = await repo.initiateMultipartUpload(
+        { filename: 'big.webm', contentType: 'video/webm' },
+        { organizationId: ORG_B },
+      );
+
+      // No ctx → pre-3.7 semantics: no tenant matrix, abort goes through
+      await expect(
+        repo.abortMultipartUpload(session.key, session.uploadId as string),
+      ).resolves.toBeUndefined();
+    });
+  });
+
   describe('presign-time upload policy', () => {
     let handle: TestEngineHandle;
 

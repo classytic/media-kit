@@ -463,7 +463,13 @@ export interface VideoAdapter {
     width: number;
     height: number;
   } | null>;
-  /** Extract video metadata (duration, codec, resolution). */
+  /**
+   * Extract video metadata (duration, codec, resolution).
+   *
+   * `duration` is in SECONDS (what ffprobe's `format.duration` reports) —
+   * media-kit converts to milliseconds before storing on `media.duration`.
+   * Returning milliseconds here inflates the stored value 1000×.
+   */
   extractMetadata(filePath: string): Promise<{
     duration: number;
     width: number;

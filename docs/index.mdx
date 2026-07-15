@@ -18,7 +18,15 @@ A powerful library for managing file uploads in Node.js with Mongoose. Think Wor
 - **Multi-tenant Ready** - Organize by organization/tenant
 - **Awaitable Events** - Hook into upload, delete, replace, and more
 - **Presigned Uploads** - Direct browser-to-cloud uploads
+- **Resumable Uploads (TUS)** - tus.io protocol server; Uppy/tus-js-client work out of the box
 - **TypeScript First** - Full type safety
+
+## Deploying self-hosted?
+
+Read [VPS Self-Hosting](./guides/vps-self-hosting.mdx) FIRST — it covers the
+one mistake that loses data (local uploads inside the deploy path), MinIO via
+docker-compose, [Cloudflare R2](./guides/r2-setup.mdx) with zero egress + CDN,
+and migrating existing files without breaking URLs.
 
 ## Quick Example
 

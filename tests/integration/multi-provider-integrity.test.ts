@@ -511,6 +511,10 @@ describe('AssetTransformService — per-doc provider routing', () => {
     const req = { fileId: String(media._id), params: { w: '1', format: 'jpeg' } };
     const first = await service.handle(req);
     expect(first.status).toBe(200);
+    // Content-Type must be IN headers — hosts iterate `result.headers`
+    // verbatim (the documented integration), so the top-level contentType
+    // field alone ships a typeless response.
+    expect(first.headers['Content-Type']).toBe('image/jpeg');
     // Source bytes came from the doc's own provider
     expect(secondaryRead).toHaveBeenCalledTimes(1);
     expect(secondaryRead).toHaveBeenCalledWith(media.key);
@@ -529,6 +533,7 @@ describe('AssetTransformService — per-doc provider routing', () => {
     // the source provider is not read again.
     const second = await service.handle(req);
     expect(second.status).toBe(200);
+    expect(second.headers['Content-Type']).toBe('image/jpeg'); // cache-hit path too
     expect(secondaryRead).toHaveBeenCalledTimes(1);
 
     await engine.dispose();

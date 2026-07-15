@@ -1,0 +1,99 @@
+# Cloudflare R2 Setup
+
+R2 is the best-fit object storage for most self-hosted media-kit deployments:
+S3-compatible (media-kit's existing `S3Provider` — no new driver), **zero
+egress fees** (the cost that bites image-heavy apps on S3), and a custom domain
+puts Cloudflare's CDN in front of every object automatically. Free tier:
+10 GB storage, 1M class-A + 10M class-B operations per month.
+
+## Prerequisites
+
+- A Cloudflare account (R2 requires a card on file, but the free tier is real)
+- `@aws-sdk/client-s3` + `@aws-sdk/s3-request-presigner` installed (S3Provider peers)
+
+---
+
+## 1. Create the bucket
+
+Dashboard → **R2 Object Storage** → **Create bucket** → name it (e.g. `media`).
+Location hint: pick the region closest to your users; R2 replicates within it.
+
+## 2. Create an API token
+
+**R2 → Manage R2 API Tokens → Create API Token**:
+
+- Permissions: **Object Read & Write**
+- Scope: limit to your bucket
+- Copy the **Access Key ID** and **Secret Access Key** (shown once)
+
+Your S3 endpoint is `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` — the
+account id is on the R2 overview page.
+
+## 3. Configure the provider
+
+```ts
+import { S3Provider } from '@classytic/media-kit/providers/s3';
+
+const driver = new S3Provider({
+  bucket: 'media',
+  region: 'auto',                                   // R2 uses 'auto'
+  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  forcePathStyle: true,
+  publicUrl: 'https://media.example.com',           // custom domain (step 4)
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+  },
+});
+```
+
+Everything in the S3 feature set works: presigned PUT/GET, multipart uploads,
+copy/move, byte-range reads. One difference: R2 has **no per-object ACLs** —
+public access is per-bucket via the custom domain; keep private assets private
+with media-kit's HMAC [signed URLs](./private-media.mdx) (which also outlive
+S3-style 7-day presign caps and support instant revocation).
+
+## 4. Custom domain = CDN
+
+Bucket → **Settings → Public access → Custom Domains → Connect domain**
+(e.g. `media.example.com`, must be on your Cloudflare zone).
+
+That's the whole CDN story: the domain is proxied through Cloudflare's edge,
+and media-kit's public assets already ship
+`Cache-Control: public, immutable, max-age=31536000`, so objects cache on first
+hit worldwide. No `CdnBridge` needed unless you want URL rewriting or
+[edge purge on delete](./vps-self-hosting.mdx#cdn-in-front-works-with-all-three-options).
+
+## 5. CORS for browser presigned uploads
+
+If browsers PUT directly to presigned URLs (the
+[presigned upload flow](./presigned-uploads.mdx)), set the bucket CORS policy
+(bucket → Settings → CORS policy):
+
+```json
+[
+  {
+    "AllowedOrigins": ["https://app.example.com"],
+    "AllowedMethods": ["GET", "PUT"],
+    "AllowedHeaders": ["content-type"],
+    "MaxAgeSeconds": 86400
+  }
+]
+```
+
+## 6. Lifecycle rule for multipart orphans
+
+media-kit deliberately doesn't garbage-collect abandoned multipart sessions
+(it avoids needing bucket-lifecycle permissions). Add the rule once in R2:
+bucket → **Settings → Object lifecycle rules** → "Abort incomplete multipart
+uploads" after 7 days.
+
+## Cost sanity check
+
+| | S3 (us-east-1) | R2 |
+|---|---|---|
+| Storage | $0.023/GB-mo | $0.015/GB-mo |
+| Egress | **$0.09/GB** | **$0** |
+| A 50 GB library serving 500 GB/mo | ~$46/mo | ~$0.75/mo |
+
+Egress is the whole story for media serving — that table is why this guide exists.

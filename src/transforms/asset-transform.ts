@@ -324,6 +324,10 @@ export class AssetTransformService {
           contentType: cached.contentType,
           status: 200,
           headers: {
+            // Content-Type must live in `headers` — hosts iterate headers
+            // verbatim (the class-header example does exactly that); the
+            // top-level `contentType` field alone ships a typeless response.
+            'Content-Type': cached.contentType,
             'Cache-Control': cacheControl ?? 'public, max-age=31536000, immutable',
             Vary: 'Accept',
           },
@@ -360,6 +364,7 @@ export class AssetTransformService {
       contentLength: transformed.buffer.length,
       status: 200,
       headers: {
+        'Content-Type': transformed.contentType,
         'Cache-Control': cacheControl ?? 'public, max-age=31536000, immutable',
         'Content-Length': String(transformed.buffer.length),
         Vary: 'Accept',
