@@ -101,7 +101,6 @@ export function injectTenantField(schema: Schema, tenant: ResolvedTenantConfig):
     [tenant.tenantField]: {
       type: isObjectId ? mongoose.Schema.Types.ObjectId : String,
       ...(tenant.enabled && tenant.required ? { required: true } : {}),
-      index: true,
       ...(isObjectId && tenant.ref ? { ref: tenant.ref } : {}),
     },
   });
@@ -127,5 +126,16 @@ export function injectTenantField(schema: Schema, tenant: ResolvedTenantConfig):
       }
       indexEntry[0] = newFields;
     }
+  }
+  // Guarantee at least one tenant-leading index. After the prepend, any
+  // compound serves tenant-only queries via the prefix rule — a bare
+  // single would be a redundant prefix paid on every insert
+  // (PACKAGE_RULES P11.1; fleet index audit 2026-07). Only when the schema
+  // declared nothing to prepend does the tenant field get its own index.
+  const hasTenantLeading = (existingIndexes ?? []).some(
+    ([fields]) => Object.keys(fields)[0] === tenant.tenantField,
+  );
+  if (!hasTenantLeading) {
+    schema.index({ [tenant.tenantField]: 1 } as Record<string, 1>);
   }
 }

@@ -65,7 +65,8 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
       enum: ['pending', 'processing', 'ready', 'error'],
       default: 'pending',
       required: true,
-      index: true,
+      // No field-level index — the { status, createdAt } compound serves
+      // status-prefix queries; a bare single is a redundant prefix (P11.1).
     },
     errorMessage: { type: String },
 
@@ -87,7 +88,9 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
     tokenVersion: { type: Number, default: 0, required: true },
 
     // --- Organization ---
-    folder: { type: String, default: 'general', required: true, index: true },
+    // No field-level index — the { folder, createdAt } compound serves
+    // folder-prefix queries; a bare single is a redundant prefix (P11.1).
+    folder: { type: String, default: 'general', required: true },
     tags: { type: [String], default: [], index: true },
     alt: String,
     description: String,

@@ -3,6 +3,16 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.1] — 2026-07-16
+
+### Fixed
+
+- injectTenantField no longer force-indexes the tenant field: the compound
+  prepend makes the tenant the leading key of every index, so the bare single
+  was a redundant prefix paid on every insert (PACKAGE_RULES P11.1, fleet
+  index audit). A dedicated tenant index is still created when a schema
+  declares no compounds to prepend. Index-declaration change only.
+
 ## [3.7.0] — 2026-07-15
 
 ### Note — validated on latest kits; sharp 0.35 compatibility
