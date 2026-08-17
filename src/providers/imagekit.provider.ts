@@ -23,21 +23,24 @@
  * ```ts
  * import { ImageKitProvider } from '@classytic/media-kit/providers/imagekit';
  *
- * const engine = await createMedia({
- *   connection: mongoose.connection,
+ * const engine = await defineMedia({
+ *   processing: { enabled: false }, // ImageKit handles optimization
+ * }).bind(mongoose.connection, {
  *   driver: new ImageKitProvider({
  *     publicKey: process.env.IMAGEKIT_PUBLIC_KEY,
  *     privateKey: process.env.IMAGEKIT_PRIVATE_KEY,
  *     urlEndpoint: 'https://ik.imagekit.io/your-id',
  *   }),
- *   processing: { enabled: false }, // ImageKit handles optimization
  * });
  * ```
  */
 
 import { Readable } from 'node:stream';
-import type { FileStat, StorageDriver, WriteResult } from '../types.js';
+import type { FileStat, StorageDriver, WriteResult } from '../types/storage.js';
 import { LazySecret, type SecretValue, validateSecretValue } from '../utils/lazy-secret.js';
+import { uploadFetch, metadataFetch, streamFetch } from './http.js';
+
+export type { StorageDriver, WriteResult, FileStat } from '../types/storage.js';
 
 const UPLOAD_URL = 'https://upload.imagekit.io/api/v1/files/upload';
 const API_URL = 'https://api.imagekit.io/v1';
@@ -177,7 +180,7 @@ export class ImageKitProvider implements StorageDriver {
     form.append('useUniqueFileName', String(this.useUniqueFileName));
 
     const authHeader = await this.resolveAuthHeader();
-    const res = await fetch(UPLOAD_URL, {
+    const res = await uploadFetch(UPLOAD_URL, {
       method: 'POST',
       headers: { Authorization: authHeader },
       body: form,
@@ -213,7 +216,7 @@ export class ImageKitProvider implements StorageDriver {
    */
   async read(key: string): Promise<NodeJS.ReadableStream> {
     const url = this.getPublicUrl(key);
-    const res = await fetch(url);
+    const res = await streamFetch(url);
 
     if (!res.ok) {
       throw new Error(`ImageKit read failed (${res.status}): ${url}`);
@@ -230,7 +233,7 @@ export class ImageKitProvider implements StorageDriver {
     const { fileId } = parseKey(key);
 
     const authHeader = await this.resolveAuthHeader();
-    const res = await fetch(`${API_URL}/files/${fileId}`, {
+    const res = await metadataFetch(`${API_URL}/files/${fileId}`, {
       method: 'DELETE',
       headers: { Authorization: authHeader },
     });
@@ -250,7 +253,7 @@ export class ImageKitProvider implements StorageDriver {
   async exists(key: string): Promise<boolean> {
     const url = this.getPublicUrl(key);
     try {
-      const res = await fetch(url, { method: 'HEAD' });
+      const res = await metadataFetch(url, { method: 'HEAD' });
       return res.ok;
     } catch {
       return false;
@@ -264,7 +267,7 @@ export class ImageKitProvider implements StorageDriver {
     const { fileId } = parseKey(key);
 
     const authHeader = await this.resolveAuthHeader();
-    const res = await fetch(`${API_URL}/files/${fileId}/details`, {
+    const res = await metadataFetch(`${API_URL}/files/${fileId}/details`, {
       headers: { Authorization: authHeader },
     });
 
@@ -297,7 +300,7 @@ export class ImageKitProvider implements StorageDriver {
         limit: String(limit),
       });
 
-      const res = await fetch(`${API_URL}/files?${params}`, {
+      const res = await metadataFetch(`${API_URL}/files?${params}`, {
         headers: { Authorization: authHeader },
       });
 

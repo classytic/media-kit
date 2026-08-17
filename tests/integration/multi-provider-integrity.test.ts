@@ -20,11 +20,11 @@
 import { describe, it, expect, afterAll, beforeEach, vi } from 'vitest';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import { createMedia } from '../../src/engine/create-media.js';
+import { bindMediaFlat as createMedia } from '../helpers/create-test-engine.js';
 import type { MediaEngine } from '../../src/engine/engine-types.js';
 import { createAssetTransform } from '../../src/transforms/asset-transform.js';
 import { StorageTransformCache } from '../../src/transforms/transform-cache.js';
-import type { ImageAdapter, ProcessedImage, ProcessingOptions, SizeVariant } from '../../src/types.js';
+import type { ImageAdapter, ProcessedImage, ProcessingOptions, SizeVariant } from '../../src/types/index.js';
 import { MemoryStorageDriver } from '../helpers/memory-driver.js';
 import { createTestImageBuffer, teardownTestMongo } from '../helpers/create-test-engine.js';
 
@@ -164,7 +164,7 @@ describe('upload({ provider }) — variants land in the SAME provider as the mai
     expect(primary.size).toBe(0);
     expect(secondary.size).toBe(3); // main + __original + thumb
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('regression: default-provider upload keeps everything in the default driver', async () => {
@@ -183,7 +183,7 @@ describe('upload({ provider }) — variants land in the SAME provider as the mai
     expect(primary.size).toBe(3);
     expect(secondary.size).toBe(0);
 
-    await engine.dispose();
+    await engine.close();
   });
 });
 
@@ -219,7 +219,7 @@ describe('replace() — provider-correct writes, deletes, and rollback', () => {
     expect(primary.size).toBe(0);
     expect(secondary.size).toBe(3);
 
-    await engine.dispose();
+    await engine.close();
   });
 
   // ── Bug 3 — replace() rollback on DB-update failure ──────────────────────
@@ -258,7 +258,7 @@ describe('replace() — provider-correct writes, deletes, and rollback', () => {
     expect(after?.key).toBe(original.key);
     expect(await secondary.exists(original.key)).toBe(true);
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('rolls back via the correct driver when a DEFAULT-provider replace fails (regression)', async () => {
@@ -280,7 +280,7 @@ describe('replace() — provider-correct writes, deletes, and rollback', () => {
     expect(await allKeys(primary)).toEqual(keysBefore);
     expect(secondary.size).toBe(0);
 
-    await engine.dispose();
+    await engine.close();
   });
 });
 
@@ -332,7 +332,7 @@ describe('move() / renameFolder() — per-file driver routing over mixed provide
     expect(primary.size).toBe(3);
     expect(secondary.size).toBe(3);
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('renameFolder(): mixed-provider folder rename keeps every file in its own driver', async () => {
@@ -373,27 +373,23 @@ describe('move() / renameFolder() — per-file driver routing over mixed provide
     expect(primary.size).toBe(3);
     expect(secondary.size).toBe(3);
 
-    await engine.dispose();
+    await engine.close();
   });
 });
 
-// ── operations/upload (the importFromUrl backend) honors `provider` ─────────
+// ── canonical upload (the importFromUrl backend) honors `provider` ──────────
 
-describe('operations upload — provider routing (importFromUrl backend)', () => {
-  // importFromUrl delegates to operations/upload after its SSRF-guarded
-  // fetch (which blocks local test servers — the provider→input threading
-  // itself is unit-tested in tests/unit/url-import-provider.test.ts).
-  // This exercises the storage-touching half end-to-end.
+describe('repo.upload — provider routing (importFromUrl backend)', () => {
+  // importFromUrl now feeds its SSRF-guarded download straight into the
+  // canonical `repo.upload()` (the legacy operations/upload pipeline was
+  // removed). The provider→input threading is unit-tested in
+  // tests/unit/url-import-provider.test.ts; this exercises the storage-touching
+  // half end-to-end via the same entry point importFromUrl uses.
   it('routes main + variants to the named provider and stamps media.provider', async () => {
     const { engine, primary, secondary } = await createRig();
     const repo = engine.repositories.media;
 
-    const { upload: opUpload } = await import('../../src/operations/upload.js');
-    // Reach the internal deps the same way importFromUrl does — via the
-    // repository's op-deps bridge (private, accessed for the test).
-    const deps = (repo as unknown as { _opDeps: import('../../src/operations/types.js').OperationDeps })._opDeps;
-
-    const media = await opUpload(deps, {
+    const media = await repo.upload({
       buffer: PNG,
       filename: 'imported.png',
       mimeType: 'image/png',
@@ -407,7 +403,7 @@ describe('operations upload — provider routing (importFromUrl backend)', () =>
     }
     expect(primary.size).toBe(0);
 
-    await engine.dispose();
+    await engine.close();
   });
 });
 
@@ -436,7 +432,7 @@ describe('AssetTransformService — per-doc provider routing', () => {
     expect(secondaryRead).toHaveBeenCalledWith(media.key);
     expect(primaryRead).not.toHaveBeenCalled();
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('variant serve of a secondary-provider doc streams from the secondary driver only', async () => {
@@ -462,7 +458,7 @@ describe('AssetTransformService — per-doc provider routing', () => {
     expect(secondaryRead).toHaveBeenCalledWith(thumb!.key);
     expect(primaryRead).not.toHaveBeenCalled();
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('regression: without a resolver (manual v2 construction) reads fall back to media.driver', async () => {
@@ -482,7 +478,7 @@ describe('AssetTransformService — per-doc provider routing', () => {
     expect((await streamToBuffer(res.stream)).equals(PNG)).toBe(true);
     expect(primaryRead).toHaveBeenCalledWith(media.key);
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('transform cache stays on ITS OWN driver (engine default) and get/set are consistent', async () => {
@@ -536,6 +532,6 @@ describe('AssetTransformService — per-doc provider routing', () => {
     expect(second.headers['Content-Type']).toBe('image/jpeg'); // cache-hit path too
     expect(secondaryRead).toHaveBeenCalledTimes(1);
 
-    await engine.dispose();
+    await engine.close();
   });
 });

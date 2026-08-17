@@ -5,12 +5,12 @@
  * Gate e2e suites with `describe.skipIf(!hasS3())(...)` or `if (hasS3()) { ... }`.
  */
 
-export function hasKey(name: string): boolean {
+function hasKey(name: string): boolean {
   const v = process.env[name];
   return typeof v === 'string' && v.length > 0;
 }
 
-export function requireEnv(name: string): string {
+function requireEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing required env var: ${name}`);
   return v;
@@ -35,10 +35,6 @@ export function hasGcs(): boolean {
   } catch {
     return false;
   }
-}
-
-export function hasMongo(): boolean {
-  return hasKey('MONGODB_URI');
 }
 
 // ── Structured accessors ─────────────────────────────────────

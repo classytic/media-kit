@@ -1,7 +1,7 @@
 {
   "name": "@classytic/media-kit",
-  "version": "3.7.1",
-  "description": "Engine-factory media management for Mongoose and Arc â€” arc-compatible events, dynamic multi-tenancy, pluggable storage drivers, smart pagination, image processing",
+  "version": "3.9.0",
+  "description": "Engine-factory media management for Mongoose and Arc — arc-compatible events, dynamic multi-tenancy, pluggable storage drivers, smart pagination, image processing",
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.mjs",
@@ -59,6 +59,30 @@
     "./signing": {
       "types": "./dist/signing.d.mts",
       "import": "./dist/signing.mjs"
+    },
+    "./types": {
+      "types": "./dist/types.d.mts",
+      "import": "./dist/types.mjs"
+    },
+    "./types/storage": {
+      "types": "./dist/types/storage.d.mts",
+      "import": "./dist/types/storage.mjs"
+    },
+    "./types/media": {
+      "types": "./dist/types/media.d.mts",
+      "import": "./dist/types/media.mjs"
+    },
+    "./types/processing": {
+      "types": "./dist/types/processing.d.mts",
+      "import": "./dist/types/processing.mjs"
+    },
+    "./types/uploads": {
+      "types": "./dist/types/uploads.d.mts",
+      "import": "./dist/types/uploads.mjs"
+    },
+    "./types/config": {
+      "types": "./dist/types/config.d.mts",
+      "import": "./dist/types/config.mjs"
     },
     "./package.json": "./package.json"
   },
@@ -130,9 +154,9 @@
   "peerDependencies": {
     "@aws-sdk/client-s3": ">=3.1014.0",
     "@aws-sdk/s3-request-presigner": ">=3.1014.0",
-    "@classytic/mongokit": ">=3.14.0",
-    "@classytic/primitives": ">=0.6.0",
-    "@classytic/repo-core": ">=0.5.0",
+    "@classytic/mongokit": ">=3.33.0",
+    "@classytic/primitives": ">=0.23.0",
+    "@classytic/repo-core": ">=0.24.0",
     "@google-cloud/storage": ">=7.19.0",
     "mime-types": ">=3.0.2",
     "mongoose": ">=9.4.1",
@@ -162,9 +186,9 @@
     "@aws-sdk/s3-request-presigner": ">=3.1014.0",
     "@biomejs/biome": "^2.5.2",
     "@classytic/dev-tools": "^0.2.0",
-    "@classytic/mongokit": "^3.22.2",
-    "@classytic/primitives": "^0.11.0",
-    "@classytic/repo-core": "^0.13.0",
+    "@classytic/mongokit": "^3.33.0",
+    "@classytic/primitives": "^0.23.0",
+    "@classytic/repo-core": "^0.24.0",
     "@google-cloud/storage": ">=7.19.0",
     "@types/mime-types": ">=3.0.1",
     "@types/node": ">=22.0.0",
@@ -174,7 +198,7 @@
     "mongoose": ">=9.4.1",
     "publint": ">=0.3.18",
     "sharp": "^0.35.3",
-    "tsdown": ">=0.21.8",
+    "tsdown": "^0.22.14",
     "tsx": ">=4.20.0",
     "typescript": ">=5.0.0",
     "vitest": ">=4.1.0",

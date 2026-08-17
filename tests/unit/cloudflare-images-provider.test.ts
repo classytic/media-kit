@@ -420,7 +420,7 @@ describe('CloudflareImagesProvider — getSignedUploadUrl()', () => {
 describe('CloudflareImagesProvider — unsupported operations', () => {
   it('leaves list/copy/move/multipart/resumable undefined', () => {
     const provider = new CloudflareImagesProvider(CONFIG);
-    const driver = provider as import('../../src/types.js').StorageDriver;
+    const driver = provider as import('../../src/types/index.js').StorageDriver;
     expect(driver.list).toBeUndefined();
     expect(driver.copy).toBeUndefined();
     expect(driver.move).toBeUndefined();

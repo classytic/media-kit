@@ -1,96 +1,64 @@
 /**
- * URL import operation — fetch file from URL and upload.
+ * URL download for the import flow — fetch + identify bytes only.
  * Includes SSRF protection: private IP blocking, DNS rebinding prevention via IP pinning.
+ *
+ * The upload half (validation, malware scan, dedup, storage write, events) is
+ * NOT here — `importFromUrlVerb` feeds the downloaded bytes into the canonical
+ * `repo.upload()` so URL imports inherit the exact same protections as a direct
+ * upload. Keeping this module download-only is what closes the historical
+ * scan-bypass gap and removes the duplicate upload pipeline.
  */
 
 import http from 'node:http';
 import https from 'node:https';
 import dns from 'node:dns';
-import type { OperationDeps } from './types';
-import type { ImportOptions, OperationContext, UploadInput, IMediaDocument, EventContext } from '../types';
+import type { ImportOptions } from '../types/config.js';
 import { getMimeType } from '../utils/mime';
-import { upload } from './upload';
-import { log } from './helpers';
+import type { Semaphore } from '../utils/semaphore';
+
+/** The bytes + identity a URL download resolves to, ready to feed `repo.upload()`. */
+export interface DownloadedFile {
+  buffer: Buffer;
+  filename: string;
+  mimeType: string;
+}
+
+/** The only deps a download needs: the size ceiling + the shared upload semaphore. */
+export interface DownloadDeps {
+  config: { fileTypes?: { maxSize?: number } };
+  uploadSemaphore: Semaphore;
+}
 
 /**
- * Import a file from a URL.
+ * Securely download a file from a URL and identify it (filename + MIME).
  *
- * 1. Fetch URL with streaming (check Content-Length for size limit)
- * 2. Extract filename from URL path or Content-Disposition header
- * 3. Detect MIME from Content-Type header
- * 4. Buffer the response, then run through standard upload flow
+ * 1. Fetch with streaming, enforcing the size limit (Content-Length + running total)
+ * 2. Extract filename from Content-Disposition or the URL path
+ * 3. Detect MIME from Content-Type (falling back to the filename extension)
+ *
+ * The fetch/buffer runs INSIDE the upload semaphore so N concurrent imports
+ * hold at most `concurrency.maxConcurrent` in-flight download buffers; the slot
+ * is released before the caller re-acquires one for the upload phase (holding
+ * it across both would self-deadlock at maxConcurrent = 1).
  */
-export async function importFromUrl(
-  deps: OperationDeps,
+export async function downloadFromUrl(
+  deps: DownloadDeps,
   url: string,
-  options?: ImportOptions,
-  context?: OperationContext,
-): Promise<IMediaDocument> {
-  const eventCtx: EventContext<{ url: string; options?: ImportOptions }> = {
-    data: { url, options },
-    context,
-    timestamp: new Date(),
-  };
-  await deps.events.emit('before:import', eventCtx);
+  options?: Pick<ImportOptions, 'maxSize' | 'timeout' | 'filename'>,
+): Promise<DownloadedFile> {
+  const maxSize = options?.maxSize || deps.config.fileTypes?.maxSize || 100 * 1024 * 1024;
+  const timeout = options?.timeout || 30000;
 
-  try {
-    const maxSize = options?.maxSize || deps.config.fileTypes?.maxSize || 100 * 1024 * 1024;
-    const timeout = options?.timeout || 30000;
+  const {
+    buffer,
+    mimeType,
+    filename: detectedFilename,
+  } = await deps.uploadSemaphore.run(() => fetchUrl(url, maxSize, timeout));
 
-    // Fetch + buffer inside the upload semaphore so N concurrent imports
-    // hold at most `concurrency.maxConcurrent` in-flight download buffers.
-    // The slot is released before upload() re-acquires its own — holding it
-    // across both phases would self-deadlock at maxConcurrent = 1.
-    const {
-      buffer,
-      mimeType,
-      filename: detectedFilename,
-    } = await deps.uploadSemaphore.run(() => fetchUrl(url, maxSize, timeout));
+  const filename = options?.filename || detectedFilename;
+  const finalMimeType = mimeType || getMimeType(filename);
 
-    // Determine final filename
-    const filename = options?.filename || detectedFilename;
-
-    // Determine MIME type (use detected or derive from filename)
-    const finalMimeType = mimeType || getMimeType(filename);
-
-    // Build upload input — tags are passed here, upload() persists them via
-    // createMedia(). `provider` routes the imported bytes (main file AND any
-    // processed variants) to the named driver; default provider when unset.
-    const uploadInput: UploadInput = {
-      buffer,
-      filename,
-      mimeType: finalMimeType,
-      folder: options?.folder,
-      alt: options?.alt,
-      title: options?.title,
-      tags: options?.tags,
-      provider: options?.provider,
-    };
-
-    // Run through standard upload flow
-    const media = await upload(deps, uploadInput, context);
-
-    log(deps, 'info', 'Media imported from URL', {
-      url,
-      id: media._id,
-      filename,
-    });
-
-    await deps.events.emit('after:import', {
-      context: eventCtx,
-      result: media,
-      timestamp: new Date(),
-    });
-
-    return media;
-  } catch (error) {
-    await deps.events.emit('error:import', {
-      context: eventCtx,
-      error: error as Error,
-      timestamp: new Date(),
-    });
-    throw error;
-  }
+  return { buffer, filename, mimeType: finalMimeType };
 }
 
 /**
@@ -130,7 +98,10 @@ function isPrivateIP(ip: string): boolean {
   if (lower === '::1') return true; // loopback
   if (lower === '::') return true; // unspecified
   if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // fc00::/7 unique local
-  if (lower.startsWith('fe80')) return true; // link-local
+  // Link-local is fe80::/10 — the first hextet spans 0xfe80..0xfebf, NOT just
+  // the literal 'fe80' prefix. A string prefix would miss fe81..febf.
+  const firstHextet = Number.parseInt(lower.split(':')[0] || '0', 16);
+  if (firstHextet >= 0xfe80 && firstHextet <= 0xfebf) return true; // fe80::/10 link-local
   if (lower.startsWith('::ffff:')) return true; // IPv4-mapped with non-dotted notation (unparseable → block)
   if (lower.startsWith('100::')) return true; // discard prefix (100::/64)
   if (lower.startsWith('2001:db8')) return true; // documentation prefix
@@ -241,9 +212,13 @@ async function fetchUrl(
       // Handle redirects (resolve relative Location against current URL)
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         if (redirectDepth >= MAX_REDIRECTS) {
+          res.destroy();
           reject(new Error(`URL import failed: too many redirects (>${MAX_REDIRECTS}) for ${url}`));
           return;
         }
+        // Drain/abort the redirect response before following Location — leaving
+        // it open leaks the socket (it never reaches 'end').
+        res.destroy();
         const resolvedUrl = new URL(res.headers.location, url).href;
         fetchUrl(resolvedUrl, maxSize, timeout, redirectDepth + 1)
           .then(resolve)
@@ -279,7 +254,7 @@ async function fetchUrl(
       if (disposition) {
         const filenameMatch = disposition.match(/filename\*?=['"]?(?:UTF-8'')?([^;\r\n"']+)/i);
         if (filenameMatch) {
-          detectedFilename = decodeURIComponent(filenameMatch[1]!.replace(/['"]/g, ''));
+          detectedFilename = decodeURIComponent(filenameMatch[1]?.replace(/['"]/g, '') ?? '');
         }
       }
       if (detectedFilename === 'imported-file') {

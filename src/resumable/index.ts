@@ -9,6 +9,7 @@ export {
 } from './tus';
 export type {
   TusHandleOptions,
+  TusLock,
   TusRequest,
   TusResponse,
   TusSession,

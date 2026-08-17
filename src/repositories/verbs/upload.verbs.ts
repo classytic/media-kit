@@ -8,7 +8,10 @@
 
 import { createError } from '@classytic/repo-core/errors';
 import { assertAndClaim } from '@classytic/primitives/state-machine';
-import type { IMediaDocument, UploadInput, GeneratedVariant, MediaVisibility, StorageDriver } from '../../types.js';
+import type { IMediaDocument, MediaVisibility } from '../../types/media.js';
+import type { UploadInput } from '../../types/uploads.js';
+import type { GeneratedVariant } from '../../types/processing.js';
+import type { StorageDriver } from '../../types/storage.js';
 import type { MediaContext } from '../../engine/engine-types.js';
 import type { ScanResult } from '../../bridges/scan.bridge.js';
 import { MEDIA_MACHINE } from '../../models/media-state-machine.js';
@@ -125,18 +128,51 @@ export async function uploadVerb(
 
 /**
  * Upload multiple files. Partial failures do not block successful uploads.
+ *
+ * NOTE: this returns ONLY the successful documents — callers can't tell which
+ * inputs failed or why. Prefer {@link uploadManySettledVerb} when you need to
+ * report per-input outcomes; this form is kept for backward compatibility.
  */
 export async function uploadManyVerb(
   repo: MediaRepository,
   inputs: UploadInput[],
   ctx?: MediaContext,
 ): Promise<IMediaDocument[]> {
+  const { succeeded } = await uploadManySettledVerb(repo, inputs, ctx);
+  return succeeded.map((s) => s.media);
+}
+
+/** Per-input outcome of {@link uploadManySettledVerb}. */
+export interface UploadManyResult {
+  /** Uploads that succeeded, each tagged with its position in `inputs`. */
+  succeeded: Array<{ index: number; media: IMediaDocument }>;
+  /** Uploads that failed, each tagged with its `inputs` position + reason. */
+  failed: Array<{ index: number; reason: string }>;
+}
+
+/**
+ * Upload multiple files, reporting BOTH successes and failures indexed by input
+ * position — so a caller knows exactly which inputs failed and why (a rejected
+ * scan verdict, a validation error, a storage fault) rather than silently
+ * dropping them. Partial failures never block the successful uploads.
+ */
+export async function uploadManySettledVerb(
+  repo: MediaRepository,
+  inputs: UploadInput[],
+  ctx?: MediaContext,
+): Promise<UploadManyResult> {
   const settled = await Promise.allSettled(inputs.map((input) => repo.upload(input, ctx)));
-  const successes: IMediaDocument[] = [];
-  for (const result of settled) {
-    if (result.status === 'fulfilled') successes.push(result.value);
-  }
-  return successes;
+  const succeeded: UploadManyResult['succeeded'] = [];
+  const failed: UploadManyResult['failed'] = [];
+  settled.forEach((result, index) => {
+    if (result.status === 'fulfilled') {
+      succeeded.push({ index, media: result.value });
+    } else {
+      const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      failed.push({ index, reason });
+    }
+  });
+  return { succeeded, failed };
 }
 
 /**
@@ -148,6 +184,21 @@ export async function replaceVerb(
   input: UploadInput,
   ctx?: MediaContext,
 ): Promise<IMediaDocument> {
+  // replace() writes the new object THEN deletes the old one — neither storage
+  // side can roll back with a host transaction. Accepting a ctx.session would
+  // imply atomicity the package can't deliver (an aborted tx would leave the DB
+  // pointing at the deleted old object). Fail fast; run replace after commit.
+  if (ctx && 'session' in ctx && (ctx as { session?: unknown }).session != null) {
+    const err = createError(
+      400,
+      `[media-kit] replace() does not accept an externally-managed ctx.session — ` +
+        `it overwrites object storage, which cannot roll back with your transaction. ` +
+        `Call it after the transaction commits.`,
+    );
+    err.code = 'media.tx.external_session_unsupported';
+    throw err;
+  }
+
   const existing = await repo.getById(id, { ...ctx });
   if (!existing) throw new Error(`Media ${id} not found`);
 

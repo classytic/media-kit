@@ -12,7 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import { IllegalTransitionError } from '@classytic/primitives/state-machine';
 import { MEDIA_MACHINE } from '../../src/models/media-state-machine.js';
-import type { MediaStatus } from '../../src/types.js';
+import type { MediaStatus } from '../../src/types/index.js';
 
 describe('MEDIA_MACHINE', () => {
   describe('declared transitions match the lifecycle documented in CLAUDE.md', () => {
@@ -25,6 +25,11 @@ describe('MEDIA_MACHINE', () => {
       ['processing', 'ready', 'regular upload Step 4 — payload write'],
       ['processing', 'error', 'Step 3 / Step 4 failure'],
       ['ready', 'processing', 'presigned reprocess flag'],
+      // Any live state → deleting (hard-delete tombstone claimed pre-storage).
+      ['pending', 'deleting', 'hard-delete tombstone'],
+      ['processing', 'deleting', 'hard-delete tombstone'],
+      ['ready', 'deleting', 'hard-delete tombstone'],
+      ['error', 'deleting', 'hard-delete tombstone'],
     ];
 
     for (const [from, to, why] of legalTransitions) {
@@ -55,11 +60,17 @@ describe('MEDIA_MACHINE', () => {
       ['ready', 'pending'],
       ['ready', 'ready'],
       ['ready', 'error'], // ready is success-shaped; error is reached BEFORE ready, not after
-      // error → ?  (terminal)
+      // error → ?  (only `deleting` is legal now)
       ['error', 'pending'],
       ['error', 'processing'],
       ['error', 'ready'],
       ['error', 'error'],
+      // deleting → ?  (terminal tombstone)
+      ['deleting', 'pending'],
+      ['deleting', 'processing'],
+      ['deleting', 'ready'],
+      ['deleting', 'error'],
+      ['deleting', 'deleting'],
     ];
 
     for (const [from, to] of illegalTransitions) {
@@ -95,21 +106,27 @@ describe('MEDIA_MACHINE', () => {
   });
 
   describe('validTargets — UI / observability surface', () => {
-    it('pending can transition to processing or error', () => {
-      expect([...MEDIA_MACHINE.validTargets('pending')].sort()).toEqual(['error', 'processing']);
+    // Every live state can also transition to `deleting` (the hard-delete
+    // tombstone claimed before storage removal).
+    it('pending can transition to processing, error, or deleting', () => {
+      expect([...MEDIA_MACHINE.validTargets('pending')].sort()).toEqual(['deleting', 'error', 'processing']);
     });
 
-    it('processing can transition to ready or error', () => {
-      expect([...MEDIA_MACHINE.validTargets('processing')].sort()).toEqual(['error', 'ready']);
+    it('processing can transition to ready, error, or deleting', () => {
+      expect([...MEDIA_MACHINE.validTargets('processing')].sort()).toEqual(['deleting', 'error', 'ready']);
     });
 
-    it('ready can transition to processing (reprocess flow)', () => {
-      expect([...MEDIA_MACHINE.validTargets('ready')]).toEqual(['processing']);
+    it('ready can transition to processing (reprocess) or deleting', () => {
+      expect([...MEDIA_MACHINE.validTargets('ready')].sort()).toEqual(['deleting', 'processing']);
     });
 
-    it('error is terminal — no outgoing transitions', () => {
-      expect([...MEDIA_MACHINE.validTargets('error')]).toEqual([]);
-      expect(MEDIA_MACHINE.isTerminal('error')).toBe(true);
+    it('error can only transition to deleting', () => {
+      expect([...MEDIA_MACHINE.validTargets('error')]).toEqual(['deleting']);
+    });
+
+    it('deleting is terminal — no outgoing transitions', () => {
+      expect([...MEDIA_MACHINE.validTargets('deleting')]).toEqual([]);
+      expect(MEDIA_MACHINE.isTerminal('deleting')).toBe(true);
     });
   });
 

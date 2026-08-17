@@ -23,9 +23,9 @@
 import { describe, it, expect, afterAll, beforeEach, vi } from 'vitest';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import { createMedia } from '../../src/engine/create-media.js';
+import { bindMediaFlat as createMedia } from '../helpers/create-test-engine.js';
 import type { MediaEngine } from '../../src/engine/engine-types.js';
-import type { ImageAdapter, ProcessedImage, ProcessingOptions, SizeVariant, WriteResult } from '../../src/types.js';
+import type { ImageAdapter, ProcessedImage, ProcessingOptions, SizeVariant, WriteResult } from '../../src/types/index.js';
 import { MemoryStorageDriver } from '../helpers/memory-driver.js';
 import { createTestImageBuffer, teardownTestMongo } from '../helpers/create-test-engine.js';
 
@@ -160,7 +160,7 @@ describe('upload() — processImage partial writes never orphan storage', () => 
     // Cleanup ran through the CORRECT driver — default never touched
     expect(primary.size).toBe(0);
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('main write fails after processImage fell back → upload rejects, zero storage keys, doc errored', async () => {
@@ -185,7 +185,7 @@ describe('upload() — processImage partial writes never orphan storage', () => 
     expect(found.data).toHaveLength(1);
     expect(found.data[0]?.status).toBe('error');
 
-    await engine.dispose();
+    await engine.close();
   });
 });
 
@@ -231,7 +231,7 @@ describe('replace() — partial processImage writes + failure leave storage byte
       (original.variants ?? []).map((v) => v.key).sort(),
     );
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('DB update fails after a PARTIAL processImage fallback → rollback still leaves storage byte-identical', async () => {
@@ -266,7 +266,7 @@ describe('replace() — partial processImage writes + failure leave storage byte
     expect(await allKeys(secondary)).toEqual(keysBefore);
     expect(primary.size).toBe(0);
 
-    await engine.dispose();
+    await engine.close();
   });
 });
 
@@ -296,7 +296,7 @@ describe('confirmUpload({ process: true }) — reprocess failures leave zero orp
     expect(media.variants ?? []).toEqual([]);
     expect(await allKeys(primary)).toEqual([presigned.key]);
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('finalising CAS throws AFTER variants were written → variants deleted, record reverted to ready', async () => {
@@ -340,6 +340,6 @@ describe('confirmUpload({ process: true }) — reprocess failures leave zero orp
     expect(doc?.status).toBe('ready');
     expect(doc?.variants ?? []).toEqual([]);
 
-    await engine.dispose();
+    await engine.close();
   });
 });

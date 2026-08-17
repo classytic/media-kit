@@ -20,7 +20,7 @@
  * ```
  */
 
-import type { FocalPoint } from '../types';
+import type { FocalPoint } from '../types/processing.js';
 
 /**
  * Parameters for focal point crop calculation

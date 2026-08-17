@@ -311,4 +311,60 @@ describe('existsByHash — pre-upload dedup handshake', () => {
     expect(result.exists).toBe(false);
     expect(result.media).toBeUndefined();
   });
+
+  /**
+   * The dedup handshake, end to end.
+   *
+   * `start-write` searches `existsByHash(sha256)` using the hash the device
+   * computed from the final blob; confirm used to store `hash(key:size)`. Two
+   * different values, so deduplication was configured on, errored never, and
+   * deduplicated nothing. This asserts the STORED hash is the SEARCHED one.
+   */
+  describe('client sha256 → stored hash (dedup handshake)', () => {
+    let handle: TestEngineHandle;
+    beforeEach(async () => { handle = await createTestEngine(); });
+    afterEach(async () => { await handle.cleanup(); });
+
+    const SHA = 'a'.repeat(64);
+
+    it('persists the client sha256 as the record hash', async () => {
+      const repo = handle.engine.repositories.media;
+      const presigned = await repo.getSignedUploadUrl('dedupe.png', 'image/png');
+      handle.driver.simulateExternalUpload(presigned.key, BUF('png-bytes'), 'image/png');
+
+      const media = await repo.confirmUpload({
+        key: presigned.key, filename: 'dedupe.png', mimeType: 'image/png', size: 9, sha256: SHA,
+      });
+
+      expect(media.hash).toBe(SHA);
+      // The lookup start-write performs must now find it.
+      await expect(repo.existsByHash(SHA)).resolves.toBeTruthy();
+    });
+
+    it('an explicit hashStrategy still WINS over the client value', async () => {
+      const repo = handle.engine.repositories.media;
+      const presigned = await repo.getSignedUploadUrl('etag.png', 'image/png');
+      handle.driver.simulateExternalUpload(presigned.key, BUF('png-bytes'), 'image/png');
+
+      const media = await repo.confirmUpload({
+        key: presigned.key, filename: 'etag.png', mimeType: 'image/png', size: 9,
+        sha256: SHA, hashStrategy: 'etag', etag: 'server-etag',
+      });
+
+      expect(media.hash).toBe('server-etag');
+    });
+
+    it('without a client hash the placeholder behaviour is unchanged', async () => {
+      const repo = handle.engine.repositories.media;
+      const presigned = await repo.getSignedUploadUrl('plain.png', 'image/png');
+      handle.driver.simulateExternalUpload(presigned.key, BUF('png-bytes'), 'image/png');
+
+      const media = await repo.confirmUpload({
+        key: presigned.key, filename: 'plain.png', mimeType: 'image/png', size: 9,
+      });
+
+      expect(media.hash).toBeTruthy();
+      expect(media.hash).not.toBe(SHA);
+    });
+  });
 });

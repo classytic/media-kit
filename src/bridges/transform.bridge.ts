@@ -13,13 +13,12 @@
  *
  * @example
  * ```typescript
- * import { createMedia } from '@classytic/media-kit';
+ * import { defineMedia } from '@classytic/media-kit';
  * import Replicate from 'replicate';
  *
  * const replicate = new Replicate();
  *
- * const engine = await createMedia({
- *   connection,
+ * const engine = await defineMedia({}).bind(connection, {
  *   driver,
  *   bridges: {
  *     transform: {

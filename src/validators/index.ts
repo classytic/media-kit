@@ -26,4 +26,6 @@ export {
   importFromUrlSchema,
   registerExternalSchema,
   focalPointSchema,
+  startWriteSchema,
+  clientVariantSchema,
 } from './upload-input.schema.js';

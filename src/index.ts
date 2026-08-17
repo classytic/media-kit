@@ -7,16 +7,16 @@
  *
  * @example
  * ```ts
- * import { createMedia } from '@classytic/media-kit';
+ * import { defineMedia } from '@classytic/media-kit';
  * import { S3Provider } from '@classytic/media-kit/providers/s3';
  * import mongoose from 'mongoose';
  *
- * const engine = await createMedia({
- *   connection: mongoose.connection,
- *   driver: new S3Provider({ bucket: 'my-bucket', region: 'us-east-1' }),
+ * const engine = await defineMedia({
  *   tenant: { enabled: true, fieldType: 'objectId', required: true },
  *   softDelete: { enabled: true, ttlDays: 30 },
  *   processing: { enabled: true, format: 'webp', quality: 80 },
+ * }).bind(mongoose.connection, {
+ *   driver: new S3Provider({ bucket: 'my-bucket', region: 'us-east-1' }),
  * });
  *
  * // Repositories ARE the API surface
@@ -30,16 +30,18 @@
  * });
  *
  * // Arc integration: drop in any @classytic/arc EventTransport
- * // const engine = await createMedia({ ..., eventTransport: redisTransport });
+ * // .bind(connection, { ..., eventTransport: redisTransport })
  * ```
  *
  * @packageDocumentation
  */
 
-// ── Engine factory ───────────────────────────────────────────
-export { createMedia } from './engine/create-media.js';
+// ── Engine construction (defineMedia → bind) ─────────────────
+export { defineMedia } from './engine/define-media.js';
+export type { MediaBlueprint } from './engine/define-media.js';
 export type {
-  MediaConfig,
+  MediaShape,
+  MediaRuntime,
   MediaEngine,
   ResolvedMediaConfig,
   MediaContext,
@@ -50,10 +52,11 @@ export { MediaRepository, STALE_PENDING_MAX_AGE_MS } from './repositories/media.
 export type { MediaRepositoryDeps } from './repositories/media.repository.js';
 export { createMediaRepositories } from './repositories/create-repositories.js';
 export type { MediaRepositories, CreateRepositoriesDeps } from './repositories/create-repositories.js';
+export type { UploadManyResult } from './repositories/verbs/upload.verbs.js';
 
 // ── Models ───────────────────────────────────────────────────
-export { createMediaModels } from './models/create-models.js';
-export type { MediaModels } from './models/create-models.js';
+export { defineMediaModels } from './models/create-models.js';
+export type { MediaModels, DefineMediaModelsConfig } from './models/create-models.js';
 export { buildMediaSchema } from './models/media.schema.js';
 export type { MediaSchemaConfig } from './models/media.schema.js';
 export { resolveMediaTenant, injectTenantField } from './models/inject-tenant.js';
@@ -154,7 +157,7 @@ export type {
   WriteResult,
   FileStat,
   PresignedUploadResult,
-} from './types.js';
+} from './types/storage.js';
 
 // ── Types — Processing ───────────────────────────────────────
 export type {
@@ -175,7 +178,7 @@ export type {
   VideoAdapter,
   RawAdapter,
   MediaCacheConfig,
-} from './types.js';
+} from './types/processing.js';
 
 // ── Types — Documents ───────────────────────────────────────
 export type {
@@ -185,7 +188,7 @@ export type {
   MediaStatus,
   MediaVisibility,
   ExifMetadata,
-} from './types.js';
+} from './types/media.js';
 
 // ── Types — Configuration sub-interfaces ────────────────────
 export type {
@@ -199,16 +202,16 @@ export type {
   MediaSigningConfig,
   ServeAuthorize,
   ExternalMediaConfig,
-} from './types.js';
+  RegisterExternalInput,
+  ImportOptions,
+} from './types/config.js';
 
 // ── Types — Operations ──────────────────────────────────────
 export type {
   UploadInput,
   ConfirmUploadInput,
-  RegisterExternalInput,
-  ImportOptions,
-  BulkResult,
-  RewriteResult,
+} from './types/uploads.js';
+export type {
   InitiateMultipartInput,
   CompleteMultipartInput,
   MultipartUploadSession,
@@ -218,7 +221,7 @@ export type {
   HashStrategy,
   BatchPresignInput,
   BatchPresignResult,
-} from './types.js';
+} from './types/storage.js';
 
 // ── Types — Folder ──────────────────────────────────────────
 export type {
@@ -226,7 +229,9 @@ export type {
   FolderTree,
   BreadcrumbItem,
   FolderStats,
-} from './types.js';
+  BulkResult,
+  RewriteResult,
+} from './types/folders.js';
 
 // ── Types — Transforms ──────────────────────────────────────
 export type {
@@ -234,7 +239,7 @@ export type {
   TransformRequest,
   TransformResponse,
   TransformCache,
-} from './types.js';
+} from './types/transforms.js';
 
 // ── Re-export mongokit types for convenience ────────────────
 export { QueryParser } from '@classytic/mongokit';
@@ -271,3 +276,20 @@ export type {
   SortSpec,
   UpdateOptions,
 } from '@classytic/mongokit';
+
+/**
+ * Client-produced derivatives — presigning them and admitting them safely.
+ * Exported so a host route can offer the sizes its transform policy asked for.
+ */
+export {
+  assertDerivativeKey,
+  derivativeKey,
+  sanitizeDerivativeName,
+  signDerivativeUploads,
+  toStoredVariants,
+} from './operations/derivatives.js';
+export type {
+  ClientVariantInput,
+  DerivativeUploadRequest,
+  DerivativeUploadTarget,
+} from './operations/derivatives.js';

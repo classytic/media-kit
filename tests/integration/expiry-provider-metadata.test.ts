@@ -5,7 +5,7 @@
 import { describe, it, expect, afterAll, beforeEach } from 'vitest';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import { createMedia } from '../../src/engine/create-media.js';
+import { bindMediaFlat as createMedia } from '../helpers/create-test-engine.js';
 import { MemoryStorageDriver } from '../helpers/memory-driver.js';
 import { teardownTestMongo } from '../helpers/create-test-engine.js';
 
@@ -70,7 +70,7 @@ describe('providerMetadata', () => {
     expect(media.providerMetadata).toBeDefined();
     expect(media.providerMetadata?.myCustomKey).toBe('abc');
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('providerMetadata is absent when driver returns no metadata', async () => {
@@ -91,7 +91,7 @@ describe('providerMetadata', () => {
     // MemoryStorageDriver doesn't return metadata — field absent
     expect(media.providerMetadata).toBeUndefined();
 
-    await engine.dispose();
+    await engine.close();
   });
 });
 
@@ -118,7 +118,7 @@ describe('expiresAt', () => {
     expect(media.expiresAt).toBeDefined();
     expect(media.expiresAt!.getTime()).toBeCloseTo(expires.getTime(), -2);
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('expiresAt is absent when not provided', async () => {
@@ -138,7 +138,7 @@ describe('expiresAt', () => {
 
     expect(media.expiresAt ?? null).toBeNull();
 
-    await engine.dispose();
+    await engine.close();
   });
 });
 
@@ -176,8 +176,47 @@ describe('purgeExpired()', () => {
     const doc = await engine.repositories.media.getById(String(media._id), { throwOnNotFound: false } as any);
     expect(doc).toBeNull();
 
-    await engine.dispose();
+    await engine.close();
   });
+
+  it('TERMINATES when a delete always fails (no infinite page-1 loop)', async () => {
+    const conn = await getConnection();
+    const driver = new MemoryStorageDriver();
+
+    const engine = await createMedia({
+      connection: conn,
+      driver,
+      suppressWarnings: true,
+      processing: { enabled: false },
+    });
+
+    const past = new Date(Date.now() - 1000);
+    const good = await engine.repositories.media.upload({
+      buffer: BUF('good'), filename: 'good.txt', mimeType: 'text/plain', expiresAt: past,
+    });
+    const poison = await engine.repositories.media.upload({
+      buffer: BUF('poison'), filename: 'poison.txt', mimeType: 'text/plain', expiresAt: past,
+    });
+
+    // Make hardDelete ALWAYS fail for the poison doc — before the fix this kept
+    // it on page 1 forever and the purge never returned.
+    const repo = engine.repositories.media;
+    const originalHardDelete = repo.hardDelete.bind(repo);
+    (repo as unknown as { hardDelete: typeof repo.hardDelete }).hardDelete = (async (id: string, ctx?: unknown) => {
+      if (id === String(poison._id)) throw new Error('storage unavailable');
+      return originalHardDelete(id, ctx as never);
+    }) as typeof repo.hardDelete;
+
+    // If the loop doesn't terminate, the test times out (the real bug).
+    const result = await repo.purgeExpired();
+
+    expect(result.success).toContain(String(good._id));
+    expect(result.failed.map((f) => f.id)).toContain(String(poison._id));
+    // the good one is actually gone; the poison one remains (excluded, not retried forever)
+    expect(await driver.exists(good.key)).toBe(false);
+
+    await engine.close();
+  }, 15_000);
 
   it('does not purge assets that have not expired yet', async () => {
     const conn = await getConnection();
@@ -203,7 +242,7 @@ describe('purgeExpired()', () => {
     expect(result.success).not.toContain(String(media._id));
     expect(await driver.exists(media.key)).toBe(true);
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('does not purge assets without expiresAt', async () => {
@@ -228,7 +267,7 @@ describe('purgeExpired()', () => {
     expect(result.success).not.toContain(String(media._id));
     expect(await driver.exists(media.key)).toBe(true);
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('purges only assets expired before a custom cutoff', async () => {
@@ -269,7 +308,7 @@ describe('purgeExpired()', () => {
     expect(await driver.exists(old.key)).toBe(false);
     expect(await driver.exists(recent.key)).toBe(true);
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('returns BulkResult with purgedIds and fires ASSETS_EXPIRED event', async () => {
@@ -304,7 +343,7 @@ describe('purgeExpired()', () => {
     expect(payload.purgedCount).toBeGreaterThanOrEqual(1);
     expect(payload.failedCount).toBe(0);
 
-    await engine.dispose();
+    await engine.close();
   });
 });
 
@@ -350,7 +389,7 @@ describe('getExpiringSoon()', () => {
     expect(ids).not.toContain('later');
     expect(results.length).toBe(1);
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('returns empty array when nothing is expiring soon', async () => {
@@ -371,6 +410,6 @@ describe('getExpiringSoon()', () => {
     const results = await engine.repositories.media.getExpiringSoon(1);
     expect(results).toHaveLength(0);
 
-    await engine.dispose();
+    await engine.close();
   });
 });

@@ -27,17 +27,11 @@
  * ```
  */
 
-import type {
-  TransformParams,
-  TransformRequest,
-  TransformResponse,
-  TransformCache,
-  FocalPoint,
-  ImageAdapter,
-  IMediaDocument,
-  StorageDriver,
-  ServeAuthorize,
-} from '../types';
+import type { TransformParams, TransformRequest, TransformResponse, TransformCache } from '../types/transforms.js';
+import type { FocalPoint, ImageAdapter } from '../types/processing.js';
+import type { IMediaDocument } from '../types/media.js';
+import type { StorageDriver } from '../types/storage.js';
+import type { ServeAuthorize } from '../types/config.js';
 import type { UrlSigner } from '../signing/index';
 import type { SharpModule, SharpInstanceSource } from '../processing/image';
 import { calculateFocalPointCrop } from '../processing/focal-point';
@@ -328,6 +322,7 @@ export class AssetTransformService {
             // verbatim (the class-header example does exactly that); the
             // top-level `contentType` field alone ships a typeless response.
             'Content-Type': cached.contentType,
+            'X-Content-Type-Options': 'nosniff',
             'Cache-Control': cacheControl ?? 'public, max-age=31536000, immutable',
             Vary: 'Accept',
           },
@@ -365,6 +360,7 @@ export class AssetTransformService {
       status: 200,
       headers: {
         'Content-Type': transformed.contentType,
+        'X-Content-Type-Options': 'nosniff',
         'Cache-Control': cacheControl ?? 'public, max-age=31536000, immutable',
         'Content-Length': String(transformed.buffer.length),
         Vary: 'Accept',
@@ -512,6 +508,10 @@ export class AssetTransformService {
   ): Promise<TransformResponse> {
     const headers: Record<string, string> = {
       'Content-Type': contentType,
+      // Stop browsers from MIME-sniffing served bytes into a different, more
+      // dangerous type (an "image" that sniffs as HTML/JS → stored XSS). The
+      // declared Content-Type is authoritative.
+      'X-Content-Type-Options': 'nosniff',
       'Accept-Ranges': 'bytes',
       'Cache-Control': cacheControl ?? 'public, max-age=86400',
     };

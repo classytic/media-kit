@@ -3,17 +3,17 @@
  * Processes an image buffer, generates size variants, and uploads variants to storage.
  */
 
-import type { OperationDeps } from './types';
+import type { OperationDeps } from './types.js';
 import type {
   FocalPoint,
   GeneratedVariant,
-  OperationContext,
   OriginalHandling,
   ProcessingConfig,
   ProcessingOptions,
   QualityMap,
-} from '../types';
-import { isImage, isRawImage, isVideo, updateFilenameExtension } from '../utils/mime';
+} from '../types/processing.js';
+import type { OperationContext } from '../types/uploads.js';
+import { getExtension, isImage, isRawImage, isVideo, updateFilenameExtension } from '../utils/mime';
 import { getContentType, getAspectRatio, generateKey, deleteKeysBestEffort, log } from './helpers';
 import { generateThumbHash } from '../processing/thumbhash';
 
@@ -422,7 +422,17 @@ async function runProcessImage(
     const os = await import('node:os');
     const fs = await import('node:fs/promises');
     const path = await import('node:path');
-    const tempPath = path.join(os.tmpdir(), `mk-${Date.now()}-${filename}`);
+    const crypto = await import('node:crypto');
+    // SECURITY (path traversal → arbitrary file write): the local temp path
+    // must NEVER be derived from the client-supplied upload `filename`.
+    // `generateKey()` sanitizes only the STORAGE key — a raw filename like
+    // `../../../home/user/.bashrc` fed to `path.join(os.tmpdir(), filename)`
+    // normalizes back out of tmpdir and writes the attacker-controlled buffer
+    // to an arbitrary path (potential RCE). Use a collision-resistant random
+    // name with a safe extension derived from the validated video MIME type —
+    // no client input touches the path at all.
+    const safeExt = getExtension(mimeType).replace(/[^a-z0-9]/gi, '') || 'bin';
+    const tempPath = path.join(os.tmpdir(), `mk-${crypto.randomUUID()}.${safeExt}`);
     try {
       await fs.writeFile(tempPath, buffer);
       const [thumbResult, metaResult] = await Promise.allSettled([

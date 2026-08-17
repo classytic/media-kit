@@ -1,7 +1,7 @@
 /**
  * Media Kit Default Configuration
  */
-import type { MediaKitConfig } from './types';
+import type { MediaKitConfig } from './types/config.js';
 import { FILE_TYPE_PRESETS } from './utils/mime';
 import { resolveProcessingPreset } from './processing/presets';
 

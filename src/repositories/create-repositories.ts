@@ -10,7 +10,8 @@ import {
   cachePlugin,
   type PluginType,
 } from '@classytic/mongokit';
-import type { ImageAdapter, MediaKitLogger } from '../types.js';
+import type { ImageAdapter } from '../types/processing.js';
+import type { MediaKitLogger } from '../types/config.js';
 import type { EventTransport } from '@classytic/primitives/events';
 import type { ResolvedMediaConfig } from '../engine/engine-types.js';
 import type { DriverRegistry } from '../providers/driver-registry.js';
@@ -32,7 +33,7 @@ export interface CreateRepositoriesDeps {
   processorReady?: Promise<void> | null;
   logger?: MediaKitLogger;
   bridges?: MediaBridges;
-  /** Shared HMAC URL signer — constructed by createMedia() from `config.signing`. */
+  /** Shared HMAC URL signer — constructed by bind() from `shape.signing`. */
   signing?: UrlSigner;
 }
 

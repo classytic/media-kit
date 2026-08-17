@@ -2,7 +2,7 @@
  * Built-in responsive image presets and processing presets.
  * Follows Next.js image optimization conventions.
  */
-import type { SizeVariant, ProcessingConfig, ProcessingPresetName } from '../types';
+import type { SizeVariant, ProcessingConfig, ProcessingPresetName } from '../types/processing.js';
 
 /** Next.js standard device widths */
 export const DEVICE_WIDTHS = [640, 750, 828, 1080, 1200, 1920, 2048, 3840] as const;
@@ -56,10 +56,9 @@ export function resolvePresetWidths(preset: 'nextjs' | 'compact' | 'none' | numb
  *
  * @example
  * ```ts
- * const media = createMedia({
- *   driver: gcsDriver,
+ * const media = await defineMedia({
  *   processing: { preset: 'social-media' },
- * });
+ * }).bind(connection, { driver: gcsDriver });
  * ```
  */
 export const PROCESSING_PRESETS: Record<ProcessingPresetName, Partial<ProcessingConfig>> = {

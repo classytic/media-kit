@@ -16,11 +16,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTestEngine, teardownTestMongo } from '../helpers/create-test-engine.js';
-import { createMedia } from '../../src/engine/create-media.js';
+import { bindMediaFlat as createMedia } from '../helpers/create-test-engine.js';
 import type { MediaEngine } from '../../src/engine/engine-types.js';
 import { LocalProvider } from '../../src/providers/local.provider.js';
 import { createAssetTransform, type AssetTransformService } from '../../src/transforms/asset-transform.js';
-import type { TransformResponse } from '../../src/types.js';
+import type { TransformResponse } from '../../src/types/index.js';
 
 const BUF = (s: string) => Buffer.from(s, 'utf-8');
 
@@ -220,7 +220,7 @@ describe('serve matrix over LocalProvider', () => {
     baseDir = mkdtempSync(join(tmpdir(), 'media-kit-private-'));
     // Reuse the shared mongo connection from the test-engine helper.
     const handle = await createTestEngine();
-    await handle.engine.dispose();
+    await handle.engine.close();
 
     engine = await createMedia({
       connection: handle.connection,
@@ -248,7 +248,7 @@ describe('serve matrix over LocalProvider', () => {
   });
 
   afterAll(async () => {
-    await engine.dispose();
+    await engine.close();
     rmSync(baseDir, { recursive: true, force: true });
     await teardownTestMongo();
   });
@@ -257,6 +257,9 @@ describe('serve matrix over LocalProvider', () => {
     const res = await service.handle({ fileId: publicId, params: {} });
     expect(res.status).toBe(200);
     expect(res.headers['Cache-Control']).toBe('public, max-age=86400');
+    // Served bytes carry nosniff so a browser can't MIME-sniff them into a
+    // more dangerous type than the declared Content-Type.
+    expect(res.headers['X-Content-Type-Options']).toBe('nosniff');
     expect((await readBody(res)).toString()).toBe(PUBLIC_CONTENT);
   });
 

@@ -15,6 +15,12 @@ export default defineConfig({
     resumable: 'src/resumable/index.ts',
     schemas: 'src/validators/index.ts',
     signing: 'src/signing/index.ts',
+    types: 'src/types/index.ts',
+    'types/storage': 'src/types/storage.ts',
+    'types/media': 'src/types/media.ts',
+    'types/processing': 'src/types/processing.ts',
+    'types/uploads': 'src/types/uploads.ts',
+    'types/config': 'src/types/config.ts',
   },
   format: ['esm'],
   dts: true,
@@ -26,5 +32,14 @@ export default defineConfig({
   attw: {
     profile: 'esm-only',
   },
-  deps: { skipNodeModulesBundle: true },
+  deps: {
+    skipNodeModulesBundle: true,
+    // Explicit scope patterns so the rule does not depend on `skipNodeModulesBundle` to
+    // be correct. media-kit has seven `@classytic/*` deps; inlining one would put two
+    // copies of a stateful kernel in one process — a correctness bug, not a size
+    // regression — and a build that does it still prints `✔ Build complete`.
+    // `@spinekit/` is listed because a scope that stops matching after a rename still
+    // reports success (commerce/AGENTS.md §"eight things that are NOT a source grep").
+    neverBundle: [/^@classytic\//, /^@spinekit\//],
+  },
 });

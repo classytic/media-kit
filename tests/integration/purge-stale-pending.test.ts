@@ -14,7 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import { createMedia } from '../../src/engine/create-media.js';
+import { bindMediaFlat as createMedia } from '../helpers/create-test-engine.js';
 import type { MediaEngine } from '../../src/engine/engine-types.js';
 import { LocalProvider } from '../../src/providers/local.provider.js';
 import { STALE_PENDING_MAX_AGE_MS } from '../../src/repositories/media.repository.js';
@@ -108,7 +108,7 @@ describe('purgeStalePending()', () => {
     const doc = await engine.models.Media.findById(stale.id);
     expect(doc).toBeNull();
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('leaves a fresh pending row untouched (default 24h cutoff)', async () => {
@@ -123,7 +123,7 @@ describe('purgeStalePending()', () => {
     const doc = await engine.models.Media.findById(fresh.id);
     expect(doc).not.toBeNull();
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('leaves a ready row older than the cutoff untouched', async () => {
@@ -138,7 +138,7 @@ describe('purgeStalePending()', () => {
     const doc = await engine.models.Media.findById(old.id);
     expect(doc).not.toBeNull();
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('removes the DB row without throwing when the storage object is missing', async () => {
@@ -155,7 +155,7 @@ describe('purgeStalePending()', () => {
     const doc = await engine.models.Media.findById(stale.id);
     expect(doc).toBeNull();
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('respects an explicit olderThan cutoff', async () => {
@@ -170,7 +170,7 @@ describe('purgeStalePending()', () => {
     expect(purged).toBe(1);
     expect(await engine.models.Media.countDocuments({})).toBe(1);
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('publishes media:asset.purged with reason stale_pending', async () => {
@@ -187,7 +187,7 @@ describe('purgeStalePending()', () => {
     expect(event.payload.reason).toBe('stale_pending');
     expect(event.payload.olderThan).toBeInstanceOf(Date);
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('does not publish media:asset.purged when nothing was stale', async () => {
@@ -200,7 +200,7 @@ describe('purgeStalePending()', () => {
 
     expect(handler).not.toHaveBeenCalled();
 
-    await engine.dispose();
+    await engine.close();
   });
 
   it('exports a documented 24h default staleness window', () => {

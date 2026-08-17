@@ -18,18 +18,21 @@
  * ```ts
  * import { ImgbbProvider } from '@classytic/media-kit/providers/imgbb';
  *
- * const engine = await createMedia({
- *   connection: mongoose.connection,
- *   driver: new ImgbbProvider({ apiKey: process.env.IMGBB_KEY }),
+ * const engine = await defineMedia({
  *   tenant: { enabled: true, field: 'organizationId' },
  *   processing: { enabled: false }, // imgbb stores originals only
+ * }).bind(mongoose.connection, {
+ *   driver: new ImgbbProvider({ apiKey: process.env.IMGBB_KEY }),
  * });
  * ```
  */
 
 import { Readable } from 'node:stream';
-import type { FileStat, StorageDriver, WriteResult } from '../types.js';
+import type { FileStat, StorageDriver, WriteResult } from '../types/storage.js';
 import { LazySecret, type SecretValue, validateSecretValue } from '../utils/lazy-secret.js';
+import { uploadFetch, metadataFetch, streamFetch } from './http.js';
+
+export type { StorageDriver, WriteResult, FileStat } from '../types/storage.js';
 
 /** Separator that cannot appear in HTTP URLs. */
 const SEP = '\n';
@@ -109,7 +112,7 @@ export class ImgbbProvider implements StorageDriver {
     body.set('name', name);
 
     const apiKey = await this.apiKeySecret.resolve();
-    const res = await fetch(`https://api.imgbb.com/1/upload?key=${apiKey}`, {
+    const res = await uploadFetch(`https://api.imgbb.com/1/upload?key=${apiKey}`, {
       method: 'POST',
       body,
     });
@@ -143,7 +146,7 @@ export class ImgbbProvider implements StorageDriver {
    */
   async read(key: string): Promise<NodeJS.ReadableStream> {
     const { displayUrl } = parseKey(key);
-    const res = await fetch(displayUrl);
+    const res = await streamFetch(displayUrl);
 
     if (!res.ok) {
       throw new Error(`imgbb read failed (${res.status}): ${displayUrl}`);
@@ -163,7 +166,7 @@ export class ImgbbProvider implements StorageDriver {
     if (!deleteUrl) return false;
 
     try {
-      await fetch(deleteUrl, { method: 'GET' });
+      await metadataFetch(deleteUrl, { method: 'GET' });
     } catch {
       // Best-effort — network failures must not block DB removal.
     }
@@ -176,7 +179,7 @@ export class ImgbbProvider implements StorageDriver {
   async exists(key: string): Promise<boolean> {
     const { displayUrl } = parseKey(key);
     try {
-      const res = await fetch(displayUrl, { method: 'HEAD' });
+      const res = await metadataFetch(displayUrl, { method: 'HEAD' });
       return res.ok;
     } catch {
       return false;
@@ -188,7 +191,7 @@ export class ImgbbProvider implements StorageDriver {
    */
   async stat(key: string): Promise<FileStat> {
     const { displayUrl } = parseKey(key);
-    const res = await fetch(displayUrl, { method: 'HEAD' });
+    const res = await metadataFetch(displayUrl, { method: 'HEAD' });
 
     if (!res.ok) {
       throw new Error(`imgbb stat failed (${res.status}): ${displayUrl}`);

@@ -5,18 +5,15 @@
 
 import crypto from 'node:crypto';
 import { createError } from '@classytic/repo-core/errors';
-import type { OperationDeps, ConfigOnlyDeps } from './types';
-import type {
-  OperationContext,
-  AspectRatioPreset,
-  StorageDriver,
-  WriteResult,
-  GeneratedVariant,
-  MediaEventName,
-  RewriteResult,
-} from '../types';
+import type { OperationDeps, ConfigOnlyDeps } from './types.js';
+import type { AspectRatioPreset, GeneratedVariant } from '../types/processing.js';
+import type { StorageDriver, WriteResult } from '../types/storage.js';
+import type { OperationContext } from '../types/uploads.js';
+import type { RewriteResult } from '../types/folders.js';
+import type { LegacyProgressEventName } from './event-types.js';
 import { isAllowedMimeType } from '../utils/mime';
 import { isExternalMedia } from '../utils/external';
+import { detectDangerousMismatch } from '../utils/content-sniff';
 
 /**
  * Rebind an OperationDeps bag to a specific storage driver.
@@ -242,8 +239,7 @@ export function assertGeneratedKeyShape(key: string): GeneratedKeyShape {
   if (!GENERATED_KEY_BASENAME.test(basename)) fail('basename does not match the generated-key format');
 
   const maybeTenant = segments.length >= 3 ? segments[segments.length - 2]! : undefined;
-  const tenantSegment =
-    maybeTenant !== undefined && maybeTenant.startsWith(TENANT_SEGMENT_PREFIX) ? maybeTenant : undefined;
+  const tenantSegment = maybeTenant?.startsWith(TENANT_SEGMENT_PREFIX) ? maybeTenant : undefined;
   if (tenantSegment !== undefined && !TENANT_SEGMENT_SHAPE.test(tenantSegment)) {
     fail('malformed tenant segment');
   }
@@ -285,7 +281,7 @@ export function validateFile(deps: ConfigOnlyDeps, buffer: Buffer, filename: str
     throw new Error(`Cannot upload empty file '${filename}'. Buffer is empty or missing.`);
   }
 
-  const { allowed = [], maxSize } = deps.config.fileTypes || {};
+  const { allowed = [], maxSize, verifyContent } = deps.config.fileTypes || {};
 
   if (allowed.length > 0 && !isAllowedMimeType(mimeType, allowed)) {
     throw new Error(`File type '${mimeType}' is not allowed. Allowed: ${allowed.join(', ')}`);
@@ -294,6 +290,16 @@ export function validateFile(deps: ConfigOnlyDeps, buffer: Buffer, filename: str
   if (maxSize && buffer.length > maxSize) {
     const maxMB = Math.round(maxSize / 1024 / 1024);
     throw new Error(`File size exceeds limit of ${maxMB}MB`);
+  }
+
+  // Strict profile: the declared MIME can lie (it comes from the client on
+  // both direct upload and URL import). Reject content that sniffs as active
+  // HTML/SVG while declaring an inert binary type — the stored-XSS shape.
+  if (verifyContent) {
+    const mismatch = detectDangerousMismatch(buffer, mimeType);
+    if (mismatch) {
+      throw new Error(`File content does not match its declared type: ${mismatch}`);
+    }
   }
 }
 
@@ -408,7 +414,7 @@ export async function executeKeyRewrite(
   files: RewritableFile[],
   mapFile: (file: RewritableFile) => KeyRewriteMapping,
   mapVariantKey: (variantKey: string) => string,
-  progressEvent: MediaEventName,
+  progressEvent: LegacyProgressEventName,
   context?: OperationContext,
 ): Promise<RewriteResult> {
   const total = files.length;

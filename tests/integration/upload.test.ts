@@ -157,6 +157,22 @@ describe('MediaRepository — upload domain verbs', () => {
     });
   });
 
+  describe('uploadManySettled()', () => {
+    it('reports per-input successes AND failures indexed by position', async () => {
+      const result = await handle.engine.repositories.media.uploadManySettled([
+        { buffer: BUF('a'), filename: 'a.txt', mimeType: 'text/plain' },
+        { buffer: Buffer.alloc(0), filename: 'empty.txt', mimeType: 'text/plain' }, // index 1 — fails
+        { buffer: BUF('c'), filename: 'c.txt', mimeType: 'text/plain' },
+      ]);
+
+      expect(result.succeeded.map((s) => s.index)).toEqual([0, 2]);
+      expect(result.succeeded.every((s) => s.media.status === 'ready')).toBe(true);
+      expect(result.failed).toHaveLength(1);
+      expect(result.failed[0]!.index).toBe(1);
+      expect(result.failed[0]!.reason).toMatch(/empty/i);
+    });
+  });
+
   describe('deduplication', () => {
     it('returns existing doc when dedup is enabled and hash matches', async () => {
       const { engine, cleanup } = await createTestEngine({

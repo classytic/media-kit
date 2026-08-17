@@ -3,6 +3,225 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 3.9.0 — 2026-08-17
+
+### Changed — peer floors `@classytic/mongokit >=3.30.0`, `@classytic/repo-core >=0.20.0`
+
+- media-kit's model layer binds through mongokit's `defineModels` /
+  `ModelBlueprint` kernel-construction API — `defineMedia(shape).bind(connection,
+  runtime)` (STANDARDIZATION-PLAN §5) — which first ships in mongokit 3.30
+  (the `dist` imports `defineModels`, so it is a hard runtime dependency). The
+  previous floors (`mongokit >=3.14.0`, `repo-core >=0.5.0`) predated that
+  adoption and were unsafe: a host on an earlier mongokit crashes with
+  `defineModels is not exported`. mongokit 3.30 requires repo-core >=0.20, so
+  the two floors move together. Validated green against mongokit 3.30.0 /
+  repo-core 0.20.0 (851 tests). Matches the same correction made in
+  `@classytic/streamline` 3.0.0.
+
+### Security / reliability — distributed-deployment hardening (review round 3)
+
+- **TUS lock is now token-fenced.** `TusSessionStore`'s lock is a trio —
+  `acquireLock(id, leaseMs) → { token, expiresAt } | null`, `renewLock(id,
+  token, leaseMs)`, `releaseLock(id, token)`. The ownership token closes the
+  lease-expiry hazard (worker A's expired lease can no longer be freed or
+  overwritten after worker B takes over). The lock uses a short **operation
+  lease** (`lockLeaseMs`, default 30s — NOT the 24h session TTL) and
+  auto-renews as a long PATCH streams; a lost renewal stops the write and
+  returns `409` to re-sync. A custom store with no lock and no
+  `singleReplica: true` logs a one-time boot warning. The `tus-resumable-uploads`
+  guide documents the sticky-routing vs. distributed-lock choice with a Redis
+  `SET NX PX` recipe.
+- **Provider timeouts now cover the FULL operation, not just headers.**
+  `providerFetch` keeps its deadline armed through response-body parsing
+  (`res.json()`/`res.text()`) via an `unref()`d timer; streaming reads use a new
+  `streamFetch` with a header deadline plus a per-chunk **idle watchdog** (a
+  socket that goes silent mid-download is aborted). `read()` on every provider
+  switched to `streamFetch`.
+- **Provider timeout errors no longer leak secrets.** `redactUrl()` strips the
+  query string (imgbb's API key lived there) and userinfo — errors carry only
+  scheme/host/path.
+- **`hardDelete()` no longer swallows read errors.** `getById` already returns
+  null for not-found (`throwOnNotFound: false`), so the blanket `catch → false`
+  only hid real faults (DB outage, auth, plugin errors) as a false "deleted".
+  Removed — unexpected errors now propagate.
+
+### Fixed / hardened — mediums
+
+- **`purgeExpired()` uses a forward `_id` cursor** instead of a growing `$nin`
+  exclusion array (which could approach MongoDB's command-size limit under many
+  failures). Each candidate is scanned exactly once; the loop still terminates
+  on a stuck delete.
+- **`StorageRouter` resumable ownership survives restart / replicas.** The owning
+  driver is encoded into the returned `uploadUrl` as a `#__mkdriver=<name>`
+  fragment (client-side only — never sent on chunk PUTs, round-tripped to
+  abort/status), with the in-memory map as a same-process fast path. An
+  unresolvable session now **fails explicitly** instead of silently routing to
+  the default driver.
+- **`Semaphore` gained admission control.** Optional `maxQueue` (503
+  `media.overloaded` when the waiting queue is full — queued closures retain
+  upload buffers, an OOM vector), `acquireTimeoutMs` / per-acquire `signal`
+  (503 `media.acquire_timeout` / `media.acquire_aborted`), and `stats()`
+  metrics. Wired to `concurrency.maxQueue` / `concurrency.acquireTimeoutMs`
+  (both default to the previous unbounded behavior).
+- **Deduplication documented as best-effort.** `DeduplicationConfig` now states
+  plainly that it is a check-then-create LOOKUP (not race-fenced), collapses
+  sequential re-uploads only, and identifies on `(tenant, hash)` alone — for a
+  hard guarantee add a unique partial index.
+- **Opt-in magic-byte content verification.** `fileTypes.verifyContent: true`
+  makes `validateFile()` sniff the buffer and reject a dangerous
+  declared/detected mismatch (content declared `image/*` but sniffing as
+  HTML/SVG — the stored-XSS shape). Conservative: unrecognized bytes are never
+  rejected. New `src/utils/content-sniff.ts`.
+
+### Changed — peer floor `@classytic/primitives` `>=0.15.0`
+
+- Tracks the ecosystem head (dev `^0.15.0`). 0.15 is strictly additive over
+  0.14 (`/event-infra` `propagateHandlerErrors`, `/money` scalar helpers) — no
+  media-kit code change required; the bump keeps the fleet aligned.
+
+### Added — honest storage/DB consistency contract for destructive verbs
+
+Object storage cannot roll back inside a database transaction, so the package
+now makes its real guarantees explicit instead of implying atomicity it can't
+deliver (per the production-hardening review).
+
+- **`hardDelete` is now two-phase (tombstone-first).** It claims a new
+  `status: 'deleting'` tombstone BEFORE any storage delete, deletes the bytes,
+  and only then removes the DB row. A storage-delete failure PROPAGATES — the
+  row stays a visible tombstone rather than a `ready` doc pointing at
+  already-deleted bytes (or the row being removed while bytes are orphaned, the
+  previous best-effort behavior). `purgeStalePending()` re-drives stale
+  `deleting` tombstones to completion (delete is idempotent, so a
+  partially-finished pass is safely retried). New terminal state `'deleting'`
+  on `MediaStatus`, the schema enum, and `MEDIA_MACHINE` (every live state →
+  `deleting`).
+- **Destructive verbs reject an externally-managed `ctx.session`.**
+  `hardDelete`, `hardDeleteMany`, and `replace` throw `400`
+  `media.tx.external_session_unsupported` when handed a host transaction —
+  they mutate storage, which the transaction can't roll back, so they must run
+  AFTER commit. (Soft delete and reads are unaffected — they're DB-only and
+  stay transaction-safe.)
+- Regression: `tests/integration/delete-consistency.test.ts` (happy path,
+  crash-after-tombstone → sweep recovery, session rejection on hardDelete +
+  replace) and the updated `tests/unit/media-state-machine.test.ts`.
+
+### Added — TUS cross-replica locking (`TusSessionStore.acquireLock`)
+
+- `TusSessionStore` gained optional `acquireLock(id, leaseMs)` / `releaseLock(id)`
+  (the tusd `Locker` pattern — an atomic Redis `SET NX PX` / DB row lock). When
+  implemented, PATCH concurrency is single-writer ACROSS replicas; a second
+  concurrent PATCH gets `423 Locked` instead of two replicas reading the same
+  offset and corrupting the staged object. When absent, the service falls back
+  to the previous process-local set — now explicitly documented as requiring
+  sticky single-replica routing rather than being silently unsafe. Tests:
+  `tests/unit/tus-resumable.test.ts` (held store-lock → 423; acquire+release
+  around a successful PATCH).
+
+### Added — bounded provider HTTP policy (`src/providers/http.ts`)
+
+- Every provider (`imagekit`, `cloudinary`, `cloudflare-images`, `imgbb`, `gcs`
+  resumable) that talks to a remote API over `fetch()` now goes through a shared
+  `providerFetch` with a **finite deadline** — a bare `fetch()` has no timeout,
+  so a stalled dependency could hold an upload-semaphore slot forever and
+  eventually wedge all uploads. Two tiers: `upload` (120s, body transfers) and
+  `metadata` (30s, control-plane ops). The deadline bounds *time-to-response-
+  headers* then clears, so it caps a non-responding provider (including a slow
+  `write()`, whose POST resolves only once the server has taken the whole body)
+  WITHOUT truncating a legitimate large `read()` stream. A caller `signal`
+  composes via `AbortSignal.any`; timeouts surface as a normalized error.
+  (Bounded retries with jitter for idempotent ops are a deliberate follow-up —
+  not added here, to avoid any double-write risk.) Tests:
+  `tests/unit/provider-http.test.ts`.
+
+### Added — `uploadManySettled()` (per-input success/failure reporting)
+
+- `repo.uploadManySettled(inputs, ctx)` returns `{ succeeded: [{ index, media }],
+  failed: [{ index, reason }] }` so callers know exactly which inputs failed and
+  why (a rejected scan verdict, validation error, storage fault) instead of
+  silently dropping them. The existing `uploadMany()` (successes only) is kept
+  for compatibility and now delegates to the settled form. New exported type
+  `UploadManyResult`. Test: `tests/integration/upload.test.ts`.
+
+### Fixed — TUS rejects an oversized streamed PATCH mid-stream
+
+- `appendBody()` wrote the ENTIRE incoming PATCH stream to disk before the
+  handler checked whether the resulting offset exceeded the declared
+  `Upload-Length` — so a client could declare a small upload and stream an
+  arbitrarily large body, exhausting disk/bandwidth before rejection. The
+  remaining-length allowance is now enforced WHILE streaming: the append aborts
+  the moment the running total crosses it (bounding staged growth to at most the
+  allowance + one chunk) and the session is destroyed with a `400`. Regression:
+  `tests/unit/tus-resumable.test.ts` (a 3-chunk generator is stopped early — the
+  final chunk is never pulled).
+
+### Security — `X-Content-Type-Options: nosniff` on served bytes
+
+- The serving path (`AssetTransformService` — raw serve, range serve, transform
+  output, and cache hits) now sets `X-Content-Type-Options: nosniff`, so a
+  browser can't MIME-sniff served bytes into a more dangerous type than the
+  declared `Content-Type` (an "image" that sniffs as HTML/JS → stored XSS). The
+  declared type is authoritative. Test: `tests/integration/private-media.test.ts`.
+
+### Security — URL imports now go through the canonical scan pipeline
+
+- **`importFromUrl()` no longer bypasses the malware/moderation scan bridge.**
+  It ran its own legacy upload path (`src/operations/upload.ts`) that never
+  consulted `bridges.scan`, so externally-fetched bytes could skip scanning and
+  quarantine entirely. URL import is now split into two phases: a download-only
+  `downloadFromUrl()` (all the SSRF machinery — private-IP block, IP pinning,
+  size cap — unchanged) feeding the canonical `repo.upload()`, so imports
+  inherit the exact same validation, scan verdict handling (reject → throw,
+  quarantine → `status: 'error'`), dedup, provider routing, and domain events
+  as a direct upload. The **duplicate 444-line legacy upload pipeline is
+  deleted** (it was reachable only from URL import). Regression:
+  `tests/integration/url-import-scan.test.ts` (scan consulted on import;
+  reject/clean/quarantine verdicts) + reworked
+  `tests/unit/url-import-provider.test.ts` (verb-level provider/field threading).
+- **SSRF hardening** in the same path: IPv6 link-local detection now covers the
+  full `fe80::/10` range (first hextet `0xfe80..0xfebf`) instead of only the
+  literal `fe80` prefix (which missed `fe81..febf`); and redirect responses are
+  now destroyed before following `Location` (previously leaked the socket).
+
+### Fixed — `purgeExpired()` could loop forever on a stuck delete
+
+- `purgeExpiredVerb()` re-fetched page 1 each iteration on the assumption that a
+  successful `hardDelete` shrinks the result set — but a doc whose delete
+  ALWAYS fails stayed on page 1 forever, hanging the cron worker and hammering
+  the storage provider. Failed ids are now excluded from the query (`_id:
+  { $nin }`), so every iteration strictly shrinks the candidate set and the loop
+  always terminates; failures are still reported in `result.failed`. Regression:
+  `tests/integration/expiry-provider-metadata.test.ts` (a poison doc whose
+  delete always throws — the purge terminates and reports it).
+
+## [3.8.0] — 2026-07-23
+
+### Changed — primitives `>=0.14.0`: adopt the shared `/event-infra` bus
+
+- **`InProcessMediaBus` is now a thin subclass of `InProcessEventBus`** from
+  `@classytic/primitives/event-infra` (new in primitives 0.14 — the single
+  reference in-process runtime that replaced the ~26 drifted per-kernel
+  `in-process-bus.ts` copies). The public class name, the `'in-process-media'`
+  transport name, and the constructor (`{ logger }`) are unchanged — only the
+  implementation is now shared, so nothing in media-kit's API surface moves.
+  media-kit's historical default (no logger → swallow handler errors silently)
+  is preserved by passing `logger: null` to the base bus. The shared bus also
+  Set-dedups a handler subscribed under multiple overlapping patterns (fires
+  once per event, matching arc's `MemoryEventTransport`); the old copy fired
+  once per matching subscription.
+- **Peer floor raised: `@classytic/primitives` `>=0.6.0` → `>=0.14.0`.**
+  Required by `/event-infra` above; 0.14 additionally relaxes `/events`
+  `EventTransport.subscribe` to OPTIONAL, so the `EventTransport` type media-kit
+  re-exports now accepts publish-only transports (host wrappers around a bare
+  `publish()` helper) without a cast. This reverses the "peer floors unchanged"
+  note under 3.7.0 for primitives specifically.
+- **Dev deps refreshed to the live npm line**: mongokit `^3.25.0`, repo-core
+  `^0.14.0`, primitives `^0.14.0` (installed from npm per PACKAGE_RULES — no
+  cp-dist / file / workspace links). mongokit 3.25's adapter imports
+  `matchesRecordFilter` from `@classytic/repo-core/filter` (a 0.14 addition),
+  which is why repo-core moves in lockstep. Suite validated green (770 tests)
+  against this set; media-kit's own repo-core imports (`/errors`,
+  `/pagination`, `/tenant`) are untouched by the 0.13→0.14 additive delta.
+
 ## [3.7.1] — 2026-07-16
 
 ### Fixed
@@ -18,9 +237,11 @@ adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Note — validated on latest kits; sharp 0.35 compatibility
 
 - Suite validated green (770 tests) against mongokit 3.22.2 / repo-core
-  0.13.0 / primitives 0.11.0 (dev-only — PEER FLOORS DELIBERATELY
-  UNCHANGED: media-kit uses no post-3.14 mongokit API, and per fleet
-  convention peers stay open `>=` ranges at the true minimum).
+  0.13.0 / primitives 0.11.0 (dev-only — peer floors unchanged at this
+  release: media-kit uses no post-3.14 mongokit API, and per fleet
+  convention peers stay open `>=` ranges at the true minimum). NOTE: the
+  primitives floor was subsequently raised to `>=0.14.0` in 3.8.0 when
+  media-kit adopted the shared `/event-infra` bus — see that entry.
 - The presigned lifecycle's `assertAndClaim` null-branches (skip
   redundant reprocess / delete orphaned variants on finalize race /
   best-effort revert) are LOAD-BEARING compensation logic — deliberately

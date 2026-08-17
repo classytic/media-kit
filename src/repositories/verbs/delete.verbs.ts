@@ -7,12 +7,34 @@
  * delegates that preserve the public API surface.
  */
 
-import type { IMediaDocument, BulkResult } from '../../types.js';
+import { createError } from '@classytic/repo-core/errors';
+import type { IMediaDocument } from '../../types/media.js';
+import type { BulkResult } from '../../types/folders.js';
 import type { MediaContext } from '../../engine/engine-types.js';
 import { MEDIA_EVENTS } from '../../events/event-constants.js';
 import { createMediaEvent } from '../../events/helpers.js';
 import { isExternalMedia } from '../../utils/external.js';
 import type { MediaRepository } from '../media.repository.js';
+
+/**
+ * Destructive verbs mutate OBJECT STORAGE, which no database transaction can
+ * roll back. Accepting a host-managed session would imply atomicity the
+ * package cannot deliver (an aborted transaction would resurrect DB rows whose
+ * bytes are already gone). Fail fast instead of lying — run destructive verbs
+ * OUTSIDE the transaction, after it commits.
+ */
+function assertNoExternalSession(ctx: MediaContext | undefined, verb: string): void {
+  if (ctx && 'session' in ctx && (ctx as { session?: unknown }).session != null) {
+    const err = createError(
+      400,
+      `[media-kit] ${verb}() does not accept an externally-managed ctx.session — ` +
+        `it deletes/overwrites object storage, which cannot roll back with your transaction. ` +
+        `Call it after the transaction commits.`,
+    );
+    err.code = 'media.tx.external_session_unsupported';
+    throw err;
+  }
+}
 
 /**
  * Default staleness window for `purgeStalePending()`: 24 hours.
@@ -28,13 +50,31 @@ export const STALE_PENDING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  * Use repo.delete(id) for soft delete (when softDeletePlugin is wired).
  */
 export async function hardDeleteVerb(repo: MediaRepository, id: string, ctx?: MediaContext): Promise<boolean> {
-  let media: IMediaDocument | null;
-  try {
-    media = await repo.getById(id, { ...ctx, includeDeleted: true, throwOnNotFound: false });
-  } catch {
-    return false;
-  }
+  assertNoExternalSession(ctx, 'hardDelete');
+
+  // `throwOnNotFound: false` already returns null for a missing row, so any
+  // THROW here is a real fault (DB outage, auth failure, malformed query,
+  // plugin error) — it must propagate, not be swallowed into a `false` that a
+  // caller would record as a successful idempotent no-op.
+  const media = await repo.getById(id, { ...ctx, includeDeleted: true, throwOnNotFound: false });
   if (!media) return false;
+
+  // Two-phase tombstone: claim `status: 'deleting'` BEFORE any storage delete.
+  // If the process crashes mid-delete, what's left is a visible tombstone —
+  // never a "ready" record whose bytes are already gone. The stale-pending
+  // sweep re-drives tombstones to completion (this verb is idempotent for
+  // docs already in 'deleting'). Plain update — no CAS: any live status may
+  // transition to 'deleting', and concurrent deleters are already handled by
+  // the idempotent "not found → success" race rule below.
+  if (media.status !== 'deleting') {
+    try {
+      await repo.update(id, { status: 'deleting' }, { ...ctx, includeDeleted: true } as Record<string, unknown>);
+    } catch (err) {
+      // A vanished row means a parallel deleter won — that's success.
+      if (/not found/i.test((err as Error).message)) return true;
+      throw err;
+    }
+  }
 
   const variantKeys = (media.variants || []).map((v) => v.key);
 
@@ -47,25 +87,28 @@ export async function hardDeleteVerb(repo: MediaRepository, id: string, ctx?: Me
     // Resolve the driver that stored this file (fall back to default for pre-multi-provider docs)
     const driver = repo.registry.resolve(media.provider ?? repo.registry.defaultName);
 
-    // Delete from storage (best-effort)
-    try {
-      await driver.delete(media.key);
-    } catch (err) {
-      repo._log('warn', 'Failed to delete main file from storage', {
-        id,
-        key: media.key,
-        error: (err as Error).message,
-      });
-    }
-    for (const variant of media.variants || []) {
+    // Storage delete comes BEFORE the DB removal, and a failure PROPAGATES —
+    // the row stays a `deleting` tombstone (never removed while bytes remain),
+    // and the stale-pending sweep re-drives it (delete is idempotent, so a
+    // partially-completed pass is safely retried). Attempt every key first so
+    // one bad variant doesn't strand the others, then surface the first error.
+    let firstDeleteError: Error | null = null;
+    for (const key of [media.key, ...variantKeys]) {
       try {
-        await driver.delete(variant.key);
-      } catch {
-        /* ignore */
+        await driver.delete(key);
+      } catch (err) {
+        firstDeleteError ??= err as Error;
+        repo._log('warn', 'Failed to delete object from storage (tombstone retained)', {
+          id,
+          key,
+          error: (err as Error).message,
+        });
       }
     }
+    if (firstDeleteError) throw firstDeleteError;
 
-    // Evict the deleted keys from the CDN edge (best-effort).
+    // Evict the deleted keys from the CDN edge (best-effort — a purge failure
+    // must not resurrect the tombstone; the bytes are already gone).
     await repo._purgeCdn([media.key, ...variantKeys], ctx);
   }
 
@@ -104,6 +147,7 @@ export async function hardDeleteManyVerb(
   ids: string[],
   ctx?: MediaContext,
 ): Promise<BulkResult> {
+  assertNoExternalSession(ctx, 'hardDeleteMany');
   const result: BulkResult = { success: [], failed: [] };
 
   await Promise.allSettled(
@@ -207,13 +251,20 @@ export async function purgeStalePendingVerb(
   ctx?: MediaContext,
 ): Promise<number> {
   const cutoff = olderThan ?? new Date(Date.now() - STALE_PENDING_MAX_AGE_MS);
-  // Plugin-routed read — multiTenant scopes by configured field. Pending
-  // rows are never soft-deleted (delete flows flip status or remove the
-  // row), so no `includeDeleted` needed here.
-  const found = await repo.getAll({ filters: { status: 'pending', createdAt: { $lt: cutoff } } }, {
-    lean: true,
-    ...repo._tenantOpts(ctx),
-  } as Record<string, unknown>);
+  // Plugin-routed read — multiTenant scopes by configured field. Two crash
+  // classes are reclaimed here:
+  //   - `pending`  — an upload that created its DB row but never wrote bytes.
+  //   - `deleting` — a hardDelete tombstone whose process died mid-delete;
+  //                  re-driving hardDelete finishes the storage + DB removal
+  //                  (idempotent — the doc is already claimed 'deleting').
+  // Neither is ever soft-deleted, so no `includeDeleted` needed.
+  const found = await repo.getAll(
+    { filters: { status: { $in: ['pending', 'deleting'] }, createdAt: { $lt: cutoff } } },
+    {
+      lean: true,
+      ...repo._tenantOpts(ctx),
+    } as Record<string, unknown>,
+  );
   const docs = (Array.isArray(found) ? found : (found as { data: unknown[] }).data) as Array<{ _id: unknown }>;
 
   let purged = 0;
@@ -259,10 +310,26 @@ export async function purgeExpiredVerb(repo: MediaRepository, before?: Date, ctx
   const result: BulkResult = { success: [], failed: [] };
   const BATCH = 100;
 
+  // Forward-only `_id` cursor: page over candidates in `_id`-ascending order,
+  // advancing PAST each batch (`_id > lastId`). This scans every candidate
+  // exactly once and terminates on a short/empty page — regardless of whether
+  // a given hardDelete succeeds (row vanishes) or fails (row stays behind the
+  // cursor, never re-fetched). It replaces the earlier page-1 + growing `$nin`
+  // approach, which fixed the infinite loop but let the exclusion array (and
+  // thus the query) grow without bound toward MongoDB's command-size limit.
+  let lastId: unknown;
+
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const found = await repo.getAll(
-      { filters: { expiresAt: { $ne: null, $lte: cutoff } }, pagination: { limit: BATCH, page: 1 } },
+      {
+        filters: {
+          expiresAt: { $ne: null, $lte: cutoff },
+          ...(lastId !== undefined ? { _id: { $gt: lastId } } : {}),
+        },
+        sort: { _id: 1 },
+        pagination: { limit: BATCH, page: 1 },
+      },
       { lean: true, includeDeleted: true, ...repo._tenantOpts(ctx) } as Record<string, unknown>,
     );
     const docs = (Array.isArray(found) ? found : (found as { data: unknown[] }).data) as Array<{ _id: unknown }>;
@@ -270,6 +337,7 @@ export async function purgeExpiredVerb(repo: MediaRepository, before?: Date, ctx
 
     for (const doc of docs) {
       const id = String(doc._id);
+      lastId = doc._id; // advance the cursor even when a delete fails
       try {
         await repo.hardDelete(id, ctx);
         result.success.push(id);
@@ -278,6 +346,8 @@ export async function purgeExpiredVerb(repo: MediaRepository, before?: Date, ctx
         repo._log('warn', 'Failed to purge expired asset', { id, error: (err as Error).message });
       }
     }
+
+    if (docs.length < BATCH) break; // partial page — no more candidates
   }
 
   await repo.events.publish(

@@ -6,7 +6,9 @@
  * delegates that preserve the public API surface.
  */
 
-import type { IMediaDocument, RewriteResult, ImportOptions, RegisterExternalInput } from '../../types.js';
+import type { IMediaDocument } from '../../types/media.js';
+import type { RewriteResult } from '../../types/folders.js';
+import type { ImportOptions, RegisterExternalInput } from '../../types/config.js';
 import type { MediaContext } from '../../engine/engine-types.js';
 import { MEDIA_EVENTS } from '../../events/event-constants.js';
 import { createMediaEvent } from '../../events/helpers.js';
@@ -104,9 +106,28 @@ export async function importFromUrlVerb(
   options?: ImportOptions,
   ctx?: MediaContext,
 ): Promise<IMediaDocument> {
-  // Delegate to existing import logic (has SSRF protection)
-  const { importFromUrl: importFn } = await import('../../operations/url-import.js');
-  const result = await importFn(repo._opDeps, url, options, repo._opCtx(ctx));
+  // Phase 1 — secure download only (SSRF guard, IP pinning, size cap).
+  const { downloadFromUrl } = await import('../../operations/url-import.js');
+  const { buffer, filename, mimeType } = await downloadFromUrl(repo._opDeps, url, options);
+
+  // Phase 2 — the CANONICAL upload path. URL imports now inherit the exact
+  // same validation, malware/moderation scan bridge, dedup, quarantine, and
+  // domain events as a direct upload — no parallel pipeline, no scan bypass.
+  const result = await repo.upload(
+    {
+      buffer,
+      filename,
+      mimeType,
+      ...(options?.folder !== undefined ? { folder: options.folder } : {}),
+      ...(options?.alt !== undefined ? { alt: options.alt } : {}),
+      ...(options?.title !== undefined ? { title: options.title } : {}),
+      ...(options?.tags !== undefined ? { tags: options.tags } : {}),
+      // Routes the imported bytes (main file AND processed variants) to the
+      // named driver; default provider when unset.
+      ...(options?.provider !== undefined ? { provider: options.provider } : {}),
+    },
+    ctx,
+  );
 
   await repo.events.publish(
     createMediaEvent(

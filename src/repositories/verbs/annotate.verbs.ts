@@ -6,7 +6,8 @@
  * delegates that preserve the public API surface.
  */
 
-import type { IMediaDocument, FocalPoint } from '../../types.js';
+import type { IMediaDocument } from '../../types/media.js';
+import type { FocalPoint } from '../../types/processing.js';
 import type { MediaContext } from '../../engine/engine-types.js';
 import { MEDIA_EVENTS } from '../../events/event-constants.js';
 import { createMediaEvent } from '../../events/helpers.js';

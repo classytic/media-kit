@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, afterAll, beforeEach, afterEach, vi } from 'vitest';
-import type { DomainEvent, EventHandler, EventTransport } from '../../src/events/transport.js';
+import type { DomainEvent, EventHandler, EventTransport } from '@classytic/primitives/events';
 import { createTestEngine, teardownTestMongo, type TestEngineHandle } from '../helpers/create-test-engine.js';
 import { MEDIA_EVENTS } from '../../src/events/event-constants.js';
 

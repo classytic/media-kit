@@ -46,14 +46,19 @@
  */
 
 import { defineStateMachine } from '@classytic/primitives/state-machine';
-import type { MediaStatus } from '../types.js';
+import type { MediaStatus } from '../types/media.js';
 
 export const MEDIA_MACHINE = defineStateMachine<MediaStatus>({
   name: 'Media',
   transitions: {
-    pending: ['processing', 'error'],
-    processing: ['ready', 'error'],
-    ready: ['processing'], // post-confirm reprocess on presigned uploads
-    error: [],
+    pending: ['processing', 'error', 'deleting'],
+    processing: ['ready', 'error', 'deleting'],
+    ready: ['processing', 'deleting'], // post-confirm reprocess on presigned uploads
+    error: ['deleting'],
+    // Hard-delete tombstone: the doc is claimed BEFORE any storage delete, so
+    // a crash mid-delete leaves a visible 'deleting' record (never dangling
+    // "ready" metadata pointing at missing bytes). The stale-pending sweep
+    // re-drives tombstones to completion. Terminal — only removal follows.
+    deleting: [],
   },
 });

@@ -8,7 +8,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
-import { createTusUpload, TUS_VERSION, type TusUploadService } from '../../src/resumable/index';
+import {
+  createTusUpload,
+  createMemoryTusSessionStore,
+  TUS_VERSION,
+  type TusUploadService,
+  type TusSessionStore,
+} from '../../src/resumable/index';
 import type { IMediaDocument } from '../../src/types';
 
 const stagingDir = mkdtempSync(join(tmpdir(), 'media-kit-tus-'));
@@ -120,6 +126,123 @@ describe('TUS — chunked upload lifecycle', () => {
     // Session is gone after completion.
     const head = await tus.handle({ method: 'HEAD', uploadId: id, headers: tusHeaders });
     expect(head.status).toBe(404);
+  });
+
+  it('rejects an oversized STREAMED PATCH mid-stream (does not fully stage it)', async () => {
+    const { tus } = service();
+    const created = await create(tus, 10); // declared length: 10 bytes
+    const id = idOf(created.headers.Location);
+
+    // A body that would stream 18 bytes (3 × 6) though only 10 are allowed.
+    // The generator counts how many chunks are actually pulled — a mid-stream
+    // abort must stop it BEFORE it yields everything.
+    let pulled = 0;
+    async function* oversized(): AsyncGenerator<Uint8Array> {
+      for (let i = 0; i < 3; i++) {
+        pulled++;
+        yield new Uint8Array(6);
+      }
+    }
+
+    const res = await tus.handle({
+      method: 'PATCH',
+      uploadId: id,
+      headers: { ...tusHeaders, 'Content-Type': 'application/offset+octet-stream', 'Upload-Offset': '0' },
+      body: oversized(),
+    });
+
+    expect(res.status).toBe(400);
+    // Early abort: the 2nd chunk crosses 10 bytes, so the 3rd was never pulled.
+    expect(pulled).toBeLessThan(3);
+    // The session was destroyed on overflow.
+    const head = await tus.handle({ method: 'HEAD', uploadId: id, headers: tusHeaders });
+    expect(head.status).toBe(404);
+  });
+
+  it('uses the store lock (cross-replica) when provided; a held lock → 423', async () => {
+    // A store that reports the lock as ALREADY HELD (null) — as a second
+    // replica would see mid-PATCH on the first — must refuse with 423 Locked.
+    const base = createMemoryTusSessionStore();
+    const acquireLock = vi.fn(async () => null);
+    const releaseLock = vi.fn(async () => {});
+    const store: TusSessionStore = { ...base, acquireLock, releaseLock };
+
+    const { tus } = service({ sessions: store });
+    const created = await create(tus, 10);
+    const id = idOf(created.headers.Location);
+
+    const res = await tus.handle({
+      method: 'PATCH',
+      uploadId: id,
+      headers: { ...tusHeaders, 'Content-Type': 'application/offset+octet-stream', 'Upload-Offset': '0' },
+      body: new Uint8Array(5),
+    });
+
+    expect(res.status).toBe(423);
+    expect(acquireLock).toHaveBeenCalledWith(id, expect.any(Number));
+    // No write happened, so the lock is never taken → nothing to release.
+    expect(releaseLock).not.toHaveBeenCalled();
+  });
+
+  it('acquires with an operation lease + releases with the FENCING TOKEN', async () => {
+    const base = createMemoryTusSessionStore();
+    const acquireLock = vi.fn(async () => ({ token: 'tok-123', expiresAt: Date.now() + 30_000 }));
+    const releaseLock = vi.fn(async () => {});
+    const store: TusSessionStore = { ...base, acquireLock, releaseLock };
+
+    const { tus } = service({ sessions: store, lockLeaseMs: 5000 });
+    const created = await create(tus, 5);
+    const id = idOf(created.headers.Location);
+
+    const res = await tus.handle({
+      method: 'PATCH',
+      uploadId: id,
+      headers: { ...tusHeaders, 'Content-Type': 'application/offset+octet-stream', 'Upload-Offset': '0' },
+      body: new Uint8Array(5),
+    });
+
+    expect(res.status).toBe(204);
+    // Operation-level lease, NOT the 24h session TTL.
+    expect(acquireLock).toHaveBeenCalledWith(id, 5000);
+    // Fenced release — token-checked, so it can't free another worker's lock.
+    expect(releaseLock).toHaveBeenCalledWith(id, 'tok-123');
+  });
+
+  it('warns once when a CUSTOM store has no lock and singleReplica is unset', async () => {
+    const warn = vi.fn();
+    // A custom store WITHOUT the lock trio (a distributed store the host forgot
+    // to make lockable) — unsafe across replicas unless routing is sticky.
+    const store: TusSessionStore = { ...createMemoryTusSessionStore() };
+    const { tus } = service({ sessions: store, logger: { warn } });
+    const created = await create(tus, 3);
+    const id = idOf(created.headers.Location);
+
+    await tus.handle({
+      method: 'PATCH',
+      uploadId: id,
+      headers: { ...tusHeaders, 'Content-Type': 'application/offset+octet-stream', 'Upload-Offset': '0' },
+      body: new Uint8Array(3),
+    });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]![0]).toMatch(/singleReplica|distributed lock/i);
+  });
+
+  it('does NOT warn when singleReplica is asserted', async () => {
+    const warn = vi.fn();
+    const store: TusSessionStore = { ...createMemoryTusSessionStore() };
+    const { tus } = service({ sessions: store, singleReplica: true, logger: { warn } });
+    const created = await create(tus, 3);
+    const id = idOf(created.headers.Location);
+
+    await tus.handle({
+      method: 'PATCH',
+      uploadId: id,
+      headers: { ...tusHeaders, 'Content-Type': 'application/offset+octet-stream', 'Upload-Offset': '0' },
+      body: new Uint8Array(3),
+    });
+
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('HEAD reports resume state; offset mismatch → 409 with the real offset', async () => {

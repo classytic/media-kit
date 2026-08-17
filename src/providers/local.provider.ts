@@ -22,8 +22,10 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
-import type { StorageDriver, WriteResult, FileStat } from '../types';
+import type { StorageDriver, WriteResult, FileStat } from '../types/storage.js';
 import { getMimeType } from '../utils/mime';
+
+export type { StorageDriver, WriteResult, FileStat } from '../types/storage.js';
 
 /**
  * Local Provider Configuration

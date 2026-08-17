@@ -17,7 +17,7 @@
 import { describe, it, expect, afterAll, beforeEach, afterEach } from 'vitest';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import { createMedia } from '../../src/engine/create-media.js';
+import { bindMediaFlat as createMedia } from '../helpers/create-test-engine.js';
 import { DriverRegistry } from '../../src/providers/driver-registry.js';
 import { MemoryStorageDriver } from '../helpers/memory-driver.js';
 import { teardownTestMongo } from '../helpers/create-test-engine.js';
@@ -168,7 +168,7 @@ describe('createMedia() — multi-provider', () => {
       // engine.driver is shorthand for default
       expect(engine.driver).toBe(primary);
 
-      await engine.dispose();
+      await engine.close();
     });
   });
 
@@ -197,7 +197,7 @@ describe('createMedia() — multi-provider', () => {
       expect(media.provider).toBe('memory');
       expect(await driver.exists(media.key)).toBe(true);
 
-      await engine.dispose();
+      await engine.close();
     });
   });
 
@@ -225,7 +225,7 @@ describe('createMedia() — multi-provider', () => {
       expect(await primary.exists(media.key)).toBe(true);
       expect(await secondary.exists(media.key)).toBe(false);
 
-      await engine.dispose();
+      await engine.close();
     });
 
     it('routes upload to named provider when provider is specified', async () => {
@@ -252,7 +252,7 @@ describe('createMedia() — multi-provider', () => {
       expect(await secondary.exists(media.key)).toBe(true);
       expect(await primary.exists(media.key)).toBe(false);
 
-      await engine.dispose();
+      await engine.close();
     });
 
     it('different files uploaded to different providers coexist', async () => {
@@ -290,7 +290,7 @@ describe('createMedia() — multi-provider', () => {
       expect(await cdn.exists(m1.key)).toBe(false);
       expect(await s3.exists(m2.key)).toBe(false);
 
-      await engine.dispose();
+      await engine.close();
     });
 
     it('throws on unknown provider name at upload time', async () => {
@@ -312,7 +312,7 @@ describe('createMedia() — multi-provider', () => {
         }),
       ).rejects.toThrow(/Unknown provider "nonexistent"/);
 
-      await engine.dispose();
+      await engine.close();
     });
   });
 
@@ -346,7 +346,7 @@ describe('createMedia() — multi-provider', () => {
       expect(await secondary.exists(media.key)).toBe(false);
       expect(primary.size).toBe(0); // primary untouched
 
-      await engine.dispose();
+      await engine.close();
     });
   });
 
@@ -381,7 +381,7 @@ describe('createMedia() — multi-provider', () => {
       expect(await secondary.exists(replaced.key)).toBe(true);
       expect(primary.size).toBe(0);
 
-      await engine.dispose();
+      await engine.close();
     });
 
     it('replace() can switch provider via input.provider', async () => {
@@ -417,7 +417,7 @@ describe('createMedia() — multi-provider', () => {
       expect(replaced.provider).toBe('secondary');
       expect(await secondary.exists(replaced.key)).toBe(true);
 
-      await engine.dispose();
+      await engine.close();
     });
   });
 });

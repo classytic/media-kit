@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { Semaphore } from '../../src/utils/semaphore';
+import { Semaphore, SemaphoreOverloadError, SemaphoreAcquireError } from '../../src/utils/semaphore';
 
 describe('Semaphore', () => {
   describe('constructor', () => {
@@ -178,6 +178,71 @@ describe('Semaphore', () => {
       sem.release();
       await p;
       expect(acquired).toBe(true);
+    });
+  });
+
+  describe('admission control', () => {
+    it('rejects with SemaphoreOverloadError when the queue is at capacity', async () => {
+      const sem = new Semaphore(1, { maxQueue: 1 });
+      await sem.acquire(); // fills the only slot
+      const waiting = sem.acquire(); // fills the one queue slot
+      // Third acquire has nowhere to go → shed load.
+      await expect(sem.acquire()).rejects.toBeInstanceOf(SemaphoreOverloadError);
+      await expect(sem.acquire()).rejects.toMatchObject({ status: 503, code: 'media.overloaded' });
+
+      sem.release(); // let the queued one through so nothing dangles
+      await waiting;
+      expect(sem.stats().rejectedOverload).toBe(2);
+    });
+
+    it('rejects a waiter that exceeds acquireTimeoutMs', async () => {
+      const sem = new Semaphore(1, { acquireTimeoutMs: 20 });
+      await sem.acquire();
+      await expect(sem.acquire()).rejects.toMatchObject({
+        code: 'media.acquire_timeout',
+        status: 503,
+      });
+      expect(sem.stats().queued).toBe(0); // timed-out waiter removed from the queue
+    });
+
+    it('rejects a waiter whose signal aborts', async () => {
+      const sem = new Semaphore(1);
+      await sem.acquire();
+      const ac = new AbortController();
+      const p = sem.acquire({ signal: ac.signal });
+      ac.abort();
+      await expect(p).rejects.toBeInstanceOf(SemaphoreAcquireError);
+      expect(sem.stats().queued).toBe(0);
+    });
+
+    it('an already-aborted signal rejects immediately without queueing', async () => {
+      const sem = new Semaphore(1);
+      const ac = new AbortController();
+      ac.abort();
+      await expect(sem.acquire({ signal: ac.signal })).rejects.toMatchObject({
+        code: 'media.acquire_aborted',
+      });
+    });
+
+    it('stats() reports live occupancy + queue depth', async () => {
+      const sem = new Semaphore(2, { maxQueue: 5 });
+      await sem.acquire();
+      await sem.acquire();
+      const waiting = sem.acquire(); // queued
+      const s = sem.stats();
+      expect(s).toMatchObject({ max: 2, inUse: 2, available: 0, queued: 1, maxQueue: 5 });
+      sem.release();
+      await waiting;
+    });
+
+    it('unbounded by default (backward compatible — no rejection)', async () => {
+      const sem = new Semaphore(1);
+      await sem.acquire();
+      // Many waiters queue without rejection.
+      const waiters = Array.from({ length: 50 }, () => sem.acquire());
+      expect(sem.stats().queued).toBe(50);
+      for (let i = 0; i < 50; i++) sem.release();
+      await Promise.all(waiters);
     });
   });
 });

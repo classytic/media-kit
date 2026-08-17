@@ -1,52 +1,27 @@
 /**
  * In-process event bus — default fallback when no arc transport is provided.
  *
- * Structurally identical to arc's MemoryEventTransport. Pattern matching is
- * delegated to `@classytic/primitives`' `matchEventPattern` (exact / `*` /
- * `prefix.*` / `prefix:*`). Handler errors are swallowed — event emission
- * never propagates.
+ * A THIN subclass of `@classytic/primitives`' shared `InProcessEventBus`
+ * (`/event-infra`, primitives >=0.14) — the single reference runtime that
+ * replaced the ~26 drifted per-kernel `in-process-bus.ts` copies. media-kit
+ * keeps the public class name `InProcessMediaBus` so nothing in its API
+ * surface changes; only the implementation is now shared. Structurally
+ * identical to arc's `MemoryEventTransport` (glob match via `matchEventPattern`,
+ * per-handler error isolation, idempotent `close()`).
  */
 
-import type { DomainEvent, EventHandler, EventTransport } from '@classytic/primitives/events';
-import { matchEventPattern } from '@classytic/primitives/events';
-import type { MediaKitLogger } from '../types.js';
+import { InProcessEventBus } from '@classytic/primitives/event-infra';
+import type { MediaKitLogger } from '../types/config.js';
 
-interface Sub {
-  pattern: string;
-  handler: EventHandler;
-}
-
-export class InProcessMediaBus implements EventTransport {
-  readonly name = 'in-process-media';
-  private subs: Sub[] = [];
-  private logger?: MediaKitLogger;
-
+export class InProcessMediaBus extends InProcessEventBus {
   constructor(options?: { logger?: MediaKitLogger }) {
-    this.logger = options?.logger;
-  }
-
-  async publish(event: DomainEvent): Promise<void> {
-    const matching = this.subs.filter((s) => matchEventPattern(s.pattern, event.type));
-    for (const sub of matching) {
-      try {
-        await sub.handler(event);
-      } catch (err) {
-        this.logger?.error?.(`[media-kit] Event handler error [${event.type}]`, {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  }
-
-  async subscribe(pattern: string, handler: EventHandler): Promise<() => void> {
-    const sub: Sub = { pattern, handler };
-    this.subs.push(sub);
-    return () => {
-      this.subs = this.subs.filter((s) => s !== sub);
-    };
-  }
-
-  async close(): Promise<void> {
-    this.subs = [];
+    super({
+      name: 'in-process-media',
+      logLabel: 'media-kit',
+      // Preserve media-kit's historical default: no logger → swallow handler
+      // errors silently (event emission never propagates OR logs). A supplied
+      // MediaKitLogger satisfies the shared bus's ErrorLogger contract.
+      logger: options?.logger ?? null,
+    });
   }
 }

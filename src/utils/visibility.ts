@@ -9,7 +9,8 @@
  *   4. 'public'
  */
 
-import type { MediaVisibility, VisibilityConfig } from '../types.js';
+import type { MediaVisibility } from '../types/media.js';
+import type { VisibilityConfig } from '../types/config.js';
 
 /**
  * Return true when `folder` equals `rule` or lives underneath it

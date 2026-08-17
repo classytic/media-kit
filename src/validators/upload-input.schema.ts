@@ -6,6 +6,19 @@
 
 import { z } from 'zod';
 
+/**
+ * STRICT by construction. Zod's default STRIPS unknown keys, and for an upload
+ * command stripping does not fail — it proceeds with a different instruction
+ * than the caller wrote. A misspelled `hashStrategy` becomes the default one; a
+ * misspelled `variants` key silently uploads a record with no derivatives; a
+ * mistyped `process` quietly declines the server processing the client asked
+ * for. None of those error, and every one returns a plausible 201.
+ *
+ * These schemas were also, until now, DECLARED AND UNUSED — the spine's raw
+ * handlers hand-checked two or three fields and cast the rest. A validator
+ * nothing calls is decoration.
+ */
+
 export const focalPointSchema = z.object({
   x: z.number().min(0).max(1),
   y: z.number().min(0).max(1),
@@ -44,9 +57,40 @@ export const uploadInputSchema = z.object({
   ...clientMetadataFields,
 });
 
-export const confirmUploadSchema = z.object({
+/** A client-declared derivative. Nested objects are strict too — a misspelled
+ * key inside one would otherwise be stripped and the variant silently altered. */
+export const clientVariantSchema = z.strictObject({
+  name: z
+    .string()
+    .min(1)
+    .regex(/^[a-z0-9_-]+$/i, 'variant names become storage keys — [a-z0-9_-] only'),
+  key: z.string().min(1),
+  mimeType: z.string().min(1),
+  size: z.number().int().min(0),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+});
+
+export const confirmUploadSchema = z.strictObject({
   key: z.string().min(1),
   filename: z.string().min(1),
+  originalFilename: z.string().min(1).optional(),
+  /**
+   * Content hash — bounded and free of whitespace, but NOT pinned to a format.
+   *
+   * A first draft required 64 hex characters. That is sha256's shape, and this
+   * value is whatever the deployment's `hashStrategy` produces: an md5 under a
+   * different `deduplication.algorithm`, or a storage ETag under
+   * `hashStrategy: 'etag'` — and an S3 multipart ETag is not hex at all, it
+   * carries a `-N` part suffix. The schema would have been a specific rule
+   * overriding a setting the kernel deliberately leaves open, and it rejected a
+   * legitimate lookup the moment a test used one.
+   *
+   * So the check is what actually matters here: present, sanely bounded, and
+   * not carrying whitespace or control characters into an index lookup.
+   */
+  sha256: z.string().min(8).max(256).regex(/^\S+$/, 'content hash must not contain whitespace').optional(),
+  variants: z.array(clientVariantSchema).optional(),
   mimeType: z.string().min(1),
   size: z.number().int().min(1),
   folder: z.string().optional(),
@@ -60,7 +104,7 @@ export const confirmUploadSchema = z.object({
   ...clientMetadataFields,
 });
 
-export const initiateMultipartSchema = z.object({
+export const initiateMultipartSchema = z.strictObject({
   filename: z.string().min(1),
   contentType: z.string().min(1),
   folder: z.string().optional(),
@@ -68,11 +112,11 @@ export const initiateMultipartSchema = z.object({
   expiresIn: z.number().int().min(1).optional(),
 });
 
-export const completeMultipartSchema = z.object({
+export const completeMultipartSchema = z.strictObject({
   key: z.string().min(1),
   uploadId: z.string().min(1),
   parts: z.array(
-    z.object({
+    z.strictObject({
       partNumber: z.number().int().min(1),
       etag: z.string().min(1),
     }),
@@ -131,4 +175,32 @@ export const importFromUrlSchema = z.object({
   tags: z.array(z.string()).optional(),
   maxSize: z.number().int().min(1).optional(),
   timeout: z.number().int().min(1).optional(),
+});
+
+/**
+ * The `start-write` command. Strict for the same reason as confirm: a
+ * misspelled `derivatives` key would presign nothing and the client would
+ * upload a primary believing it had done the whole job.
+ */
+export const startWriteSchema = z.strictObject({
+  filename: z.string().min(1),
+  contentType: z.string().min(1),
+  size: z.number().int().min(0).optional(),
+  folder: z.string().optional(),
+  sha256: z.string().min(8).max(256).regex(/^\S+$/, 'content hash must not contain whitespace').optional(),
+  multipart: z.boolean().optional(),
+  partCount: z.number().int().min(1).optional(),
+  expiresIn: z.number().int().min(1).optional(),
+  derivatives: z
+    .array(
+      z.strictObject({
+        name: z
+          .string()
+          .min(1)
+          .regex(/^[a-z0-9_-]+$/i, 'variant names become storage keys — [a-z0-9_-] only'),
+        contentType: z.string().min(1),
+        size: z.number().int().min(0).optional(),
+      }),
+    )
+    .optional(),
 });

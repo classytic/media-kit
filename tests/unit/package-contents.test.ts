@@ -11,17 +11,13 @@ import { join } from 'path';
 
 describe('Package Contents', () => {
   it('should only include dist/ and README.md in npm package', () => {
-    const packageJson = JSON.parse(
-      readFileSync(join(__dirname, '../../package.json'), 'utf-8')
-    );
+    const packageJson = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8'));
 
     expect(packageJson.files).toEqual(['dist', 'README.md', 'LICENSE']);
   });
 
   it('should exclude source files via files whitelist', () => {
-    const packageJson = JSON.parse(
-      readFileSync(join(__dirname, '../../package.json'), 'utf-8')
-    );
+    const packageJson = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8'));
 
     expect(packageJson.files).not.toContain('src');
     expect(packageJson.files).not.toContain('tests');
@@ -29,9 +25,7 @@ describe('Package Contents', () => {
   });
 
   it('should have prepublishOnly script that runs tests', () => {
-    const packageJson = JSON.parse(
-      readFileSync(join(__dirname, '../../package.json'), 'utf-8')
-    );
+    const packageJson = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8'));
 
     expect(packageJson.scripts.prepublishOnly).toContain('test');
     expect(packageJson.scripts.prepublishOnly).toContain('build');
@@ -39,9 +33,7 @@ describe('Package Contents', () => {
   });
 
   it('should have correct peer dependencies configuration', () => {
-    const packageJson = JSON.parse(
-      readFileSync(join(__dirname, '../../package.json'), 'utf-8')
-    );
+    const packageJson = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8'));
 
     const peerDeps = packageJson.peerDependencies;
     const peerDepsMeta = packageJson.peerDependenciesMeta;
@@ -57,41 +49,40 @@ describe('Package Contents', () => {
     expect(peerDepsMeta['mongoose']).toBeUndefined();
     expect(peerDepsMeta['@classytic/mongokit']).toBeUndefined();
 
-    // mongokit must be >=3.14.0 — that release tracks the kit ecosystem
-    // floor adopted by `@classytic/arc@2.17` and ships the soft-delete +
-    // TTL surface media-kit's lifecycle hooks depend on. Earlier floors
-    // (3.13.x) shipped `claim()` and the LookupBuilder restoration but
-    // missed the `softDeletePlugin({ ttlDays })` partial-filter wiring
-    // that media-kit's expiry pipeline now leverages.
-    expect(peerDeps['@classytic/mongokit']).toBe('>=3.14.0');
-    // primitives 0.6.0 is the canonical event-type floor the kit
-    // ecosystem agreed on with `@classytic/arc@2.16+`. 0.6 brings the
-    // `EventTransport` / `DomainEvent` / `EventMeta` typing media-kit
-    // relies on for arc-compatible event emission. Earlier floors
-    // (0.4.x) had a narrower `assertAndClaim` surface but missed the
-    // canonical event vocabulary kits now share.
-    expect(peerDeps['@classytic/primitives']).toBe('>=0.6.0');
-    // repo-core 0.5.0 publishes the canonical `DataAdapter` /
-    // `RepositoryLike` / `OpenApiSchemas` surface plus the
-    // `MinimalRepo & Partial<StandardRepo>` contract arc 2.17 develops
-    // against. Aligning the floor here keeps dev/peer expectations
-    // consistent across the kit ecosystem.
-    expect(peerDeps['@classytic/repo-core']).toBe('>=0.5.0');
+    // mongokit >=3.33.0 — the ecosystem head this package is built and tested
+    // against. The technical MINIMUM is still 3.30 (that is where `defineModels`
+    // / `ModelBlueprint` shipped, and an earlier mongokit crashes with
+    // `defineModels is not exported`); the floor was raised past it deliberately
+    // at the pre-publish pass, because a floor nobody verifies is a
+    // compatibility promise nobody can keep. Lower it only alongside a run
+    // against that older mongokit.
+    expect(peerDeps['@classytic/mongokit']).toBe('>=3.33.0');
+    // primitives floor tracks the ecosystem head: `InProcessMediaBus` is a
+    // thin subclass of the shared `InProcessEventBus` from
+    // `@classytic/primitives/event-infra` (0.14+), and 0.14's `/events`
+    // `EventTransport.subscribe?` relaxation lets the re-exported transport
+    // type accept publish-only transports. 0.15 is additive
+    // (`propagateHandlerErrors`, money scalar helpers).
+    // Floor raised to the tested head (0.23.0) for the same reason as mongokit;
+    // the additive features named above still land far below it.
+    expect(peerDeps['@classytic/primitives']).toBe('>=0.23.0');
+    // repo-core >=0.24.0 — this one is FORCED, not a preference. `defineMedia`
+    // calls `assertNoLegacyTenantKeys` from `@classytic/repo-core/tenant`, which
+    // first ships in 0.24.0. A lower floor resolves fine and then fails at
+    // RUNTIME on a missing export, which tsc cannot see — so the floor is the
+    // only thing standing between a consumer and that crash.
+    expect(peerDeps['@classytic/repo-core']).toBe('>=0.24.0');
   });
 
   it('should have no runtime dependencies (all are peer)', () => {
-    const packageJson = JSON.parse(
-      readFileSync(join(__dirname, '../../package.json'), 'utf-8')
-    );
+    const packageJson = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8'));
 
     const deps = Object.keys(packageJson.dependencies || {});
     expect(deps).toEqual([]);
   });
 
   it('should be ESM-only with tsdown output conventions', () => {
-    const packageJson = JSON.parse(
-      readFileSync(join(__dirname, '../../package.json'), 'utf-8')
-    );
+    const packageJson = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8'));
 
     expect(packageJson.type).toBe('module');
     expect(packageJson.main).toBe('./dist/index.mjs');
@@ -100,9 +91,7 @@ describe('Package Contents', () => {
   });
 
   it('should export main entry points correctly', () => {
-    const packageJson = JSON.parse(
-      readFileSync(join(__dirname, '../../package.json'), 'utf-8')
-    );
+    const packageJson = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8'));
 
     // Main export
     expect(packageJson.exports['.']).toEqual({
@@ -133,9 +122,7 @@ describe('Package Contents', () => {
   });
 
   it('should export transforms entry point', () => {
-    const packageJson = JSON.parse(
-      readFileSync(join(__dirname, '../../package.json'), 'utf-8')
-    );
+    const packageJson = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8'));
 
     expect(packageJson.exports['./transforms']).toEqual({
       types: './dist/transforms.d.mts',
@@ -143,10 +130,24 @@ describe('Package Contents', () => {
     });
   });
 
+  it('should expose aggregate and focused type-only entry points', () => {
+    const packageJson = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8'));
+
+    expect(packageJson.exports['./types']).toEqual({
+      types: './dist/types.d.mts',
+      import: './dist/types.mjs',
+    });
+
+    for (const name of ['storage', 'media', 'processing', 'uploads', 'config']) {
+      expect(packageJson.exports[`./types/${name}`]).toEqual({
+        types: `./dist/types/${name}.d.mts`,
+        import: `./dist/types/${name}.mjs`,
+      });
+    }
+  });
+
   it('should have sideEffects: false for tree shaking', () => {
-    const packageJson = JSON.parse(
-      readFileSync(join(__dirname, '../../package.json'), 'utf-8')
-    );
+    const packageJson = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf-8'));
 
     expect(packageJson.sideEffects).toBe(false);
   });

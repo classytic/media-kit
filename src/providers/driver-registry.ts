@@ -23,7 +23,7 @@
  * ```
  */
 
-import type { StorageDriver } from '../types.js';
+import type { StorageDriver } from '../types/storage.js';
 
 export class DriverRegistry {
   /** All registered drivers, keyed by provider name. Frozen. */

@@ -26,7 +26,7 @@ import {
   type TestEngineHandle,
 } from '../helpers/create-test-engine.js';
 import { MEDIA_EVENTS } from '../../src/events/event-constants.js';
-import type { ImageAdapter, ProcessedImage } from '../../src/types.js';
+import type { ImageAdapter, ProcessedImage } from '../../src/types/index.js';
 import type { TransformBridge, TransformOp } from '../../src/bridges/transform.bridge.js';
 
 const BUF = (s: string) => Buffer.from(s, 'utf-8');

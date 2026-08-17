@@ -10,7 +10,7 @@
 import type mongoose from 'mongoose';
 import { Schema } from 'mongoose';
 import type { ResolvedTenantConfig } from '@classytic/repo-core/tenant';
-import type { IMediaDocument } from '../types.js';
+import type { IMediaDocument } from '../types/media.js';
 import { injectTenantField } from './inject-tenant.js';
 
 export interface MediaSchemaConfig {
@@ -56,13 +56,17 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
     mimeType: { type: String, required: true, index: true },
     size: { type: Number, required: true },
     url: { type: String, required: true },
-    key: { type: String, required: true, index: true },
+    /**
+     * Storage object this record OWNS. Unique — see the index declaration
+     * below for why a plain index was not enough.
+     */
+    key: { type: String, required: true },
     hash: { type: String, required: true, index: true },
 
     // --- Status Lifecycle ---
     status: {
       type: String,
-      enum: ['pending', 'processing', 'ready', 'error'],
+      enum: ['pending', 'processing', 'ready', 'error', 'deleting'],
       default: 'pending',
       required: true,
       // No field-level index — the { status, createdAt } compound serves
@@ -219,6 +223,45 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
   if (tenant) {
     injectTenantField(schema, tenant);
   }
+
+  /**
+   * ONE record may own a storage key.
+   *
+   * ## What this DOES fix (proven)
+   *
+   * `isKeyRegistered()` is a read, and the create that follows carries no
+   * predicate binding it — so two concurrent confirmations of one key both saw
+   * "free" and both created a record. The damage is not a duplicate row: both
+   * point at ONE object, so deleting either removes the bytes the other still
+   * serves, and the survivor keeps returning a URL that 404s. Nothing throws.
+   * Pinned by `tests/integration/confirm-key-ownership-race.test.ts`, which
+   * fails when this index is removed.
+   *
+   * ## Why it is declared AFTER the tenant injection
+   *
+   * `injectTenantField()` prepends the tenant key to every index declared
+   * before it, so above that call this silently becomes `{organizationId, key}`
+   * — per-tenant uniqueness wearing the same name.
+   *
+   * BE HONEST ABOUT WHAT THAT BUYS: no current test distinguishes the two,
+   * because `assertTenantBinding()` already refuses a caller reaching for a key
+   * minted for another tenant, long before the index is consulted. Moving this
+   * declaration upward passes the whole suite. It is kept global as DEFENCE IN
+   * DEPTH — it still holds when tenancy is disabled, and for any key minted
+   * without a tenant segment, where the binding check has nothing to compare.
+   *
+   * Do not read this as "the index is what stops cross-tenant claiming." The
+   * binding check is. An earlier draft of this comment claimed otherwise and
+   * the falsification run disproved it.
+   *
+   * NOT partial, NOT filtered by `deletedAt`: a soft-deleted record still owns
+   * its object, so the claim must survive until the bytes are actually gone.
+   *
+   * MIGRATION: on a collection already holding duplicate keys the build FAILS
+   * rather than skipping — the right outcome, since those duplicates are the
+   * defect. Resolve them before deploying.
+   */
+  schema.index({ key: 1 }, { unique: true, name: 'media_key_unique' });
 
   return schema;
 }

@@ -4,7 +4,7 @@
  * A StorageDriver implementation that routes operations to different
  * drivers based on key prefixes or custom matchers. Enables using
  * multiple storage backends (S3 + Local, S3 + GCS, etc.) from a
- * single `createMedia()` instance.
+ * single media engine instance.
  *
  * @example
  * ```ts
@@ -24,7 +24,7 @@
  *   default: 's3',
  * });
  *
- * const media = createMedia({ driver: router });
+ * const engine = await defineMedia({}).bind(connection, { driver: router });
  * ```
  */
 
@@ -36,7 +36,9 @@ import type {
   SignedPartResult,
   CompletedPart,
   ResumableUploadSession,
-} from '../types';
+} from '../types/storage.js';
+
+export type { StorageDriver, WriteResult, FileStat } from '../types/storage.js';
 
 /**
  * A single routing rule
@@ -267,6 +269,49 @@ export class StorageRouter implements StorageDriver {
   // RESUMABLE UPLOAD METHODS (GCS-style)
   // ============================================
 
+  /**
+   * Which route driver a resumable session belongs to is encoded into the
+   * returned `uploadUrl` as a URL FRAGMENT (`#__mkdriver=<name>`). A fragment
+   * is client-side only — never sent over HTTP — so the provider receives the
+   * clean URI when the client PUTs chunks, while abort/status (which round-trip
+   * the full string) can resolve the owning driver STATELESSLY: correct after a
+   * restart and on any replica, no shared map required. The in-memory map stays
+   * as a same-process fast path (and a safety net if a client strips the tag).
+   */
+  private static readonly DRIVER_TAG = '__mkdriver';
+
+  private tagSessionUri(uri: string, driverName: string): string {
+    const sep = uri.includes('#') ? '&' : '#';
+    return `${uri}${sep}${StorageRouter.DRIVER_TAG}=${encodeURIComponent(driverName)}`;
+  }
+
+  /** Resolve the owning driver + the provider-facing (untagged) URI, or fail loudly. */
+  private resolveResumable(sessionUri: string): { driver: StorageDriver; cleanUri: string } {
+    const hashIdx = sessionUri.indexOf('#');
+    if (hashIdx >= 0) {
+      const tagged = new URLSearchParams(sessionUri.slice(hashIdx + 1)).get(StorageRouter.DRIVER_TAG);
+      if (tagged) {
+        const driver = this.drivers[tagged];
+        if (!driver) {
+          throw new Error(
+            `StorageRouter: resumable session names unknown driver '${tagged}'. ` +
+              `Available: ${Object.keys(this.drivers).join(', ')}`,
+          );
+        }
+        return { driver, cleanUri: sessionUri.slice(0, hashIdx) };
+      }
+    }
+    const mapped = this.resumableSessions.get(sessionUri);
+    if (mapped) return { driver: mapped, cleanUri: sessionUri };
+    // No silent default: a mis-routed abort/status could target — or fail to
+    // clean up — the wrong provider. Fail explicitly instead.
+    throw new Error(
+      'StorageRouter: cannot resolve the storage driver for this resumable session — its driver tag is ' +
+        'missing and the router has no in-memory record (likely an app restart or a different replica). ' +
+        'Route resumable uploads to a single provider, or ensure the client round-trips the full uploadUrl.',
+    );
+  }
+
   async createResumableUpload(
     key: string,
     contentType: string,
@@ -277,25 +322,27 @@ export class StorageRouter implements StorageDriver {
       throw new Error(`Driver '${driver.name}' does not support resumable uploads`);
     }
     const session = await driver.createResumableUpload(key, contentType, options);
-    // Track which driver owns this session for abort/status calls
-    this.resumableSessions.set(session.uploadUrl, driver);
-    return session;
+    // Encode the owning driver into the URL the client round-trips, and keep
+    // the same-process map keyed by that same (tagged) URL.
+    const uploadUrl = this.tagSessionUri(session.uploadUrl, driver.name);
+    this.resumableSessions.set(uploadUrl, driver);
+    return { ...session, uploadUrl };
   }
 
   async abortResumableUpload(sessionUri: string): Promise<void> {
-    const driver = this.resumableSessions.get(sessionUri) ?? this.defaultDriver;
+    const { driver, cleanUri } = this.resolveResumable(sessionUri);
     if (!driver.abortResumableUpload) {
       throw new Error(`Driver '${driver.name}' does not support resumable abort`);
     }
     this.resumableSessions.delete(sessionUri);
-    return driver.abortResumableUpload(sessionUri);
+    return driver.abortResumableUpload(cleanUri);
   }
 
   async getResumableUploadStatus(sessionUri: string): Promise<{ uploadedBytes: number }> {
-    const driver = this.resumableSessions.get(sessionUri) ?? this.defaultDriver;
+    const { driver, cleanUri } = this.resolveResumable(sessionUri);
     if (!driver.getResumableUploadStatus) {
       throw new Error(`Driver '${driver.name}' does not support resumable status query`);
     }
-    return driver.getResumableUploadStatus(sessionUri);
+    return driver.getResumableUploadStatus(cleanUri);
   }
 }

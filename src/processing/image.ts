@@ -27,7 +27,7 @@ import type {
   ProcessedImage,
   SizeVariant,
   SharpOptions,
-} from '../types';
+} from '../types/processing.js';
 import { calculateFocalPointCrop } from './focal-point';
 import type sharpModule from 'sharp';
 
@@ -63,6 +63,14 @@ const FORMAT_MIME_MAP: Record<string, string> = {
   png: 'image/png',
   avif: 'image/avif',
 };
+
+/**
+ * Default decompression-bomb cap (~268 megapixels) — matches Sharp's own
+ * built-in default, so behaviour is unchanged unless a host tightens it via
+ * `sharpOptions.limitInputPixels`. A 268 MP image decodes to ~1 GB of RAM at
+ * 4 bytes/pixel, so anything larger is rejected before processing.
+ */
+const DEFAULT_LIMIT_INPUT_PIXELS = 0x3fff * 0x3fff;
 
 const DEFAULT_QUALITY_MAP: Record<string, number> = {
   jpeg: 82,
@@ -123,6 +131,16 @@ export class ImageProcessor implements IImageProcessor {
   }
 
   /**
+   * Constructor options applied to EVERY `sharp(inputBuffer)` call for
+   * untrusted client data — carries the decompression-bomb cap so an
+   * oversized image is rejected before it is decoded.
+   */
+  private sharpInputOptions(): { limitInputPixels: number | boolean } {
+    const limit = this.sharpOptions.limitInputPixels;
+    return { limitInputPixels: limit === undefined ? DEFAULT_LIMIT_INPUT_PIXELS : limit };
+  }
+
+  /**
    * Check if processing is available (sharp installed)
    */
   isAvailable(): boolean {
@@ -153,13 +171,13 @@ export class ImageProcessor implements IImageProcessor {
 
     const { maxWidth = 2048, maxHeight, quality = 80, format = 'webp', aspectRatio, focalPoint } = options;
 
-    const metadata = await sharp(buffer).metadata();
+    const metadata = await sharp(buffer, this.sharpInputOptions()).metadata();
 
     if (!metadata.width || !metadata.height) {
       throw new Error('Unable to read image dimensions');
     }
 
-    let instance = sharp(buffer);
+    let instance = sharp(buffer, this.sharpInputOptions());
 
     // Auto-orient from EXIF (correct rotation, strip orientation tag)
     if (options.autoOrient !== false) {
@@ -256,7 +274,7 @@ export class ImageProcessor implements IImageProcessor {
    */
   async getDimensions(buffer: Buffer): Promise<{ width: number; height: number }> {
     const sharp = await this.getSharp();
-    const metadata = await sharp(buffer).metadata();
+    const metadata = await sharp(buffer, this.sharpInputOptions()).metadata();
 
     return {
       width: metadata.width || 0,
@@ -279,7 +297,7 @@ export class ImageProcessor implements IImageProcessor {
     baseOptions: Omit<ProcessingOptions, 'maxWidth'> = {},
   ): Promise<Array<ProcessedImage & { variantName: string }>> {
     const sharp = await this.getSharp();
-    const metadata = await sharp(buffer).metadata();
+    const metadata = await sharp(buffer, this.sharpInputOptions()).metadata();
     const origWidth = metadata.width || 0;
     const origHeight = metadata.height || 0;
     const origMimeType = `image/${metadata.format || 'jpeg'}`;
@@ -345,7 +363,7 @@ export class ImageProcessor implements IImageProcessor {
   async isOptimized(buffer: Buffer, mimeType: string): Promise<boolean> {
     try {
       const sharp = await this.getSharp();
-      const metadata = await sharp(buffer).metadata();
+      const metadata = await sharp(buffer, this.sharpInputOptions()).metadata();
       if (!metadata.width || !metadata.height) return false;
 
       const pixels = metadata.width * metadata.height;
@@ -371,7 +389,7 @@ export class ImageProcessor implements IImageProcessor {
   async extractDominantColor(buffer: Buffer): Promise<string | null> {
     try {
       const sharp = await this.getSharp();
-      const { dominant } = await sharp(buffer).stats();
+      const { dominant } = await sharp(buffer, this.sharpInputOptions()).stats();
       const r = Math.round(dominant.r).toString(16).padStart(2, '0');
       const g = Math.round(dominant.g).toString(16).padStart(2, '0');
       const b = Math.round(dominant.b).toString(16).padStart(2, '0');
@@ -386,7 +404,7 @@ export class ImageProcessor implements IImageProcessor {
    */
   async extractMetadata(buffer: Buffer): Promise<Record<string, unknown>> {
     const sharp = await this.getSharp();
-    const metadata = await sharp(buffer).metadata();
+    const metadata = await sharp(buffer, this.sharpInputOptions()).metadata();
 
     return {
       format: metadata.format,

@@ -8,7 +8,14 @@
  * surface.
  */
 
-import type { FolderTree, FolderStats, FolderNode, BreadcrumbItem, BulkResult, RewriteResult } from '../../types.js';
+import type {
+  FolderTree,
+  FolderStats,
+  FolderNode,
+  BreadcrumbItem,
+  BulkResult,
+  RewriteResult,
+} from '../../types/folders.js';
 import type { MediaContext } from '../../engine/engine-types.js';
 import { MEDIA_EVENTS } from '../../events/event-constants.js';
 import { createMediaEvent } from '../../events/helpers.js';

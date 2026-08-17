@@ -19,31 +19,28 @@
 
 import type { Model } from 'mongoose';
 import { Repository, type PluginType, type PaginationConfig } from '@classytic/mongokit';
+import type { IMediaDocument } from '../types/media.js';
+import type { UploadInput, ConfirmUploadInput, OperationContext } from '../types/uploads.js';
 import type {
-  IMediaDocument,
-  UploadInput,
-  ConfirmUploadInput,
-  OperationContext,
-  PresignedUploadResult,
   FolderTree,
   FolderStats,
   FolderNode,
   BreadcrumbItem,
   BulkResult,
   RewriteResult,
-  FocalPoint,
-  ImportOptions,
-  ImageAdapter,
+} from '../types/folders.js';
+import type { FocalPoint, ImageAdapter } from '../types/processing.js';
+import type {
+  PresignedUploadResult,
   InitiateMultipartInput,
   MultipartUploadSession,
   CompleteMultipartInput,
   SignedPartResult,
   BatchPresignInput,
   BatchPresignResult,
-  MediaKitLogger,
-  RegisterExternalInput,
   StorageDriver,
-} from '../types.js';
+} from '../types/storage.js';
+import type { ImportOptions, MediaKitLogger, RegisterExternalInput } from '../types/config.js';
 import type { UrlSigner } from '../signing/index.js';
 import type { SharpModule, SharpInstanceSource } from '../processing/image.js';
 import type { EventTransport } from '@classytic/primitives/events';
@@ -57,7 +54,13 @@ import { createMediaEvent } from '../events/helpers.js';
 import type { ImageProcessor } from '../processing/image.js';
 import { Semaphore } from '../utils/semaphore.js';
 import { validateFile as validateFileHelper, getContentType as getContentTypeHelper } from '../operations/helpers.js';
-import { uploadVerb, uploadManyVerb, replaceVerb } from './verbs/upload.verbs.js';
+import {
+  uploadVerb,
+  uploadManyVerb,
+  uploadManySettledVerb,
+  replaceVerb,
+  type UploadManyResult,
+} from './verbs/upload.verbs.js';
 import {
   hardDeleteVerb,
   hardDeleteManyVerb,
@@ -92,6 +95,7 @@ import {
   getStorageByFolderVerb,
   getTotalStorageUsedVerb,
 } from './verbs/lookup.verbs.js';
+import type { DerivativeUploadRequest, DerivativeUploadTarget } from '../operations/derivatives.js';
 
 // ── Constants ────────────────────────────────────────────────
 
@@ -107,7 +111,7 @@ export interface MediaRepositoryDeps {
   processorReady?: Promise<void> | null;
   logger?: MediaKitLogger;
   bridges?: MediaBridges;
-  /** Shared HMAC URL signer — constructed by createMedia() from `config.signing`. */
+  /** Shared HMAC URL signer — constructed by bind() from `shape.signing`. */
   signing?: UrlSigner;
 }
 
@@ -141,7 +145,12 @@ export class MediaRepository extends Repository<IMediaDocument> {
     this.processor = deps.processor ?? null;
     this.processorReady = deps.processorReady ?? null;
     this.mediaConfig = deps.config;
-    this.uploadSemaphore = new Semaphore(deps.config.concurrency?.maxConcurrent ?? 5);
+    this.uploadSemaphore = new Semaphore(deps.config.concurrency?.maxConcurrent ?? 5, {
+      ...(deps.config.concurrency?.maxQueue !== undefined ? { maxQueue: deps.config.concurrency.maxQueue } : {}),
+      ...(deps.config.concurrency?.acquireTimeoutMs !== undefined
+        ? { acquireTimeoutMs: deps.config.concurrency.acquireTimeoutMs }
+        : {}),
+    });
     this.mediaLogger = deps.logger;
     this.signer = deps.signing ?? null;
     this.bridges = deps.bridges ?? {};
@@ -278,6 +287,15 @@ export class MediaRepository extends Repository<IMediaDocument> {
    */
   async uploadMany(inputs: UploadInput[], ctx?: MediaContext): Promise<IMediaDocument[]> {
     return uploadManyVerb(this, inputs, ctx);
+  }
+
+  /**
+   * Upload multiple files, returning per-input successes AND failures (indexed
+   * by position). Use this instead of {@link uploadMany} when callers must know
+   * which inputs failed and why. Partial failures never block the rest.
+   */
+  async uploadManySettled(inputs: UploadInput[], ctx?: MediaContext): Promise<UploadManyResult> {
+    return uploadManySettledVerb(this, inputs, ctx);
   }
 
   /**
@@ -441,6 +459,25 @@ export class MediaRepository extends Repository<IMediaDocument> {
   ): Promise<PresignedUploadResult> {
     const { getSignedUploadUrl: fn } = await import('../operations/presigned.js');
     return fn(this._opDeps, filename, contentType, options, this._opCtx(ctx));
+  }
+
+  /**
+   * Presign a PUT for each size the client produced from one decode.
+   *
+   * Keys are composed from the PRIMARY's key here — never supplied by the
+   * caller. A client-named key is a write primitive: it would let a caller
+   * presign over any object in the bucket.
+   */
+  async signDerivativeUploads(
+    input: {
+      primaryKey: string;
+      derivatives: readonly DerivativeUploadRequest[];
+      expiresIn?: number | undefined;
+    },
+    ctx?: MediaContext,
+  ): Promise<DerivativeUploadTarget[]> {
+    const { signDerivativeUploads: fn } = await import('../operations/derivatives.js');
+    return fn(this._opDeps, input, this._opCtx(ctx));
   }
 
   async confirmUpload(input: ConfirmUploadInput, ctx?: MediaContext): Promise<IMediaDocument> {
@@ -733,11 +770,17 @@ export class MediaRepository extends Repository<IMediaDocument> {
    * real content hash (`hashStrategy: 'sha256'`) or store the client's
    * SHA-256 via server `upload()` with dedup enabled.
    */
+  /**
+   * Dedup lookup. Pass `expectedSize` wherever the caller knows the byte size —
+   * a hash match with a different length cannot be the same file, and on the
+   * presigned path the hash is client-computed. See `existsByHashVerb`.
+   */
   async existsByHash(
     hash: string,
     ctx?: MediaContext,
+    options?: { expectedSize?: number | undefined },
   ): Promise<{ exists: boolean; media?: IMediaDocument | undefined }> {
-    return existsByHashVerb(this, hash, ctx);
+    return existsByHashVerb(this, hash, ctx, options);
   }
 
   async getStorageByFolder(ctx?: MediaContext): Promise<Array<{ folder: string; totalSize: number; count: number }>> {

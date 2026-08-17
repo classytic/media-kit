@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
-import { createMedia } from '../../src/engine/create-media.js';
+import { bindMediaFlat as createMedia } from '../helpers/create-test-engine.js';
 import { InProcessMediaBus } from '../../src/events/in-process-bus.js';
 import { createTestEngine, teardownTestMongo } from '../helpers/create-test-engine.js';
 import { MemoryStorageDriver } from '../helpers/memory-driver.js';
@@ -120,9 +120,9 @@ describe('createMedia() engine factory', () => {
     it('closes the event transport', async () => {
       const { engine, cleanup } = await createTestEngine();
       try {
-        await engine.dispose();
+        await engine.close();
         // Dispose should be idempotent
-        await expect(engine.dispose()).resolves.not.toThrow();
+        await expect(engine.close()).resolves.not.toThrow();
       } finally {
         await cleanup();
       }

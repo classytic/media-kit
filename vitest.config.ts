@@ -58,8 +58,20 @@ export default defineConfig({
     ],
   },
   resolve: {
-    alias: {
-      '@classytic/mongokit': resolve(__dirname, 'node_modules/@classytic/mongokit/dist/index.mjs'),
-    },
+    alias: [
+      /**
+       * EXACT match only.
+       *
+       * As a plain object key this was a PREFIX alias, so every subpath import
+       * — `@classytic/mongokit/kernel-conformance`, `/adapter`, `/outbox` —
+       * resolved to `dist/index.mjs/<subpath>` and failed with a
+       * "Cannot find package" that names the subpath and not the alias.
+       * The regex anchors it, leaving subpaths to node's own exports map.
+       */
+      {
+        find: /^@classytic\/mongokit$/,
+        replacement: resolve(__dirname, 'node_modules/@classytic/mongokit/dist/index.mjs'),
+      },
+    ],
   },
 });

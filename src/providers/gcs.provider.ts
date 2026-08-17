@@ -17,10 +17,19 @@
  */
 
 import type { Storage, Bucket, FileMetadata } from '@google-cloud/storage';
-import type { StorageDriver, WriteResult, FileStat, PresignedUploadResult, ResumableUploadSession } from '../types';
+import type {
+  StorageDriver,
+  WriteResult,
+  FileStat,
+  PresignedUploadResult,
+  ResumableUploadSession,
+} from '../types/storage.js';
 import { withRetry, type RetryOptions } from '../utils/retry';
 import { pipeline } from 'node:stream';
 import { promisify } from 'node:util';
+import { metadataFetch } from './http.js';
+
+export type { StorageDriver, WriteResult, FileStat } from '../types/storage.js';
 
 const pipelineAsync = promisify(pipeline);
 
@@ -364,7 +373,7 @@ export class GCSProvider implements StorageDriver {
    */
   async abortResumableUpload(sessionUri: string): Promise<void> {
     try {
-      await fetch(sessionUri, { method: 'DELETE' });
+      await metadataFetch(sessionUri, { method: 'DELETE' });
     } catch {
       // Session may already be expired/completed — ignore
     }
@@ -377,7 +386,7 @@ export class GCSProvider implements StorageDriver {
    */
   async getResumableUploadStatus(sessionUri: string): Promise<{ uploadedBytes: number }> {
     try {
-      const response = await fetch(sessionUri, {
+      const response = await metadataFetch(sessionUri, {
         method: 'PUT',
         headers: {
           'Content-Length': '0',

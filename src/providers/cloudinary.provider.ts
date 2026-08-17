@@ -23,22 +23,25 @@
  * ```ts
  * import { CloudinaryProvider } from '@classytic/media-kit/providers/cloudinary';
  *
- * const engine = await createMedia({
- *   connection: mongoose.connection,
+ * const engine = await defineMedia({
+ *   processing: { enabled: false }, // Cloudinary handles optimization
+ * }).bind(mongoose.connection, {
  *   driver: new CloudinaryProvider({
  *     cloudName: process.env.CLOUDINARY_CLOUD_NAME,
  *     apiKey: process.env.CLOUDINARY_API_KEY,
  *     apiSecret: process.env.CLOUDINARY_API_SECRET,
  *   }),
- *   processing: { enabled: false }, // Cloudinary handles optimization
  * });
  * ```
  */
 
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
-import type { FileStat, StorageDriver, WriteResult } from '../types.js';
+import type { FileStat, StorageDriver, WriteResult } from '../types/storage.js';
 import { LazySecret, type SecretValue, validateSecretValue } from '../utils/lazy-secret.js';
+import { uploadFetch, metadataFetch, streamFetch } from './http.js';
+
+export type { StorageDriver, WriteResult, FileStat } from '../types/storage.js';
 
 const SEP = '\n';
 
@@ -254,7 +257,7 @@ export class CloudinaryProvider implements StorageDriver {
     form.append('signature', signature);
     form.append('overwrite', String(this.overwrite));
 
-    const res = await fetch(this.uploadUrl, { method: 'POST', body: form });
+    const res = await uploadFetch(this.uploadUrl, { method: 'POST', body: form });
 
     if (!res.ok) {
       const body = await res.text();
@@ -285,7 +288,7 @@ export class CloudinaryProvider implements StorageDriver {
    */
   async read(key: string): Promise<NodeJS.ReadableStream> {
     const url = this.getPublicUrl(key);
-    const res = await fetch(url);
+    const res = await streamFetch(url);
 
     if (!res.ok) throw new Error(`Cloudinary read failed (${res.status}): ${url}`);
     if (!res.body) throw new Error('Cloudinary response has no body');
@@ -315,7 +318,7 @@ export class CloudinaryProvider implements StorageDriver {
       invalidate: 'true',
     });
 
-    const res = await fetch(this.adminUrl(`/${resourceType}/destroy`), {
+    const res = await metadataFetch(this.adminUrl(`/${resourceType}/destroy`), {
       method: 'POST',
       body,
     });
@@ -339,7 +342,7 @@ export class CloudinaryProvider implements StorageDriver {
     const encodedId = encodeURIComponent(publicId).replace(/%2F/g, '/');
     const authHeader = await this.resolveAuthHeader();
 
-    const res = await fetch(this.adminUrl(`/resources/${resourceType}/upload/${encodedId}`), {
+    const res = await metadataFetch(this.adminUrl(`/resources/${resourceType}/upload/${encodedId}`), {
       headers: { Authorization: authHeader },
     });
 
@@ -354,7 +357,7 @@ export class CloudinaryProvider implements StorageDriver {
     const encodedId = encodeURIComponent(publicId).replace(/%2F/g, '/');
     const authHeader = await this.resolveAuthHeader();
 
-    const res = await fetch(this.adminUrl(`/resources/${resourceType}/upload/${encodedId}`), {
+    const res = await metadataFetch(this.adminUrl(`/resources/${resourceType}/upload/${encodedId}`), {
       headers: { Authorization: authHeader },
     });
 
@@ -395,7 +398,7 @@ export class CloudinaryProvider implements StorageDriver {
           ...(nextCursor && { next_cursor: nextCursor }),
         });
 
-        const res = await fetch(this.adminUrl(`/resources/${resourceType}?${params}`), {
+        const res = await metadataFetch(this.adminUrl(`/resources/${resourceType}?${params}`), {
           headers: { Authorization: authHeader },
         });
 

@@ -16,7 +16,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import mongoose, { type Connection } from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import { createMedia } from '../../src/engine/create-media.js';
+import { bindMediaFlat as createMedia } from '../helpers/create-test-engine.js';
 import { S3Provider } from '../../src/providers/s3.provider.js';
 import type { MediaEngine } from '../../src/engine/engine-types.js';
 import { MEDIA_EVENTS } from '../../src/events/event-constants.js';
@@ -67,7 +67,7 @@ describeE2E('E2E — MediaEngine with real S3 driver', () => {
         }
       }
     } finally {
-      await engine?.dispose();
+      await engine?.close();
       await connection?.close();
       await mongo?.stop();
     }

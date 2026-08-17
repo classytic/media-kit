@@ -7,7 +7,7 @@
  * delegates that preserve the public API surface.
  */
 
-import type { IMediaDocument } from '../../types.js';
+import type { IMediaDocument } from '../../types/media.js';
 import type { MediaContext } from '../../engine/engine-types.js';
 import type { MediaRepository } from '../media.repository.js';
 
@@ -46,13 +46,43 @@ export async function getByHashVerb(
  * real content hash (`hashStrategy: 'sha256'`) or store the client's
  * SHA-256 via server `upload()` with dedup enabled.
  */
+/**
+ * Is there already an asset with this content hash?
+ *
+ * ## `expectedSize` — why a hash match is not enough on its own
+ *
+ * On the presigned path the hash is COMPUTED BY THE CLIENT (it must be: the
+ * lookup happens before any bytes are uploaded). So a caller can claim any
+ * hash for any content. The damage is not to itself — it is to the NEXT
+ * genuine upload of the real file with that hash, which would short-circuit to
+ * the attacker's asset and never upload at all.
+ *
+ * A full fix means a storage-validated checksum. What is free right now is a
+ * consistency check: the caller states the byte size in the same request, and
+ * two files with one hash but different sizes cannot both be right. Passing
+ * `expectedSize` makes a mismatch REFUSE the dedup — the upload simply proceeds
+ * normally, which costs one upload and cannot return the wrong asset.
+ *
+ * It is a parameter rather than an internal rule because only the caller knows
+ * whether it has a trustworthy size; omitting it keeps the old behaviour rather
+ * than silently rejecting callers that cannot supply one.
+ */
 export async function existsByHashVerb(
   repo: MediaRepository,
   hash: string,
   ctx?: MediaContext,
+  options?: { expectedSize?: number | undefined },
 ): Promise<{ exists: boolean; media?: IMediaDocument | undefined }> {
   const media = await repo.getByHash(hash, ctx);
   if (!media) return { exists: false };
+
+  const expected = options?.expectedSize;
+  if (typeof expected === 'number' && Number.isFinite(expected) && media.size !== expected) {
+    // Same hash, different length — at least one claim is false. Decline the
+    // short-circuit rather than hand back an asset that is not this file.
+    return { exists: false };
+  }
+
   return { exists: true, media };
 }
 

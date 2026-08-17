@@ -18,13 +18,7 @@ import { resolveTenantConfig, type ResolvedTenantConfig, type TenantConfig } fro
  * and additionally support the legacy `{ tenantFieldType, multiTenant }` shape
  * so the engine factory can forward its own config shorthand.
  */
-export type MediaTenantInput =
-  | TenantConfig
-  | boolean
-  | {
-      tenantFieldType?: 'objectId' | 'string';
-      multiTenant?: boolean;
-    };
+export type MediaTenantInput = TenantConfig | boolean;
 
 /**
  * Media-kit's package-level tenant defaults. **Diverges from repo-core's
@@ -40,7 +34,7 @@ export type MediaTenantInput =
  *   - Hosts grepping for `'string'` / `required: false` find the seam
  *   - Tests can import + assert the contract
  */
-export const MEDIA_KIT_TENANT_DEFAULTS: {
+const MEDIA_KIT_TENANT_DEFAULTS: {
   readonly fieldType: 'string';
   readonly required: false;
 } = Object.freeze({
@@ -67,24 +61,20 @@ export function resolveMediaTenant(input: MediaTenantInput = {}): ResolvedTenant
     return resolveTenantConfig({ enabled: true, ...MEDIA_KIT_TENANT_DEFAULTS });
   }
 
-  // Legacy shorthand — translate to TenantConfig.
-  if ('tenantFieldType' in input || 'multiTenant' in input) {
-    const legacy = input as { tenantFieldType?: 'objectId' | 'string'; multiTenant?: boolean };
-    return resolveTenantConfig({
-      enabled: legacy.multiTenant !== false,
-      fieldType: legacy.tenantFieldType ?? MEDIA_KIT_TENANT_DEFAULTS.fieldType,
-      required: MEDIA_KIT_TENANT_DEFAULTS.required,
-    });
-  }
-
   // Canonical TenantConfig — fill caller-omitted slots with media-kit
   // defaults so repo-core sees the final values up-front.
   const config = input as TenantConfig;
-  return resolveTenantConfig({
+  const resolved = resolveTenantConfig({
     ...config,
     fieldType: config.fieldType ?? MEDIA_KIT_TENANT_DEFAULTS.fieldType,
     required: config.required ?? MEDIA_KIT_TENANT_DEFAULTS.required,
   });
+  if (resolved.strategy === 'custom') {
+    throw new Error(
+      "[media-kit] tenant.strategy 'custom' is unsupported: media operations require one concrete tenant field",
+    );
+  }
+  return resolved;
 }
 
 /**
@@ -132,9 +122,7 @@ export function injectTenantField(schema: Schema, tenant: ResolvedTenantConfig):
   // single would be a redundant prefix paid on every insert
   // (PACKAGE_RULES P11.1; fleet index audit 2026-07). Only when the schema
   // declared nothing to prepend does the tenant field get its own index.
-  const hasTenantLeading = (existingIndexes ?? []).some(
-    ([fields]) => Object.keys(fields)[0] === tenant.tenantField,
-  );
+  const hasTenantLeading = (existingIndexes ?? []).some(([fields]) => Object.keys(fields)[0] === tenant.tenantField);
   if (!hasTenantLeading) {
     schema.index({ [tenant.tenantField]: 1 } as Record<string, 1>);
   }

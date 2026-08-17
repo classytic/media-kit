@@ -7,7 +7,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { InProcessMediaBus } from '../../src/events/in-process-bus.js';
-import type { DomainEvent } from '../../src/events/transport.js';
+import type { DomainEvent } from '@classytic/primitives/events';
 
 function event(type: string, payload: unknown = {}): DomainEvent {
   return {

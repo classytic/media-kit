@@ -12,13 +12,56 @@
 
 import mongoose, { type Connection } from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import { createMedia } from '../../src/engine/create-media.js';
-import type { MediaEngine, MediaConfig } from '../../src/engine/engine-types.js';
-import type { EventTransport } from '../../src/events/transport.js';
+import { defineMedia } from '../../src/engine/define-media.js';
+import type { MediaEngine, MediaRuntime, MediaShape } from '../../src/engine/engine-types.js';
 import { MemoryStorageDriver } from './memory-driver.js';
 
-export interface TestEngineOptions extends Partial<Omit<MediaConfig, 'connection' | 'driver'>> {
-  eventTransport?: EventTransport;
+/** Flat test options — split into describe-time shape + bind-time runtime below. */
+export interface TestEngineOptions extends Partial<MediaShape & Omit<MediaRuntime, 'driver'>> {}
+
+/**
+ * TEST INFRA ONLY — routes a flat config through the real `defineMedia(shape).bind(conn, runtime)`.
+ *
+ * This is NOT a package shim (the package has no `createMedia`): it lives in tests so call sites
+ * that construct an engine — including ones that deliberately probe bad shapes / missing fields —
+ * stay readable as a single object. It splits the flat object into the standard shape/runtime
+ * halves and forwards to the real blueprint API.
+ */
+export function bindMediaFlat(
+  flat: { connection?: Connection } & Partial<MediaShape & MediaRuntime> = {},
+): Promise<MediaEngine> {
+  const {
+    connection,
+    driver,
+    providers,
+    defaultProvider,
+    eventTransport,
+    bridges,
+    cache,
+    logger,
+    plugins,
+    pagination,
+    authorize,
+    ...shape
+  } = flat;
+
+  const runtime: MediaRuntime = {
+    ...(driver !== undefined ? { driver } : {}),
+    ...(providers !== undefined ? { providers } : {}),
+    ...(defaultProvider !== undefined ? { defaultProvider } : {}),
+    ...(eventTransport !== undefined ? { eventTransport } : {}),
+    ...(bridges !== undefined ? { bridges } : {}),
+    ...(cache !== undefined ? { cache } : {}),
+    ...(logger !== undefined ? { logger } : {}),
+    ...(plugins !== undefined ? { plugins } : {}),
+    ...(pagination !== undefined ? { pagination } : {}),
+    ...(authorize !== undefined ? { authorize } : {}),
+  };
+
+  // Default to the `replace` collision policy: these suites reuse a single connection across
+  // many binds, exactly the case the old unconditional model purge covered. An explicit
+  // `forceRecreate` in the flat config still wins.
+  return defineMedia({ forceRecreate: true, ...shape }).bind(connection as Connection, runtime);
 }
 
 export interface TestEngineHandle {
@@ -47,20 +90,38 @@ export async function createTestEngine(
   const connection = await getSharedConnection();
   const driver = new MemoryStorageDriver();
 
-  const engine = await createMedia({
-    connection,
+  // Split the flat options into bind-time runtime collaborators vs describe-time shape.
+  const { providers, defaultProvider, eventTransport, bridges, cache, logger, plugins, pagination, authorize, ...shape } =
+    options;
+
+  const runtime: MediaRuntime = {
     driver,
+    ...(providers !== undefined ? { providers } : {}),
+    ...(defaultProvider !== undefined ? { defaultProvider } : {}),
+    ...(eventTransport !== undefined ? { eventTransport } : {}),
+    ...(bridges !== undefined ? { bridges } : {}),
+    ...(cache !== undefined ? { cache } : {}),
+    ...(logger !== undefined ? { logger } : {}),
+    ...(plugins !== undefined ? { plugins } : {}),
+    ...(pagination !== undefined ? { pagination } : {}),
+    ...(authorize !== undefined ? { authorize } : {}),
+  };
+
+  const engine = await defineMedia({
     suppressWarnings: true,
-    processing: { enabled: false, ...(options.processing ?? {}) },
-    ...options,
-  });
+    // The shared connection is reused across the whole suite, so every rebuild re-registers
+    // the Media model — opt into mongokit's `replace` policy (test/dev) instead of throwing.
+    forceRecreate: true,
+    ...shape,
+    processing: { enabled: false, ...(shape.processing ?? {}) },
+  }).bind(connection, runtime);
 
   return {
     engine,
     driver,
     connection,
     async cleanup() {
-      await engine.dispose();
+      await engine.close();
       // Drop all collections to reset state between tests
       const collections = await connection.db?.collections();
       if (collections) {

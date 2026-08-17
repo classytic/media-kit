@@ -25,13 +25,13 @@ const main = await import('../../dist/index.mjs').catch((err) => FAIL(`main impo
 
 const EXPECTED_MAIN = [
   // Engine
-  'createMedia',
+  'defineMedia',
   // Repository
   'MediaRepository',
   'STALE_PENDING_MAX_AGE_MS',
   'createMediaRepositories',
   // Models
-  'createMediaModels',
+  'defineMediaModels',
   'buildMediaSchema',
   'resolveMediaTenant',
   'injectTenantField',
@@ -66,10 +66,7 @@ const EXPECTED_MAIN = [
 ];
 
 for (const name of EXPECTED_MAIN) {
-  assert.ok(
-    typeof main[name] !== 'undefined',
-    `main export missing: ${name}`,
-  );
+  assert.ok(typeof main[name] !== 'undefined', `main export missing: ${name}`);
 }
 OK(`main — ${EXPECTED_MAIN.length} exports present`);
 
@@ -77,11 +74,7 @@ OK(`main — ${EXPECTED_MAIN.length} exports present`);
 assert.equal(typeof main.MEDIA_EVENTS, 'object');
 for (const key of ['ASSET_UPLOADED', 'ASSET_DELETED', 'ASSET_REPLACED', 'ASSET_MOVED', 'FOLDER_RENAMED']) {
   assert.ok(main.MEDIA_EVENTS[key], `MEDIA_EVENTS.${key} missing`);
-  assert.equal(
-    main.MEDIA_EVENTS[key].startsWith('media:'),
-    true,
-    `MEDIA_EVENTS.${key} must start with "media:"`,
-  );
+  assert.equal(main.MEDIA_EVENTS[key].startsWith('media:'), true, `MEDIA_EVENTS.${key} must start with "media:"`);
 }
 OK('MEDIA_EVENTS const — all entries follow media:resource.verb convention');
 
@@ -109,35 +102,51 @@ assert.equal(evt.meta.userId, 'u1');
 OK('createMediaEvent — produces arc-compatible DomainEvent shape');
 
 // ── Subpath: providers ─────────────────────────────────────────
-const s3 = await import('../../dist/providers/s3.mjs').catch((err) => FAIL(`providers/s3 import failed: ${err.message}`));
+const s3 = await import('../../dist/providers/s3.mjs').catch((err) =>
+  FAIL(`providers/s3 import failed: ${err.message}`),
+);
 assert.ok(s3.S3Provider, 'S3Provider missing');
 OK('./providers/s3 — S3Provider exported');
 
-const gcs = await import('../../dist/providers/gcs.mjs').catch((err) => FAIL(`providers/gcs import failed: ${err.message}`));
+const gcs = await import('../../dist/providers/gcs.mjs').catch((err) =>
+  FAIL(`providers/gcs import failed: ${err.message}`),
+);
 assert.ok(gcs.GCSProvider, 'GCSProvider missing');
 OK('./providers/gcs — GCSProvider exported');
 
-const local = await import('../../dist/providers/local.mjs').catch((err) => FAIL(`providers/local import failed: ${err.message}`));
+const local = await import('../../dist/providers/local.mjs').catch((err) =>
+  FAIL(`providers/local import failed: ${err.message}`),
+);
 assert.ok(local.LocalProvider, 'LocalProvider missing');
 OK('./providers/local — LocalProvider exported');
 
-const router = await import('../../dist/providers/router.mjs').catch((err) => FAIL(`providers/router import failed: ${err.message}`));
+const router = await import('../../dist/providers/router.mjs').catch((err) =>
+  FAIL(`providers/router import failed: ${err.message}`),
+);
 assert.ok(router.StorageRouter, 'StorageRouter missing');
 OK('./providers/router — StorageRouter exported');
 
-const imgbb = await import('../../dist/providers/imgbb.mjs').catch((err) => FAIL(`providers/imgbb import failed: ${err.message}`));
+const imgbb = await import('../../dist/providers/imgbb.mjs').catch((err) =>
+  FAIL(`providers/imgbb import failed: ${err.message}`),
+);
 assert.ok(imgbb.ImgbbProvider, 'ImgbbProvider missing');
 OK('./providers/imgbb — ImgbbProvider exported');
 
-const imagekit = await import('../../dist/providers/imagekit.mjs').catch((err) => FAIL(`providers/imagekit import failed: ${err.message}`));
+const imagekit = await import('../../dist/providers/imagekit.mjs').catch((err) =>
+  FAIL(`providers/imagekit import failed: ${err.message}`),
+);
 assert.ok(imagekit.ImageKitProvider, 'ImageKitProvider missing');
 OK('./providers/imagekit — ImageKitProvider exported');
 
-const cloudinary = await import('../../dist/providers/cloudinary.mjs').catch((err) => FAIL(`providers/cloudinary import failed: ${err.message}`));
+const cloudinary = await import('../../dist/providers/cloudinary.mjs').catch((err) =>
+  FAIL(`providers/cloudinary import failed: ${err.message}`),
+);
 assert.ok(cloudinary.CloudinaryProvider, 'CloudinaryProvider missing');
 OK('./providers/cloudinary — CloudinaryProvider exported');
 
-const cfImages = await import('../../dist/providers/cloudflare-images.mjs').catch((err) => FAIL(`providers/cloudflare-images import failed: ${err.message}`));
+const cfImages = await import('../../dist/providers/cloudflare-images.mjs').catch((err) =>
+  FAIL(`providers/cloudflare-images import failed: ${err.message}`),
+);
 assert.ok(cfImages.CloudflareImagesProvider, 'CloudflareImagesProvider missing');
 {
   const cf = new cfImages.CloudflareImagesProvider({
@@ -151,7 +160,9 @@ assert.ok(cfImages.CloudflareImagesProvider, 'CloudflareImagesProvider missing')
 OK('./providers/cloudflare-images — CloudflareImagesProvider exported + delivery URL shape');
 
 // ── Subpath: transforms ────────────────────────────────────────
-const transforms = await import('../../dist/transforms.mjs').catch((err) => FAIL(`transforms import failed: ${err.message}`));
+const transforms = await import('../../dist/transforms.mjs').catch((err) =>
+  FAIL(`transforms import failed: ${err.message}`),
+);
 assert.ok(transforms.AssetTransformService, 'AssetTransformService missing');
 OK('./transforms — AssetTransformService exported');
 
@@ -181,37 +192,37 @@ const parsed = schemas.mediaConfigSchema.parse({});
 assert.equal(parsed.suppressWarnings, false, 'default suppressWarnings should be false');
 OK('schemas.mediaConfigSchema.parse({}) — defaults applied');
 
+// ── Type-only subpaths ────────────────────────────────────────
+// Type contracts erase at runtime, but every published subpath must still
+// resolve as a valid ESM module for Node/bundler/package validation.
+for (const rel of ['types', 'types/storage', 'types/media', 'types/processing', 'types/uploads', 'types/config']) {
+  await import(`../../dist/${rel}.mjs`).catch((err) => FAIL(`./${rel} import failed: ${err.message}`));
+}
+OK('./types/* — aggregate and focused type-only subpaths resolve');
+
 // ── Package.json: no unexpected dependencies ──────────────────
 const { readFileSync } = await import('node:fs');
 const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'));
 
 assert.equal(pkg.type, 'module', 'package must be ESM-only');
 assert.equal(pkg.sideEffects, false, 'package must declare sideEffects: false for tree-shaking');
-assert.equal(
-  typeof pkg.dependencies,
-  'undefined',
-  'package must not have runtime deps — everything is peer',
-);
+assert.equal(typeof pkg.dependencies, 'undefined', 'package must not have runtime deps — everything is peer');
 OK('package.json — ESM-only, sideEffects:false, no runtime deps');
 
-// Mongokit peer floor must be at least 3.13.0 (UpdatePatch rename +
-// class-level bulk ops). Parse the range floor instead of string-matching a
+// Mongokit peer floor must be at least 3.30.0 — media-kit binds its model set
+// through mongokit's `defineModels` / `ModelBlueprint` (STANDARDIZATION-PLAN
+// §5), which ships in 3.30. Parse the range floor instead of string-matching a
 // specific version so legitimate floor bumps don't break the smoke test.
 const mongokitPeer = pkg.peerDependencies?.['@classytic/mongokit'] ?? '';
 const mongokitFloor = mongokitPeer.match(/>=\s*(\d+)\.(\d+)\.(\d+)/);
 assert.ok(
-  mongokitFloor &&
-    (Number(mongokitFloor[1]) > 3 ||
-      (Number(mongokitFloor[1]) === 3 && Number(mongokitFloor[2]) >= 13)),
-  `mongokit peer floor must be >=3.13.0, got: ${mongokitPeer}`,
+  mongokitFloor && (Number(mongokitFloor[1]) > 3 || (Number(mongokitFloor[1]) === 3 && Number(mongokitFloor[2]) >= 30)),
+  `mongokit peer floor must be >=3.30.0 (defineModels), got: ${mongokitPeer}`,
 );
-OK(`package.json — @classytic/mongokit peer dep ${mongokitPeer} (floor >=3.13.0)`);
+OK(`package.json — @classytic/mongokit peer dep ${mongokitPeer} (floor >=3.30.0, defineModels)`);
 
 // Zod peer is >=4.0.0
-assert.ok(
-  pkg.peerDependencies?.zod?.includes('4'),
-  `zod peer must be >=4, got: ${pkg.peerDependencies?.zod}`,
-);
+assert.ok(pkg.peerDependencies?.zod?.includes('4'), `zod peer must be >=4, got: ${pkg.peerDependencies?.zod}`);
 OK('package.json — zod peer dep >=4.0.0');
 
 // ── Publishing hygiene: package size ceiling ──────────────────
@@ -237,10 +248,7 @@ for (const rel of distStats) {
 // core bundle (private serving + signing + external/reference records left
 // it at ~209 KB). Still a bloat tripwire — if this trips again, check for
 // stray fixtures/assets before raising it.
-assert.ok(
-  totalMjsBytes < 220_000,
-  `dist JS size ${totalMjsBytes} bytes exceeds 220KB budget`,
-);
+assert.ok(totalMjsBytes < 220_000, `dist JS size ${totalMjsBytes} bytes exceeds 220KB budget`);
 OK(`package.json — dist JS size ${(totalMjsBytes / 1024).toFixed(1)} KB (budget 220 KB)`);
 
 // Subpath exports all resolve (already verified above, but assert count)

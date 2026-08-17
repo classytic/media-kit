@@ -96,3 +96,56 @@ them into the pipeline's `filename`/`mimeType`.
 - **Concurrency:** one PATCH at a time per upload (second writer gets
   `423 Locked`); offset mismatches return `409` with the authoritative
   `Upload-Offset`, which standard clients use to resume correctly.
+
+## Scaling across replicas (distributed lock)
+
+The single-writer PATCH guard is **process-local by default** — safe on one
+instance, but two replicas can otherwise accept the same offset and corrupt a
+staged upload. You have two options:
+
+1. **Sticky routing** — pin each upload session to one replica (e.g. hash the
+   session id at the load balancer). Then construct with `singleReplica: true`
+   to assert this and silence the boot warning:
+
+   ```ts
+   createTusUpload({ media, stagingDir, singleReplica: true });
+   ```
+
+2. **A distributed lock** — implement the token-fenced lock trio on your
+   `TusSessionStore` (a Redis `SET NX PX` is the canonical backing). The
+   service acquires a short **operation-level lease** per PATCH, auto-renews it
+   as bytes flow, and releases it with the ownership **token** — so a worker
+   whose lease expired mid-upload can never free (or overwrite) the worker that
+   took over. If a renew reports the lock lost, the PATCH stops writing and
+   returns `409` for the client to re-sync.
+
+   ```ts
+   const lockKey = (id: string) => `tus:lock:${id}`;
+   const store: TusSessionStore = {
+     ...redisSessionStore, // your create/get/setOffset/delete/list
+     async acquireLock(id, leaseMs) {
+       const token = crypto.randomUUID();
+       const ok = await redis.set(lockKey(id), token, 'NX', 'PX', leaseMs);
+       return ok ? { token, expiresAt: Date.now() + leaseMs } : null;
+     },
+     async renewLock(id, token, leaseMs) {
+       // renew only if we still own it (Lua CAS)
+       const res = await redis.eval(
+         `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('PEXPIRE', KEYS[1], ARGV[2]) else return 0 end`,
+         1, lockKey(id), token, String(leaseMs),
+       );
+       return res === 1;
+     },
+     async releaseLock(id, token) {
+       await redis.eval(
+         `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end`,
+         1, lockKey(id), token,
+       );
+     },
+   };
+   createTusUpload({ media, stagingDir, sessions: store, lockLeaseMs: 30_000 });
+   ```
+
+   Implement the **whole trio or none** — `acquireLock` alone can't fence
+   release. A *custom* store with no lock and no `singleReplica: true` logs a
+   one-time warning at the first PATCH.

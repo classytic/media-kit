@@ -1,5 +1,7 @@
 # @classytic/media-kit
 
+[![Sponsor](https://img.shields.io/github/sponsors/classytic?style=flat-square&label=Sponsor&logo=GitHub&color=EA4AAA)](https://github.com/sponsors/classytic)
+
 Engine-factory media management for Mongoose — framework-agnostic, Arc-compatible events, pluggable storage, and a bridge-based extension surface for hosts to compose their own ImageKit-like stack.
 
 Built on [@classytic/mongokit](https://www.npmjs.com/package/@classytic/mongokit) ≥3.13.0 and [@classytic/repo-core](https://www.npmjs.com/package/@classytic/repo-core) ≥0.4.0. Zero runtime deps.
@@ -484,6 +486,43 @@ processing: {
 
 ---
 
+## Security
+
+Media-kit hardens the parts it owns (temp-file writes use random names, never the
+client filename; the Sharp pipeline caps decode size). A few controls are **host
+responsibilities** — media-kit exposes them but cannot enable them for you:
+
+- **Serve SVG as an attachment (or under a strict CSP).** SVG is deliberately
+  **excluded** from the Sharp-processable set, so librsvg never rasterizes it and
+  the classic SVG→XXE vector is avoided — but that also means an uploaded SVG's
+  embedded `<script>` is **not stripped**. If you serve user SVGs inline from your
+  own origin, a `<script>` in the file is stored XSS. Serve them with
+  `Content-Disposition: attachment` — use the exported
+  `contentDispositionAttachment(filename)` (RFC 6266) helper, which the transform
+  layer already applies when `download` is requested — and/or host user media on a
+  cookieless origin under a restrictive `Content-Security-Policy`.
+
+- **Enable `fileTypes.verifyContent` for server-side / URL-import uploads.** It is
+  **off by default** (it needs the real bytes in hand). When on, `validateFile()`
+  sniffs magic bytes and rejects a dangerous declared/detected mismatch — e.g. a
+  file declared `image/png` whose bytes are actually HTML or SVG. Turn it on
+  wherever you hold the buffer (server upload, URL import) to close the
+  content-spoofing stored-XSS vector; the declared-MIME check always runs anyway.
+
+- **Tune the decompression-bomb cap if needed.** `processing.sharpOptions.limitInputPixels`
+  (default ~268 MP) bounds how large an image Sharp will decode before rejecting it,
+  so a small file declaring enormous dimensions can't inflate to gigabytes of RAM.
+  Lower it for untrusted public uploads.
+
+```ts
+{
+  fileTypes: { allowed: [...], verifyContent: true },       // sniff & reject spoofed bytes
+  processing: { sharpOptions: { limitInputPixels: 100_000_000 } }, // ~100 MP cap
+}
+```
+
+---
+
 ## Upload profiles
 
 Media-kit is a provider-agnostic **blob/data-bucket layer** (video, documents, arbitrary binary
@@ -554,3 +593,7 @@ GCS_KEY_FILENAME=/path/to/gcs-key.json
 MIT © Classytic
 
 See [CLAUDE.md](./CLAUDE.md) for the agent-facing guide.
+
+## Trademark
+
+The code is MIT-licensed. "Classytic"/"arc" names + logos are trademarks of Classytic LLC — see [TRADEMARK.md](TRADEMARK.md).

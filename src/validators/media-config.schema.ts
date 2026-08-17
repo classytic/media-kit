@@ -1,7 +1,7 @@
 /**
- * Zod v4 schema for MediaConfig validation.
+ * Zod v4 schema for media shape validation.
  *
- * Validates the config object passed to createMedia().
+ * Validates the serializable subset of the media shape passed to defineMedia().
  * Arc auto-converts Zod schemas to OpenAPI via z.toJSONSchema().
  */
 
@@ -53,9 +53,13 @@ export const deduplicationSchema = z.object({
 
 export const concurrencySchema = z.object({
   maxConcurrent: z.number().int().min(1).optional().default(5),
+  /** Admission control: bound the waiting queue (default unbounded). */
+  maxQueue: z.number().int().min(0).optional(),
+  /** Admission control: max wait for a slot in ms (default: wait forever). */
+  acquireTimeoutMs: z.number().int().min(0).optional(),
 });
 
-export const visibilityConfigSchema = z.object({
+const visibilityConfigSchema = z.object({
   default: z.enum(['public', 'private']).optional(),
   byFolder: z.record(z.string(), z.enum(['public', 'private'])).optional(),
 });
@@ -64,7 +68,7 @@ export const visibilityConfigSchema = z.object({
  * HMAC signing config. Exactly one of `keys` / `secret`; `servePath` is
  * required — it prefixes every URL `getSignedAssetUrl()` mints.
  */
-export const signingConfigSchema = z
+const signingConfigSchema = z
   .object({
     keys: z.record(z.string().min(1), z.string().min(1)).optional(),
     secret: z.string().min(1).optional(),
@@ -81,7 +85,7 @@ export const signingConfigSchema = z
  * absolute URLs — they are origin-normalized at check time
  * (`new URL(entry).origin`), so a path suffix is tolerated but pointless.
  */
-export const externalConfigSchema = z.object({
+const externalConfigSchema = z.object({
   allowedOrigins: z.array(z.url()).optional(),
 });
 

@@ -47,23 +47,26 @@
  * ```ts
  * import { CloudflareImagesProvider } from '@classytic/media-kit/providers/cloudflare-images';
  *
- * const engine = await createMedia({
- *   connection: mongoose.connection,
+ * const engine = await defineMedia({
+ *   processing: { enabled: false }, // Cloudflare variants handle resizing
+ * }).bind(mongoose.connection, {
  *   driver: new CloudflareImagesProvider({
  *     accountId: process.env.CF_ACCOUNT_ID,
  *     apiToken: process.env.CF_IMAGES_TOKEN, // needs Images:Edit permission
  *     accountHash: process.env.CF_IMAGES_ACCOUNT_HASH,
  *     defaultVariant: 'public',
  *   }),
- *   processing: { enabled: false }, // Cloudflare variants handle resizing
  * });
  * ```
  */
 
 import { createHmac } from 'node:crypto';
 import { Readable, Transform } from 'node:stream';
-import type { FileStat, PresignedUploadResult, StorageDriver, WriteResult } from '../types.js';
+import type { FileStat, PresignedUploadResult, StorageDriver, WriteResult } from '../types/storage.js';
 import { LazySecret, type SecretValue, validateSecretValue } from '../utils/lazy-secret.js';
+import { uploadFetch, metadataFetch, streamFetch } from './http.js';
+
+export type { StorageDriver, WriteResult, FileStat } from '../types/storage.js';
 
 const API_BASE = 'https://api.cloudflare.com/client/v4/accounts';
 const DELIVERY_BASE = 'https://imagedelivery.net';
@@ -288,7 +291,7 @@ export class CloudflareImagesProvider implements StorageDriver {
     }
 
     const authHeader = await this.resolveAuthHeader();
-    const res = await fetch(this.apiUrl('/v1'), {
+    const res = await uploadFetch(this.apiUrl('/v1'), {
       method: 'POST',
       headers: { Authorization: authHeader },
       body: form,
@@ -326,7 +329,7 @@ export class CloudflareImagesProvider implements StorageDriver {
    */
   async read(key: string, range?: { start: number; end: number }): Promise<NodeJS.ReadableStream> {
     const url = this.readUrl(key);
-    const res = await fetch(url, {
+    const res = await streamFetch(url, {
       headers: range ? { Range: `bytes=${range.start}-${range.end}` } : {},
     });
 
@@ -344,7 +347,7 @@ export class CloudflareImagesProvider implements StorageDriver {
    */
   async delete(key: string): Promise<boolean> {
     const authHeader = await this.resolveAuthHeader();
-    const res = await fetch(this.apiUrl(`/v1/${encodeImageId(key)}`), {
+    const res = await metadataFetch(this.apiUrl(`/v1/${encodeImageId(key)}`), {
       method: 'DELETE',
       headers: { Authorization: authHeader },
     });
@@ -363,7 +366,7 @@ export class CloudflareImagesProvider implements StorageDriver {
    */
   async exists(key: string): Promise<boolean> {
     const authHeader = await this.resolveAuthHeader();
-    const res = await fetch(this.apiUrl(`/v1/${encodeImageId(key)}`), {
+    const res = await metadataFetch(this.apiUrl(`/v1/${encodeImageId(key)}`), {
       headers: { Authorization: authHeader },
     });
     return res.ok;
@@ -379,7 +382,7 @@ export class CloudflareImagesProvider implements StorageDriver {
    */
   async stat(key: string): Promise<FileStat> {
     const authHeader = await this.resolveAuthHeader();
-    const res = await fetch(this.apiUrl(`/v1/${encodeImageId(key)}`), {
+    const res = await metadataFetch(this.apiUrl(`/v1/${encodeImageId(key)}`), {
       headers: { Authorization: authHeader },
     });
 
@@ -391,7 +394,7 @@ export class CloudflareImagesProvider implements StorageDriver {
     let size = 0;
     let contentType = 'application/octet-stream';
     try {
-      const head = await fetch(this.readUrl(key), { method: 'HEAD' });
+      const head = await metadataFetch(this.readUrl(key), { method: 'HEAD' });
       if (head.ok) {
         size = Number(head.headers.get('content-length') ?? 0);
         contentType = head.headers.get('content-type') ?? contentType;
@@ -465,7 +468,7 @@ export class CloudflareImagesProvider implements StorageDriver {
     form.append('expiry', new Date(Date.now() + clamped * 1000).toISOString());
 
     const authHeader = await this.resolveAuthHeader();
-    const res = await fetch(this.apiUrl('/v2/direct_upload'), {
+    const res = await metadataFetch(this.apiUrl('/v2/direct_upload'), {
       method: 'POST',
       headers: { Authorization: authHeader },
       body: form,

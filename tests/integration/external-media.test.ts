@@ -23,7 +23,7 @@ import { createTestEngine, teardownTestMongo, type TestEngineHandle } from '../h
 import { createAssetTransform } from '../../src/transforms/asset-transform.js';
 import { MEDIA_EVENTS } from '../../src/events/event-constants.js';
 import { EXTERNAL_PROVIDER, buildExternalKey, externalUrlHash } from '../../src/utils/external.js';
-import type { TransformResponse } from '../../src/types.js';
+import type { TransformResponse } from '../../src/types/index.js';
 import type { DomainEvent } from '@classytic/primitives/events';
 
 const URL_CF = 'https://imagedelivery.net/acct/uuid-1234/public';

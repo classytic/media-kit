@@ -6,7 +6,9 @@
  * so operation files can run unchanged.
  */
 
-import type { StorageDriver, MediaKitLogger, ImageAdapter } from '../types.js';
+import type { StorageDriver } from '../types/storage.js';
+import type { ImageAdapter } from '../types/processing.js';
+import type { MediaKitLogger } from '../types/config.js';
 import type { ResolvedMediaConfig } from '../engine/engine-types.js';
 import type { MediaRepository } from '../repositories/media.repository.js';
 import type { DriverRegistry } from '../providers/driver-registry.js';

@@ -11,7 +11,7 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import mongoose, { type Connection } from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import { createMedia } from '../../src/engine/create-media.js';
+import { bindMediaFlat as createMedia } from '../helpers/create-test-engine.js';
 import { MemoryStorageDriver } from '../helpers/memory-driver.js';
 
 let mongo: MongoMemoryServer | null = null;
@@ -85,7 +85,7 @@ describe('createMedia() — Zod config validation', () => {
     expect(engine.config.softDelete?.enabled).toBe(true);
     expect(engine.config.softDelete?.ttlDays).toBe(30); // schema default
     expect(engine.config.softDelete?.ttlIndex).toBe(false); // TTL index is opt-in
-    await engine.dispose();
+    await engine.close();
   });
 
   it('softDelete without ttlIndex creates NO TTL index (schema NOR collection — opt-in contract)', async () => {
@@ -107,7 +107,7 @@ describe('createMedia() — Zod config validation', () => {
     await new Promise((resolve) => setTimeout(resolve, 200)); // settle fire-and-forget createIndex
     const collectionIndexes = await engine.models.Media.collection.indexes();
     expect(collectionIndexes.filter((idx) => idx.expireAfterSeconds !== undefined)).toHaveLength(0);
-    await engine.dispose();
+    await engine.close();
   });
 
   it('softDelete.ttlIndex: true creates the deletedAt TTL index (ttlDays window)', async () => {
@@ -131,7 +131,7 @@ describe('createMedia() — Zod config validation', () => {
     expect(ttlCollection).toHaveLength(1);
     expect(ttlCollection[0]!.expireAfterSeconds).toBe(30 * 86400);
     expect(ttlCollection[0]!.key).toEqual({ deletedAt: 1 });
-    await engine.dispose();
+    await engine.close();
   });
 
   it('still requires connection + driver (zod parse runs after these checks)', async () => {

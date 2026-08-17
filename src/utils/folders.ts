@@ -5,7 +5,7 @@
  * Supports unlimited nesting levels (GitHub-style folder hierarchy).
  */
 
-import type { FolderNode, FolderTree, BreadcrumbItem } from '../types';
+import type { FolderNode, FolderTree, BreadcrumbItem } from '../types/folders.js';
 
 /**
  * Folder with stats (from aggregation)

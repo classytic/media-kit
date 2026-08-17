@@ -16,13 +16,11 @@
  * dedicated engine whose default IS that provider.
  */
 
-import type { OperationDeps } from './types';
+import type { OperationDeps } from './types.js';
+import type { ConfirmUploadInput, OperationContext } from '../types/uploads.js';
+import type { IMediaDocument } from '../types/media.js';
 import type {
-  ConfirmUploadInput,
-  OperationContext,
-  IMediaDocument,
   PresignedUploadResult,
-  EventError,
   HashStrategy,
   InitiateMultipartInput,
   MultipartUploadSession,
@@ -30,7 +28,8 @@ import type {
   SignedPartResult,
   BatchPresignInput,
   BatchPresignResult,
-} from '../types';
+} from '../types/storage.js';
+import type { EventError } from './event-types.js';
 import { createError } from '@classytic/repo-core/errors';
 import { computeFileHash } from '../utils/hash';
 import { isAllowedMimeType, isImage } from '../utils/mime';
@@ -49,6 +48,7 @@ import {
 } from './helpers';
 import { processImage } from './process-image';
 import { resolveVisibility } from '../utils/visibility';
+import { toStoredVariants } from './derivatives.js';
 
 /**
  * Enforce the engine's upload policy (allowed MIME types + max size) before
@@ -56,7 +56,7 @@ import { resolveVisibility } from '../utils/visibility';
  * policy must gate at signing time; `size` is the client-declared size and
  * is re-checked from storage at confirm time.
  */
-function enforcePresignPolicy(deps: OperationDeps, contentType: string, size?: number): void {
+export function enforcePresignPolicy(deps: OperationDeps, contentType: string, size?: number): void {
   const { allowed = [], maxSize } = deps.config.fileTypes || {};
 
   if (allowed.length > 0 && !isAllowedMimeType(contentType, allowed)) {
@@ -136,6 +136,79 @@ function assertTenantBinding(tenantSegment: string | undefined, organizationId: 
  * Always signs against the DEFAULT provider — see the module JSDoc for why
  * presigned flows have no per-call `provider` option.
  */
+/**
+ * The ONE answer for "this storage key already belongs to a media record".
+ *
+ * Raised from two places that must agree: the `isKeyRegistered()` pre-check,
+ * and the unique-index violation when two confirmations race that pre-check.
+ * A caller must not be able to tell which one fired — otherwise the concurrent
+ * path would surface a raw E11000 as a 500 and look like a server fault rather
+ * than the ownership refusal it is.
+ */
+function keyInUse(key: string): Error & { code?: string } {
+  const err = createError(403, `Storage key '${key}' is already registered to an existing media record`);
+  err.code = 'media.confirm.key_in_use';
+  return err;
+}
+
+/**
+ * The slice of the host's scan bridge the presigned path uses.
+ *
+ * Structural on purpose: media-kit calls a scanner without depending on one,
+ * so a host can wire ClamAV, a cloud API or its own heuristic without this file
+ * knowing which.
+ */
+interface ScanBridgeLike {
+  scan(
+    buffer: Buffer,
+    mimeType: string,
+    filename: string,
+    ctx?: { organizationId?: string; userId?: string },
+  ): Promise<{ verdict: string; reason?: string }>;
+}
+
+/**
+ * MongoDB duplicate-key, at either layer it can surface from.
+ *
+ * The raw driver raises `E11000`, but the repository layer intercepts it first
+ * and rethrows a 409 carrying a structural `duplicate` descriptor. Both are
+ * matched, and both STRUCTURALLY — never by parsing the human message, which is
+ * the layer most likely to be reworded and would take this guard blind without
+ * failing anything.
+ */
+function isDuplicateKeyError(err: unknown): boolean {
+  const e = err as {
+    code?: unknown;
+    codeName?: unknown;
+    message?: unknown;
+    status?: unknown;
+    duplicate?: unknown;
+  } | null;
+  if (!e) return false;
+  if (e.code === 11000 || e.codeName === 'DuplicateKey') return true;
+  if (e.status === 409 && e.duplicate !== undefined) return true;
+  return /E11000/.test(String(e.message ?? ''));
+}
+
+/**
+ * Create the record that CLAIMS a storage key, translating the unique-index
+ * violation into the same refusal the sequential pre-check produces.
+ *
+ * The pre-check reads and the create writes, with nothing binding them — so
+ * under concurrency both callers pass the check and the DATABASE is the only
+ * thing that can still say no. Here that "no" is normalised, because a caller
+ * must not be able to distinguish the raced path (which would otherwise be a
+ * 500 E11000) from the ordinary one.
+ */
+async function createOwningKey<T>(_deps: OperationDeps, key: string, create: () => Promise<T>): Promise<T> {
+  try {
+    return await create();
+  } catch (err) {
+    if (isDuplicateKeyError(err)) throw keyInUse(key);
+    throw err;
+  }
+}
+
 export async function getSignedUploadUrl(
   deps: OperationDeps,
   filename: string,
@@ -228,11 +301,7 @@ export async function confirmUpload(
     // tenant, incl. soft-deleted) can't be confirmed again. Without this, a
     // caller who learns another tenant's key could register it under their
     // own tenant and later hardDelete() the other tenant's storage object.
-    if (await deps.repository.isKeyRegistered(input.key)) {
-      const err = createError(403, `Storage key '${input.key}' is already registered to an existing media record`);
-      err.code = 'media.confirm.key_in_use';
-      throw err;
-    }
+    if (await deps.repository.isKeyRegistered(input.key)) throw keyInUse(input.key);
 
     // Verify the file actually exists in storage
     const exists = await deps.driver.exists(input.key);
@@ -283,17 +352,47 @@ export async function confirmUpload(
 
     if (hashStrategy === 'sha256') {
       // Stream entire file for SHA-256 (expensive — only use when deduplication is enabled)
-      try {
-        const { computeStreamHash } = await import('../utils/hash');
-        const stream = await deps.driver.read(input.key);
-        const algorithm = deps.config.deduplication?.algorithm || 'sha256';
-        hash = await computeStreamHash(stream, algorithm);
-      } catch {
-        hash = computeFileHash(Buffer.from(`${input.key}:${actualSize}`));
+      /**
+       * An EXPLICIT `hashStrategy: 'sha256'` must produce a real content hash
+       * or FAIL. It used to fall back to `hash(key:size)` on any error — a
+       * placeholder that is unique per object and therefore matches nothing,
+       * so deduplication was silently off for exactly the caller who asked for
+       * the strongest guarantee. The record looked identical to a correctly
+       * hashed one; only the dedup that never fired would have shown it.
+       */
+      const { computeStreamHash } = await import('../utils/hash');
+      const stream = await deps.driver.read(input.key);
+      const algorithm = deps.config.deduplication?.algorithm || 'sha256';
+      hash = await computeStreamHash(stream, algorithm);
+      if (!hash) {
+        throw createError(
+          500,
+          `Could not compute a ${algorithm} hash for '${input.key}'. ` +
+            'Refusing to store a placeholder in its place — it would match nothing and ' +
+            'disable deduplication for this asset without saying so.',
+        );
       }
     } else if (hashStrategy === 'etag') {
       // Use ETag from storage stat — no file download
       hash = input.etag || stat.etag || computeFileHash(Buffer.from(`${input.key}:${actualSize}`));
+    } else if (input.sha256) {
+      /**
+       * The CLIENT's content hash — the one dedup actually searches by.
+       *
+       * `start-write` answers "have I seen these bytes?" with
+       * `existsByHash(sha256)`, where the sha256 is computed on the device from
+       * the final blob. Confirm then stored `hash(key:size)` instead, so the
+       * stored value and the searched value were different things and a repeat
+       * upload of identical bytes could never hit. Deduplication was configured
+       * on, reported no error, and deduplicated nothing.
+       *
+       * Same trust model as the display hints above: worst case a client
+       * mis-reports its own tenant's hash and loses its own dedup. Note the
+       * ordering — an explicit `hashStrategy` still wins, because a caller that
+       * asked for a server-computed hash stated something specific and a
+       * client-supplied value must not override it.
+       */
+      hash = input.sha256;
     } else {
       // 'skip' — deterministic placeholder from key+size (default)
       hash = computeFileHash(Buffer.from(`${input.key}:${actualSize}`));
@@ -322,38 +421,115 @@ export async function confirmUpload(
     // overwrite them in the processing → ready patch.
     const clientAspectRatio = deriveAspectRatio(input.width, input.height);
 
-    let media = await deps.repository.createMedia(
-      {
-        filename: input.filename,
-        originalFilename: input.filename,
-        title,
-        mimeType: effectiveMimeType,
-        size: actualSize,
-        url,
-        key: input.key,
-        hash,
-        // Presigned flows always land in the default provider (see module
-        // JSDoc). Stamp its registry key so per-doc routing survives a
-        // later defaultProvider change.
-        provider: deps.registry.defaultName,
-        status: 'ready',
-        folder,
-        alt: input.alt,
-        // Same precedence as upload(): explicit input > byFolder rule > default.
-        visibility: resolveVisibility(deps.config.visibility, folder, input.visibility),
-        tokenVersion: 0,
-        variants: [],
-        tags: [],
-        metadata: {},
-        ...(organizationId && { organizationId }),
-        ...(input.expiresAt && { expiresAt: input.expiresAt }),
-        ...(input.width !== undefined && { width: input.width }),
-        ...(input.height !== undefined && { height: input.height }),
-        ...(clientAspectRatio !== undefined && { aspectRatio: clientAspectRatio }),
-        ...(input.thumbhash !== undefined && { thumbhash: input.thumbhash }),
-        ...(input.dominantColor !== undefined && { dominantColor: input.dominantColor }),
-      },
-      context,
+    /**
+     * Run the host's SCAN BRIDGE on the presigned path too, when one is wired.
+     *
+     * The bridge was honoured on buffered uploads and skipped here — so a
+     * deployment that deliberately configured a scanner had it silently not run
+     * on the flow that carries almost every upload. That is a declared
+     * capability enforced in one place out of two; the operator sees "scanning
+     * enabled" and gets it for the path nobody uses.
+     *
+     * This adds NO policy of its own: with no bridge configured — be-prod today
+     * — nothing changes and nothing is downloaded. Whether to scan, and what to
+     * do about SVG or mislabelled bytes, stays the host's decision. This only
+     * makes that decision effective.
+     *
+     * Reading the object back is the cost of the presigned design (the API
+     * never saw the bytes), and it is paid ONLY when a host asked for it.
+     */
+    let scanQuarantineReason: string | null = null;
+    const scanBridge = (deps.repository as { bridges?: { scan?: ScanBridgeLike } }).bridges?.scan;
+    if (scanBridge) {
+      const chunks: Buffer[] = [];
+      for await (const chunk of await deps.driver.read(input.key)) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as unknown as Uint8Array));
+      }
+      const bytes = Buffer.concat(chunks);
+
+      let verdict: { verdict: string; reason?: string };
+      try {
+        verdict = await scanBridge.scan(bytes, effectiveMimeType, input.filename, {
+          ...(organizationId ? { organizationId: String(organizationId) } : {}),
+        });
+      } catch (err) {
+        // A scanner that ERRORS is not a clean bill of health — absence of an
+        // answer is not a negative answer. Refuse rather than admit unscanned
+        // bytes to a library whose operator believes scanning is on.
+        throw createError(
+          502,
+          `[media] scan failed for '${input.key}': ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      if (verdict.verdict === 'reject') {
+        throw createError(422, `[media] upload rejected by scan: ${verdict.reason ?? 'no reason given'}`);
+      }
+      if (verdict.verdict === 'quarantine') {
+        scanQuarantineReason = verdict.reason ?? 'quarantined by scan';
+      }
+    }
+
+    /**
+     * Verify + normalise client derivatives BEFORE the record exists.
+     *
+     * Resolved here rather than inline so a rejected variant fails with NO media
+     * row written. Building the row first and throwing during its construction
+     * would be the same outcome by luck, not by design — and a rejected key
+     * THROWS rather than dropping that variant, because a record silently
+     * missing its variants is indistinguishable from a client that produced
+     * none.
+     */
+    const storedVariants = input.variants?.length ? await toStoredVariants(deps, input.key, input.variants) : [];
+
+    let media = await createOwningKey(deps, input.key, () =>
+      deps.repository.createMedia(
+        {
+          filename: input.filename,
+          /**
+           * What the USER picked, which is not always what we store.
+           *
+           * A `photo.jpg` re-encoded to WebP is stored as `photo.webp` so the key
+           * matches the bytes — but the provenance is still `photo.jpg`, and that
+           * is what an operator recognises in a list. Defaulting this to the
+           * stored name meant the original was overwritten by the derived one and
+           * the user's own filename was simply gone.
+           */
+          originalFilename: input.originalFilename || input.filename,
+          title,
+          mimeType: effectiveMimeType,
+          size: actualSize,
+          url,
+          key: input.key,
+          hash,
+          // Presigned flows always land in the default provider (see module
+          // JSDoc). Stamp its registry key so per-doc routing survives a
+          // later defaultProvider change.
+          provider: deps.registry.defaultName,
+          // A quarantined asset is NOT `ready`. The buffered path marks these
+          // `error` so nothing serves them; the two paths must agree, or the same
+          // verdict would mean two different things depending on how the file
+          // arrived.
+          status: scanQuarantineReason ? 'error' : 'ready',
+          ...(scanQuarantineReason ? { errorMessage: scanQuarantineReason } : {}),
+          folder,
+          alt: input.alt,
+          // Same precedence as upload(): explicit input > byFolder rule > default.
+          visibility: resolveVisibility(deps.config.visibility, folder, input.visibility),
+          tokenVersion: 0,
+          variants: storedVariants,
+          tags: [],
+          metadata: {},
+          ...(organizationId && { organizationId }),
+          ...(input.expiresAt && { expiresAt: input.expiresAt }),
+          ...(input.width !== undefined && { width: input.width }),
+          ...(input.height !== undefined && { height: input.height }),
+          ...(clientAspectRatio !== undefined && { aspectRatio: clientAspectRatio }),
+          ...(input.thumbhash !== undefined && { thumbhash: input.thumbhash }),
+          ...(input.dominantColor !== undefined && { dominantColor: input.dominantColor }),
+        },
+        context,
+      ),
     );
 
     // Optional post-confirm processing (ThumbHash, dominant color, variants)
@@ -407,6 +583,44 @@ export async function confirmUpload(
             },
           });
 
+          /**
+           * WRITE THE PROCESSED BYTES BACK OVER THE PRIMARY.
+           *
+           * Without this, `process: true` was metadata-only: it computed
+           * dimensions, placeholders and variants from the processed image and
+           * then persisted the ORIGINAL object untouched. So the downloadable
+           * primary kept its EXIF — including GPS — while every layer above
+           * reported the asset as processed, and commerce-ui's own upload
+           * contract told users the server had stripped it. A guarantee claimed
+           * and not delivered, on the one path taken by clients that could not
+           * process locally (old browsers) — i.e. exactly the uploads nobody
+           * checks.
+           *
+           * Same key on purpose: the URL is already public and the record
+           * already points at it, so replacing in place keeps one object with
+           * one identity. `size` and `mimeType` are re-derived from what was
+           * actually written — leaving the original's size beside re-encoded
+           * bytes is how a later integrity check fails for no visible reason.
+           *
+           * Best-effort: a failed rewrite must NOT fail the upload, because the
+           * original is still a valid asset. It is logged, and the metadata
+           * below still describes what the user will see.
+           */
+          let rewrittenSize: number | undefined;
+          let rewrittenMime: string | undefined;
+          if (processed.finalBuffer && processed.finalBuffer.length > 0) {
+            try {
+              await deps.driver.write(input.key, processed.finalBuffer, processed.finalMimeType);
+              rewrittenSize = processed.finalBuffer.length;
+              rewrittenMime = processed.finalMimeType;
+            } catch (rewriteErr) {
+              log(deps, 'warn', 'Failed to replace primary with processed bytes — original retained', {
+                key: input.key,
+                error: rewriteErr instanceof Error ? rewriteErr.message : String(rewriteErr),
+              });
+            }
+          }
+
           // processing → ready with payload merge in the same CAS.
           const payload: Record<string, unknown> = {
             width: processed.width,
@@ -415,6 +629,8 @@ export async function confirmUpload(
             thumbhash: processed.thumbhash,
             dominantColor: processed.dominantColor,
             exif: processed.exif,
+            ...(rewrittenSize !== undefined ? { size: rewrittenSize } : {}),
+            ...(rewrittenMime !== undefined ? { mimeType: rewrittenMime } : {}),
           };
           if (processed.variants.length > 0) {
             payload.variants = processed.variants;
@@ -635,11 +851,7 @@ export async function completeMultipartUpload(
     // checks are what keep it trustworthy.
     const keyShape = assertGeneratedKeyShape(input.key);
     assertTenantBinding(keyShape.tenantSegment, organizationId);
-    if (await deps.repository.isKeyRegistered(input.key)) {
-      const err = createError(403, `Storage key '${input.key}' is already registered to an existing media record`);
-      err.code = 'media.confirm.key_in_use';
-      throw err;
-    }
+    if (await deps.repository.isKeyRegistered(input.key)) throw keyInUse(input.key);
 
     // Assemble parts in storage
     const { etag, size } = await deps.driver.completeMultipartUpload(input.key, input.uploadId, input.parts);
@@ -666,37 +878,48 @@ export async function completeMultipartUpload(
     const clientAspectRatio = deriveAspectRatio(input.width, input.height);
 
     // Create DB record
-    let media = await deps.repository.createMedia(
-      {
-        filename: input.filename,
-        originalFilename: input.filename,
-        title,
-        mimeType: input.mimeType,
-        size: actualSize,
-        url,
-        key: input.key,
-        hash,
-        // Presigned/multipart flows always land in the default provider (see
-        // module JSDoc). Stamp its registry key so per-doc routing survives
-        // a later defaultProvider change.
-        provider: deps.registry.defaultName,
-        status: 'ready',
-        folder,
-        alt: input.alt,
-        // Same precedence as upload()/confirmUpload(): byFolder rule > default.
-        visibility: resolveVisibility(deps.config.visibility, folder),
-        tokenVersion: 0,
-        variants: [],
-        tags: [],
-        metadata: {},
-        ...(organizationId && { organizationId }),
-        ...(input.width !== undefined && { width: input.width }),
-        ...(input.height !== undefined && { height: input.height }),
-        ...(clientAspectRatio !== undefined && { aspectRatio: clientAspectRatio }),
-        ...(input.thumbhash !== undefined && { thumbhash: input.thumbhash }),
-        ...(input.dominantColor !== undefined && { dominantColor: input.dominantColor }),
-      },
-      context,
+    let media = await createOwningKey(deps, input.key, () =>
+      deps.repository.createMedia(
+        {
+          filename: input.filename,
+          /**
+           * What the USER picked, which is not always what we store.
+           *
+           * A `photo.jpg` re-encoded to WebP is stored as `photo.webp` so the key
+           * matches the bytes — but the provenance is still `photo.jpg`, and that
+           * is what an operator recognises in a list. Defaulting this to the
+           * stored name meant the original was overwritten by the derived one and
+           * the user's own filename was simply gone.
+           */
+          originalFilename: input.originalFilename || input.filename,
+          title,
+          mimeType: input.mimeType,
+          size: actualSize,
+          url,
+          key: input.key,
+          hash,
+          // Presigned/multipart flows always land in the default provider (see
+          // module JSDoc). Stamp its registry key so per-doc routing survives
+          // a later defaultProvider change.
+          provider: deps.registry.defaultName,
+          status: 'ready',
+          folder,
+          alt: input.alt,
+          // Same precedence as upload()/confirmUpload(): byFolder rule > default.
+          visibility: resolveVisibility(deps.config.visibility, folder),
+          tokenVersion: 0,
+          variants: [],
+          tags: [],
+          metadata: {},
+          ...(organizationId && { organizationId }),
+          ...(input.width !== undefined && { width: input.width }),
+          ...(input.height !== undefined && { height: input.height }),
+          ...(clientAspectRatio !== undefined && { aspectRatio: clientAspectRatio }),
+          ...(input.thumbhash !== undefined && { thumbhash: input.thumbhash }),
+          ...(input.dominantColor !== undefined && { dominantColor: input.dominantColor }),
+        },
+        context,
+      ),
     );
 
     // Optional post-upload processing (same as confirmUpload process flag)

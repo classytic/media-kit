@@ -27,7 +27,7 @@
  * // → https://img.example.com/<sig>/rs:fit:640:0/q:80/<base64url>.webp
  *
  * // Route ALL public asset URLs through imgproxy:
- * const engine = await createMedia({ ..., bridges: { cdn: imgproxy.asCdnBridge({ format: 'webp' }) } });
+ * const engine = await defineMedia({ ... }).bind(connection, { driver, bridges: { cdn: imgproxy.asCdnBridge({ format: 'webp' }) } });
  * ```
  */
 

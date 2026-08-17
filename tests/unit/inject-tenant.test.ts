@@ -32,15 +32,13 @@ describe('resolveMediaTenant', () => {
     expect(resolved.strategy).toBe('none');
   });
 
-  it('accepts legacy shorthand { tenantFieldType, multiTenant }', () => {
-    const resolved = resolveMediaTenant({ tenantFieldType: 'objectId', multiTenant: true });
-    expect(resolved.enabled).toBe(true);
-    expect(resolved.fieldType).toBe('objectId');
-  });
-
-  it('translates multiTenant: false in legacy shorthand to disabled', () => {
-    const resolved = resolveMediaTenant({ tenantFieldType: 'string', multiTenant: false });
-    expect(resolved.enabled).toBe(false);
+  it('rejects custom tenant resolution before repositories are built', () => {
+    expect(() =>
+      resolveMediaTenant({
+        strategy: 'custom',
+        resolve: () => ({ accountId: 'a1' }),
+      }),
+    ).toThrow("[media-kit] tenant.strategy 'custom' is unsupported");
   });
 });
 

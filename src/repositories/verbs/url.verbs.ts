@@ -10,7 +10,7 @@
  */
 
 import { createError } from '@classytic/repo-core/errors';
-import type { IMediaDocument } from '../../types.js';
+import type { IMediaDocument } from '../../types/media.js';
 import type { MediaContext } from '../../engine/engine-types.js';
 import type { SourceRef } from '../../bridges/source.bridge.js';
 import type { TransformOpOutput } from '../../bridges/transform.bridge.js';

@@ -17,3 +17,10 @@ export type {
   ImgproxyUrlBuilder,
   ImgproxyUrlBuilderConfig,
 } from './imgproxy';
+
+export type {
+  TransformCache,
+  TransformParams,
+  TransformRequest,
+  TransformResponse,
+} from '../types/transforms.js';

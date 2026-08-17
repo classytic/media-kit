@@ -28,8 +28,10 @@ import type {
   PresignedUploadResult,
   SignedPartResult,
   CompletedPart,
-} from '../types';
+} from '../types/storage.js';
 import { withRetry, type RetryOptions } from '../utils/retry';
+
+export type { StorageDriver, StorageWriteOptions, WriteResult, FileStat } from '../types/storage.js';
 
 /**
  * S3 Provider Configuration

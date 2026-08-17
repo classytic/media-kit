@@ -13,7 +13,8 @@
  * ```
  */
 
-import type { StorageDriver, TransformCache } from '../types';
+import type { StorageDriver } from '../types/storage.js';
+import type { TransformCache } from '../types/transforms.js';
 
 export interface StorageTransformCacheConfig {
   /** Key prefix for cached transforms (default: '__transforms') */

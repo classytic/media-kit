@@ -1,9 +1,16 @@
 /**
- * Engine types for @classytic/media-kit v3.
+ * Engine types for @classytic/media-kit.
  *
- * MediaConfig — what the host passes to createMedia()
- * MediaEngine — what createMedia() returns (frozen)
+ * MediaShape   — describe-time policy passed to `defineMedia(shape)` (pure, no I/O)
+ * MediaRuntime — bind-time collaborators passed to `blueprint.bind(connection, runtime)`
+ * MediaEngine  — what `bind()` returns (frozen)
  * MediaContext — operation context threaded through domain verbs
+ *
+ * Construction is `defineMedia(shape).bind(connection, runtime)` — there is no
+ * `createMedia(config)` and no flat `MediaConfig`. The shape/runtime split follows
+ * the Kernel Construction Standard §6.2: immutable, I/O-free policy is describe-time;
+ * the live connection and every live collaborator (drivers, transport, bridges,
+ * cache, logger, authorize callback) is bind-time.
  */
 
 import type { Connection, Model } from 'mongoose';
@@ -15,30 +22,103 @@ import type { MediaRepository } from '../repositories/media.repository.js';
 import type { MediaBridges } from '../bridges/types.js';
 import type { MediaTenantInput } from '../models/inject-tenant.js';
 import type { DriverRegistry } from '../providers/driver-registry.js';
+import type { StorageDriver } from '../types/storage.js';
+import type { IMediaDocument } from '../types/media.js';
 import type {
-  StorageDriver,
-  IMediaDocument,
   FileTypesConfig,
   FolderConfig,
-  ProcessingConfig,
   DeduplicationConfig,
   SoftDeleteConfig,
   ConcurrencyConfig,
-  MediaCacheConfig,
   MediaKitLogger,
   VisibilityConfig,
   MediaSigningConfig,
   ServeAuthorize,
   ExternalMediaConfig,
-} from '../types.js';
+} from '../types/config.js';
+import type { MediaCacheConfig, ProcessingConfig } from '../types/processing.js';
 import type { UrlSigner } from '../signing/index.js';
 
-// ── MediaConfig (input to createMedia) ───────────────────────
+// ── MediaShape (describe-time policy — passed to defineMedia) ─
+//
+// Immutable, I/O-free configuration that determines the persistence SHAPE and the
+// serve/transform policy. Nothing here opens a socket, reads a secret at inspection
+// time, or holds a live collaborator. Safe to call at import / module-composition time.
 
-export interface MediaConfig {
-  /** Mongoose connection — package creates models on this connection. */
-  connection: Connection;
+export interface MediaShape {
+  /**
+   * Tenant / scope configuration (PACKAGE_RULES P11).
+   *
+   * Accepts the canonical {@link TenantConfig} from `@classytic/repo-core/tenant`,
+   * or a boolean (`false` disables scoping, `true` enables with defaults). media-kit defaults
+   * differ from repo-core's: `fieldType: 'string'`, `required: false`.
+   */
+  tenant?: MediaTenantInput;
 
+  /** File type restrictions. */
+  fileTypes?: FileTypesConfig;
+  /** Folder configuration. */
+  folders?: FolderConfig;
+  /** Image processing config (imgproxy / processor options). */
+  processing?: ProcessingConfig;
+  /** File deduplication config. */
+  deduplication?: DeduplicationConfig;
+  /** Soft delete config (wires mongokit softDeletePlugin when enabled). */
+  softDelete?: SoftDeleteConfig;
+  /** Concurrency control. */
+  concurrency?: ConcurrencyConfig;
+  /** Suppress warnings about missing optional dependencies. */
+  suppressWarnings?: boolean;
+
+  /**
+   * Default-visibility policy for new uploads. Per-upload `visibility`
+   * overrides `byFolder` rules, which override `default` ('public').
+   */
+  visibility?: VisibilityConfig;
+
+  /**
+   * HMAC URL-signing config. When set, `bind()` constructs ONE `UrlSigner`
+   * shared by `repositories.media.getSignedAssetUrl()` and the
+   * `AssetTransformService` (which picks it up from the engine automatically).
+   * The keys/secret are opaque describe-time config (§6.2); the signer object
+   * is constructed at bind time.
+   */
+  signing?: MediaSigningConfig;
+
+  /**
+   * External (reference-only) media policy for `registerExternal()` —
+   * currently an origin allowlist. Unset = any absolute http(s) URL.
+   */
+  external?: ExternalMediaConfig | undefined;
+
+  /**
+   * Schema extension point — add fields/indexes without forking.
+   */
+  schemaOptions?: {
+    extraFields?: Record<string, unknown>;
+    extraIndexes?: Array<Record<string, 1 | -1 | 'text'>>;
+    collection?: string;
+    optimizedIndexes?: boolean;
+  };
+
+  /** Mongoose auto-index builds. Default `true` (dev); pass `false` in prod (§35). */
+  autoIndex?: boolean;
+
+  /**
+   * On a model-name collision: default throws (mongokit `ModelCollisionError`);
+   * `true` re-registers (test/dev fixtures). Maps to mongokit's `replace` policy,
+   * which itself throws under `NODE_ENV=production`.
+   */
+  forceRecreate?: boolean;
+}
+
+// ── MediaRuntime (bind-time collaborators — passed to bind) ───
+//
+// The live connection is the first `bind` arg; these are the rest. Every live port
+// (storage drivers, transport, bridges, cache, logger, authorize callback) belongs
+// here, not in the shape.
+
+export interface MediaRuntime {
   /**
    * Single storage driver — sugar for a one-entry `providers` registry.
    * Use `providers` + `defaultProvider` when you need multiple backends.
@@ -55,7 +135,7 @@ export interface MediaConfig {
    *
    * @example
    * ```ts
-   * createMedia({
+   * defineMedia({ ... }).bind(connection, {
    *   providers: {
    *     s3:       new S3Provider({ bucket: 'originals', region: 'us-east-1' }),
    *     imagekit: new ImageKitProvider({ urlEndpoint: '...', privateKey: '...' }),
@@ -73,17 +153,7 @@ export interface MediaConfig {
    */
   defaultProvider?: string;
 
-  /**
-   * Tenant / scope configuration (PACKAGE_RULES P11).
-   *
-   * Accepts the canonical {@link TenantConfig} from `@classytic/repo-core/tenant`,
-   * a boolean (`false` disables scoping, `true` enables with defaults), or the
-   * legacy `{ tenantFieldType, multiTenant }` shorthand. media-kit defaults
-   * differ from repo-core's: `fieldType: 'string'`, `required: false`.
-   */
-  tenant?: MediaTenantInput;
-
-  /** Arc-compatible event transport. Default: in-process bus. */
+  /** Arc-compatible event transport. Default: an internally-created in-process bus. */
   eventTransport?: EventTransport;
 
   /**
@@ -92,41 +162,14 @@ export interface MediaConfig {
    */
   bridges?: MediaBridges;
 
-  /** File type restrictions. */
-  fileTypes?: FileTypesConfig;
-  /** Folder configuration. */
-  folders?: FolderConfig;
-  /** Image processing config. */
-  processing?: ProcessingConfig;
-  /** File deduplication config. */
-  deduplication?: DeduplicationConfig;
-  /** Soft delete config (wires mongokit softDeletePlugin when enabled). */
-  softDelete?: SoftDeleteConfig;
-  /** Concurrency control. */
-  concurrency?: ConcurrencyConfig;
   /** Cache adapter for read-through caching. */
   cache?: MediaCacheConfig;
   /** Logger instance. */
   logger?: MediaKitLogger;
-  /** Suppress warnings about missing optional dependencies. */
-  suppressWarnings?: boolean;
   /** Additional mongokit plugins to apply to the repository. */
   plugins?: PluginType[];
   /** Pagination configuration. */
   pagination?: PaginationConfig;
-
-  /**
-   * Default-visibility policy for new uploads. Per-upload `visibility`
-   * overrides `byFolder` rules, which override `default` ('public').
-   */
-  visibility?: VisibilityConfig;
-
-  /**
-   * HMAC URL-signing config. When set, createMedia() constructs ONE
-   * `UrlSigner` shared by `repositories.media.getSignedAssetUrl()` and the
-   * `AssetTransformService` (which picks it up from the engine automatically).
-   */
-  signing?: MediaSigningConfig;
 
   /**
    * Host authorization callback for private media served WITHOUT a valid
@@ -136,27 +179,12 @@ export interface MediaConfig {
    * implement it with `access.check(...)` — media-kit never imports it.
    */
   authorize?: ServeAuthorize;
-
-  /**
-   * External (reference-only) media policy for `registerExternal()` —
-   * currently an origin allowlist. Unset = any absolute http(s) URL.
-   */
-  external?: ExternalMediaConfig | undefined;
-
-  /**
-   * Schema extension point — add fields/indexes without forking.
-   */
-  schemaOptions?: {
-    extraFields?: Record<string, unknown>;
-    extraIndexes?: Array<Record<string, 1 | -1 | 'text'>>;
-    collection?: string;
-    optimizedIndexes?: boolean;
-  };
 }
 
 // ── ResolvedMediaConfig (after merge with defaults) ──────────
 
-export interface ResolvedMediaConfig extends Omit<MediaConfig, 'connection' | 'eventTransport' | 'tenant'> {
+export interface ResolvedMediaConfig
+  extends Omit<MediaShape & MediaRuntime, 'tenant' | 'eventTransport' | 'autoIndex' | 'forceRecreate'> {
   connection: Connection;
   fileTypes: Required<FileTypesConfig>;
   folders: Required<FolderConfig>;
@@ -168,7 +196,7 @@ export interface ResolvedMediaConfig extends Omit<MediaConfig, 'connection' | 'e
   concurrency: Required<ConcurrencyConfig>;
 }
 
-// ── MediaEngine (output of createMedia) ──────────────────────
+// ── MediaEngine (output of bind) ─────────────────────────────
 
 export interface MediaEngine {
   /** Repositories ARE the API surface (PACKAGE_RULES §1). */
@@ -223,8 +251,26 @@ export interface MediaEngine {
   /** Host authorize callback — passed through for the transform service. */
   readonly authorize?: ServeAuthorize | undefined;
 
-  /** Release resources. Safe to call multiple times. */
-  dispose(): Promise<void>;
+  /**
+   * Reconcile the Media collection's indexes with the compiled schema.
+   *
+   * REQUIRED by the Kernel Construction Standard §6.4: index reconciliation must
+   * be an explicit, callable operation rather than a `bind()` side effect. The
+   * engine had no such verb, so the ONLY way media indexes were ever created was
+   * mongoose's own `autoIndex` — which every deployment here turns OFF (index
+   * builds are deployment maintenance, not per-replica boot work). A host that
+   * followed that guidance had no way to build them at all.
+   *
+   * REJECTS on failure. A silent index sync is worse than none: the collection
+   * keeps serving unindexed reads that look merely slow.
+   */
+  syncIndexes(): Promise<void>;
+
+  /**
+   * Release resources. Safe to call multiple times. Closes ONLY an
+   * internally-created event bus — a host-supplied transport is never closed.
+   */
+  close(): Promise<void>;
 }
 
 // ── MediaContext (threaded through domain verbs) ──────────────
