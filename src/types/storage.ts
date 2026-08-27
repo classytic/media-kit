@@ -38,7 +38,7 @@ export interface FileStat {
  * Result from a presigned upload URL generation
  */
 export interface PresignedUploadResult {
-  /** The presigned URL to PUT the file to */
+  /** The presigned URL to send the file to */
   uploadUrl: string;
   /** Storage key assigned to the file */
   key: string;
@@ -46,8 +46,29 @@ export interface PresignedUploadResult {
   publicUrl: string;
   /** Time in seconds until the presigned URL expires */
   expiresIn: number;
-  /** Optional headers the client must include with the PUT request */
+  /** Optional headers the client must include with the request */
   headers?: Record<string, string>;
+  /**
+   * HTTP verb the client must use. Absent ⇒ `PUT`, which is what S3 and GCS
+   * presign.
+   *
+   * Declared because not every provider presigns a raw-body PUT: Cloudinary
+   * signs a multipart POST, so a result that could only express PUT left the
+   * driver unable to implement `getSignedUploadUrl` at all — and the whole
+   * upload path 500'd with "does not support presigned uploads" rather than
+   * degrading.
+   */
+  method?: 'PUT' | 'POST';
+  /**
+   * Form fields the client must send ALONGSIDE the file in a multipart POST
+   * (Cloudinary's `api_key` / `timestamp` / `signature` / `public_id`).
+   *
+   * Only meaningful with `method: 'POST'`. A PUT driver leaves this absent, so
+   * an existing consumer that ignores it stays correct.
+   */
+  fields?: Record<string, string>;
+  /** Multipart field name the file itself goes under. Absent ⇒ `file`. */
+  fileField?: string;
 }
 
 /**

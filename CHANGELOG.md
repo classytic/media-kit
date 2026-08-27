@@ -3,6 +3,39 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 3.10.0 — 2026-08-27
+
+### Fixed
+
+- **Cloudinary `getSignedUploadUrl` implemented** — the method was absent, so every
+  presigned-upload flow 500'd with "does not support presigned uploads". Returns a
+  `method: 'POST'` multipart result with `fields` (api_key, timestamp, signature,
+  public_id) the browser sends alongside the file.
+- **Cloudinary signature upgraded to v2** — `sign()` now percent-encodes `&` inside
+  each `k=v` pair before joining, matching `cloudinary`'s `api_sign_request`. Without
+  it a `public_id` containing `&` split into extra parameters when Cloudinary parsed
+  the signed string — a crafted id could smuggle parameters the signer never authorised.
+- **`resolveKey()` handles both composite and generated key shapes** — `delete`,
+  `exists`, `stat`, `getPublicUrl`, `getTransformUrl`, `getSignedUrl` were broken for
+  presigned uploads because only the composite `publicId\nresourceType` key written by
+  `write()` was understood. Generated keys (stored by presigned uploads) now resolve
+  correctly via extension-based type detection.
+
+### Added
+
+- **`PresignedUploadResult.method`** (`'PUT' | 'POST'`) — declares the HTTP verb the
+  client must use; absent = PUT (S3/GCS default unchanged).
+- **`PresignedUploadResult.fields`** — multipart form fields for POST-based drivers
+  (Cloudinary). PUT drivers leave this absent.
+- **`PresignedUploadResult.fileField`** — multipart file field name; absent = `'file'`.
+- **`tests/unit/cloudinary-signature.test.ts`** — pins signature v2 byte-for-byte
+  against the algorithm transcribed from the official SDK.
+
+### Changed
+
+- **Peer floors raised** — mongokit `>=3.35.0`, primitives `>=0.25.0`,
+  repo-core `>=0.25.0`.
+
 ## 3.9.0 — 2026-08-17
 
 ### Changed — peer floors `@classytic/mongokit >=3.30.0`, `@classytic/repo-core >=0.20.0`

@@ -37,7 +37,7 @@
 
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
-import type { FileStat, StorageDriver, WriteResult } from '../types/storage.js';
+import type { FileStat, PresignedUploadResult, StorageDriver, WriteResult } from '../types/storage.js';
 import { LazySecret, type SecretValue, validateSecretValue } from '../utils/lazy-secret.js';
 import { uploadFetch, metadataFetch, streamFetch } from './http.js';
 
@@ -123,18 +123,40 @@ interface CloudinaryListResponse {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function parseKey(key: string): { publicId: string; resourceType: string } {
+/**
+ * Split the COMPOSITE key `write()` mints (`publicId
+resourceType`).
+ *
+ * `null` when the key is not composite — a presigned upload stores the
+ * generated key instead, and that needs the folder prefix and extension
+ * handling {@link CloudinaryProvider.resolveKey} applies.
+ */
+function parseCompositeKey(key: string): { publicId: string; resourceType: string } | null {
   const idx = key.indexOf(SEP);
-  if (idx === -1) return { publicId: key, resourceType: 'image' };
+  if (idx === -1) return null;
   return { publicId: key.slice(0, idx), resourceType: key.slice(idx + 1) };
 }
 
-/** SHA-1 signature over sorted param string (Cloudinary signing spec). */
+/**
+ * Cloudinary request signature — SIGNATURE VERSION 2, matching the official
+ * SDK's `api_sign_request` (`cloudinary/lib/utils/index.js`).
+ *
+ * v2 differs from v1 by percent-encoding `&` inside each `k=v` pair before
+ * joining. That is not cosmetic: without it a value containing `&` splits into
+ * extra parameters when Cloudinary parses the signed string, so a crafted
+ * `public_id` can smuggle parameters the signer never authorised. v2 is the
+ * SDK's default and this signs the same bytes.
+ *
+ * Sorting is `localeCompare` for the same reason — it is what the SDK does, and
+ * a signature that agrees only for ASCII keys is a signature that disagrees
+ * eventually.
+ */
 function sign(params: Record<string, string>, apiSecret: string): string {
-  const str = Object.keys(params)
-    .sort()
-    .filter((k) => params[k] !== '')
-    .map((k) => `${k}=${params[k]}`)
+  const str = Object.entries(params)
+    .filter(([, v]) => v !== null && v !== undefined && v !== '')
+    .sort(([a], [b]) => a.localeCompare(b))
+    // encode_param: only `&` is escaped, per the SDK.
+    .map(([k, v]) => `${k}=${v}`.replace(/&/g, '%26'))
     .join('&');
   return createHash('sha1')
     .update(str + apiSecret)
@@ -301,7 +323,7 @@ export class CloudinaryProvider implements StorageDriver {
    * `invalidate: true` purges the file from Cloudinary's CDN cache.
    */
   async delete(key: string): Promise<boolean> {
-    const { publicId, resourceType } = parseKey(key);
+    const { publicId, resourceType } = this.resolveKey(key);
     const timestamp = String(Math.floor(Date.now() / 1000));
 
     // invalidate must be included in signParams — Cloudinary signs ALL sent params
@@ -338,7 +360,7 @@ export class CloudinaryProvider implements StorageDriver {
    * Check if a file exists by fetching its resource details from Admin API.
    */
   async exists(key: string): Promise<boolean> {
-    const { publicId, resourceType } = parseKey(key);
+    const { publicId, resourceType } = this.resolveKey(key);
     const encodedId = encodeURIComponent(publicId).replace(/%2F/g, '/');
     const authHeader = await this.resolveAuthHeader();
 
@@ -353,7 +375,7 @@ export class CloudinaryProvider implements StorageDriver {
    * Get file metadata via Admin API.
    */
   async stat(key: string): Promise<FileStat> {
-    const { publicId, resourceType } = parseKey(key);
+    const { publicId, resourceType } = this.resolveKey(key);
     const encodedId = encodeURIComponent(publicId).replace(/%2F/g, '/');
     const authHeader = await this.resolveAuthHeader();
 
@@ -417,11 +439,125 @@ export class CloudinaryProvider implements StorageDriver {
   }
 
   /**
+   * Signed direct upload — the browser POSTs to Cloudinary, the bytes never
+   * touch the API server.
+   *
+   * Cloudinary signs a MULTIPART POST rather than a raw-body PUT, so the result
+   * carries `method: 'POST'` plus the `fields` the client must send with the
+   * file. Without this method the driver was absent from the presign path and
+   * every upload 500'd with "does not support presigned uploads" — the media
+   * library was simply non-functional on a Cloudinary deployment.
+   *
+   * `expiresIn` is advisory: Cloudinary validates the signature against its own
+   * timestamp window (~1h) rather than an expiry we choose, so the value is
+   * reported for the caller's UI, never enforced here.
+   */
+  async getSignedUploadUrl(
+    key: string,
+    contentType: string,
+    expiresIn = 3600,
+  ): Promise<PresignedUploadResult> {
+    // Same publicId derivation as write(), or the presigned upload lands at a
+    // different key than getPublicUrl() reports and the record points nowhere.
+    const likelyRaw =
+      !contentType.startsWith('image/') &&
+      !contentType.startsWith('video/') &&
+      !contentType.startsWith('audio/');
+    const rawPublicId = likelyRaw ? key : key.replace(/\.[^./]+$/, '');
+    const publicId = this.folder ? `${this.folder}/${rawPublicId}` : rawPublicId;
+
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signParams: Record<string, string> = {
+      public_id: publicId,
+      timestamp,
+      overwrite: String(this.overwrite),
+    };
+
+    const [apiKey, apiSecret] = await Promise.all([
+      this.apiKeySecret.resolve(),
+      this.apiSecretSecret.resolve(),
+    ]);
+
+    /**
+     * PIN the resource type instead of posting to `/auto/upload`.
+     *
+     * `write()` builds the composite key from Cloudinary's RESPONSE
+     * (`public_id
+resource_type`), which a presigned upload never sees — the
+     * browser gets the response, not us. Under `auto` the type is unknowable in
+     * advance, so the key we hand back could not be reconstructed and
+     * `confirmUpload`'s `exists()` looked up the wrong id: the upload
+     * succeeded and registering it failed with "File not found in storage".
+     *
+     * Deriving from the declared MIME and posting to that explicit endpoint
+     * makes the key deterministic — Cloudinary cannot resolve a type we did not
+     * ask for.
+     */
+    const resourceType = contentType.startsWith('image/')
+      ? 'image'
+      : contentType.startsWith('video/') || contentType.startsWith('audio/')
+        ? 'video'
+        : 'raw';
+
+    return {
+      uploadUrl: `https://api.cloudinary.com/v1_1/${this.cloudName}/${resourceType}/upload`,
+      /**
+       * The GENERATED key, unchanged — NOT Cloudinary's composite.
+       *
+       * `confirmUpload` runs `assertGeneratedKeyShape`, a security control that
+       * only accepts a basename the server minted; handing back a
+       * driver-shaped key made every confirm 400 with "basename does not match
+       * the generated-key format". The publicId is derived from this key on the
+       * way in and again in `resolveKey()` on the way out, so the mapping is a
+       * function of the key rather than something the client has to carry.
+       */
+      key,
+      publicUrl: this.cdnUrl(publicId, resourceType),
+      expiresIn,
+      method: 'POST',
+      fileField: 'file',
+      fields: {
+        ...signParams,
+        api_key: apiKey,
+        signature: sign(signParams, apiSecret),
+      },
+    };
+  }
+
+  /**
+   * Resolve a stored key to Cloudinary's `{ publicId, resourceType }`.
+   *
+   * TWO key shapes reach this driver and both are legitimate:
+   *   - `write()` stores the COMPOSITE `publicId
+resourceType`, taken from
+   *     Cloudinary's own upload response;
+   *   - a PRESIGNED upload stores the GENERATED key, because `confirmUpload`
+   *     only accepts a server-minted basename.
+   *
+   * Deriving the second the same way `write()`/`getSignedUploadUrl()` do keeps
+   * `exists`, `delete`, `stat` and `getPublicUrl` correct for both. Without it a
+   * presigned asset uploaded fine and then read as missing.
+   */
+  private resolveKey(key: string): { publicId: string; resourceType: string } {
+    const composite = parseCompositeKey(key);
+    if (composite) return composite;
+    // Same derivation as the upload paths: strip the media extension (Cloudinary
+    // stores format separately) and apply the configured folder.
+    const ext = key.slice(key.lastIndexOf('.') + 1).toLowerCase();
+    const isRawExt = !/^(jpe?g|png|gif|webp|avif|svg|bmp|tiff?|mp4|mov|webm|mp3|wav|ogg|m4a)$/.test(ext);
+    const rawPublicId = isRawExt ? key : key.replace(/\.[^./]+$/, '');
+    return {
+      publicId: this.folder ? `${this.folder}/${rawPublicId}` : rawPublicId,
+      resourceType: isRawExt ? 'raw' : /^(mp4|mov|webm|mp3|wav|ogg|m4a)$/.test(ext) ? 'video' : 'image',
+    };
+  }
+
+  /**
    * Reconstruct the Cloudinary CDN URL from the composite key.
    * The publicId is stable even as transformation parameters change.
    */
   getPublicUrl(key: string): string {
-    const { publicId, resourceType } = parseKey(key);
+    const { publicId, resourceType } = this.resolveKey(key);
     return this.cdnUrl(publicId, resourceType);
   }
 
@@ -454,7 +590,7 @@ export class CloudinaryProvider implements StorageDriver {
    * ```
    */
   getTransformUrl(key: string, transform: string): string {
-    const { publicId, resourceType } = parseKey(key);
+    const { publicId, resourceType } = this.resolveKey(key);
     const scheme = this.secure ? 'https' : 'http';
     const t = transform.replace(/^\/+|\/+$/g, ''); // strip leading/trailing slashes
     return `${scheme}://res.cloudinary.com/${this.cloudName}/${resourceType}/upload/${t}/${publicId}`;
@@ -472,7 +608,7 @@ export class CloudinaryProvider implements StorageDriver {
    * @param transform Optional transformation string to include
    */
   async getSignedUrl(key: string, expiresIn = 3600, transform?: string): Promise<string> {
-    const { publicId, resourceType } = parseKey(key);
+    const { publicId, resourceType } = this.resolveKey(key);
     const expireAt = Math.floor(Date.now() / 1000) + expiresIn;
     const t = transform ? `${transform.replace(/^\/+|\/+$/g, '')}/` : '';
 
