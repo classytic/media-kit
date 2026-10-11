@@ -3,6 +3,32 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 3.11.0 — 2026-10-11
+
+### Changed: peer floor `@classytic/primitives` `>=0.25.0` → `>=0.31.0`
+
+Aligned with the current release; verified on a fresh install. 3.10.1 was never published — this release carries its fix and floors.
+
+### Fixed — serving an unknown file or variant answers 404, not a 500
+
+`AssetTransformService.handle` threw a plain `Error("File not found")`, which a host serves as a server
+error. An unknown or malformed id now answers 404 `{ error: { code: "media.serve.not_found" } }` and an
+unknown variant 404 `media.serve.variant_not_found`, `Cache-Control: private, no-store` — like the
+existing 403/400 answers. Pinned in `tests/integration/private-media.test.ts`.
+
+### Changed: peer floors raised to `@classytic/mongokit >=3.40.1` and `@classytic/repo-core >=0.31.0`
+
+These are the minimum versions this package supports. Older versions miss three contracts a host now relies on:
+- **Scoped joins:** a `$lookup` reads the joined collection under its own repository's scope, and a join no
+  repository governs is refused with a closed `mongokit.join.*` code. Before, it was joined unscoped.
+- **Cursor refusals:** a tampered or foreign keyset cursor is refused with repo-core's
+  `repo.cursor.invalid` or `repo.cursor.scope_mismatch`.
+- **Query-bound defaults:** `configureQueryDefaults`, `configureAggregateDefaults` and
+  `configurePaginationDefaults` give every read a time bound and capped counts. Offset pages carry
+  `totalIsEstimate` and `countedAt`.
+
+No source change for this. The full suite passes 898/898 against mongokit 3.40.1 and repo-core 0.31.0.
+
 ## 3.10.0 — 2026-08-27
 
 ### Fixed

@@ -238,9 +238,7 @@ export class AssetTransformService {
     const file = this.media.repositories
       ? await this.media.repositories.media.getById(fileId)
       : await this.media.getById?.(fileId);
-    if (!file) {
-      throw new Error(`File not found: ${fileId}`);
-    }
+    if (!file) return this.jsonError(404, 'media.serve.not_found');
 
     // --- Auth gate: BEFORE any bytes are read or cache is consulted ---
     const gate = await this.gate(request, file);
@@ -269,9 +267,7 @@ export class AssetTransformService {
     let serveTarget: { key: string; mimeType: string; size: number; filename: string } = file;
     if (request.variant) {
       const variant = (file.variants ?? []).find((v) => v.name === request.variant);
-      if (!variant) {
-        throw new Error(`Variant not found: ${request.variant} (file ${fileId})`);
-      }
+      if (!variant) return this.jsonError(404, 'media.serve.variant_not_found');
       serveTarget = variant;
     }
 
@@ -467,6 +463,23 @@ export class AssetTransformService {
         Location: url,
         'Content-Length': '0',
         'Cache-Control': cacheControl ?? 'public, max-age=3600',
+      },
+    };
+  }
+
+  /** A JSON error answer — an unknown id or variant is the caller's 404, never a server error. */
+  private async jsonError(status: number, code: string): Promise<TransformResponse> {
+    const body = Buffer.from(JSON.stringify({ error: { code } }));
+    const { Readable } = await import('node:stream');
+    return {
+      stream: Readable.from(body),
+      contentType: 'application/json',
+      contentLength: body.length,
+      status,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': String(body.length),
+        'Cache-Control': 'private, no-store',
       },
     };
   }

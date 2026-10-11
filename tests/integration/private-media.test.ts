@@ -263,6 +263,17 @@ describe('serve matrix over LocalProvider', () => {
     expect((await readBody(res)).toString()).toBe(PUBLIC_CONTENT);
   });
 
+  it.each([
+    ['an unknown id', () => ({ fileId: '6ab58505c3bc53b73001f799', params: {} }), 'media.serve.not_found'],
+    ['a malformed id', () => ({ fileId: 'not-an-id', params: {} }), 'media.serve.not_found'],
+    ['an unknown variant', () => ({ fileId: publicId, variant: 'nope', params: {} }), 'media.serve.variant_not_found'],
+  ])('%s → 404 JSON, never a thrown server error', async (_label, request, code) => {
+    const res = await service.handle(request());
+    expect(res.status).toBe(404);
+    expect(res.headers['Cache-Control']).toBe('private, no-store');
+    expect(JSON.parse((await readBody(res)).toString())).toEqual({ error: { code } });
+  });
+
   it('private + unsigned → 403 JSON { error: { code: media.serve.forbidden } }, no bytes', async () => {
     const res = await service.handle({ fileId: privateId, params: {} });
     expect(res.status).toBe(403);

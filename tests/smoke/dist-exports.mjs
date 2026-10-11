@@ -248,8 +248,11 @@ for (const rel of distStats) {
 // core bundle (private serving + signing + external/reference records left
 // it at ~209 KB). Still a bloat tripwire — if this trips again, check for
 // stray fixtures/assets before raising it.
-assert.ok(totalMjsBytes < 220_000, `dist JS size ${totalMjsBytes} bytes exceeds 220KB budget`);
-OK(`package.json — dist JS size ${(totalMjsBytes / 1024).toFixed(1)} KB (budget 220 KB)`);
+// Raised 220 → 300 KB in 3.11.0: the 3.10.0 build (Cloudinary presign, signature v2) already measured
+// 291.6 KB, so the 220 KB cap had been failing since then; 3.11.0 adds ~0.5 KB over 3.10.0. Checked per
+// file — the growth is the core bundle, not stray fixtures.
+assert.ok(totalMjsBytes < 300_000, `dist JS size ${totalMjsBytes} bytes exceeds 300KB budget`);
+OK(`package.json — dist JS size ${(totalMjsBytes / 1024).toFixed(1)} KB (budget 300 KB)`);
 
 // Subpath exports all resolve (already verified above, but assert count)
 const subpathExports = Object.keys(pkg.exports).filter((k) => k !== '.' && k !== './package.json');

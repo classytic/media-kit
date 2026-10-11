@@ -56,7 +56,7 @@ describe('Package Contents', () => {
     // at the pre-publish pass, because a floor nobody verifies is a
     // compatibility promise nobody can keep. Lower it only alongside a run
     // against that older mongokit.
-    expect(peerDeps['@classytic/mongokit']).toBe('>=3.33.0');
+    expect(peerDeps['@classytic/mongokit']).toBe('>=3.40.1');
     // primitives floor tracks the ecosystem head: `InProcessMediaBus` is a
     // thin subclass of the shared `InProcessEventBus` from
     // `@classytic/primitives/event-infra` (0.14+), and 0.14's `/events`
@@ -65,13 +65,13 @@ describe('Package Contents', () => {
     // (`propagateHandlerErrors`, money scalar helpers).
     // Floor raised to the tested head (0.23.0) for the same reason as mongokit;
     // the additive features named above still land far below it.
-    expect(peerDeps['@classytic/primitives']).toBe('>=0.23.0');
+    expect(peerDeps['@classytic/primitives']).toBe('>=0.31.0');
     // repo-core >=0.24.0 — this one is FORCED, not a preference. `defineMedia`
     // calls `assertNoLegacyTenantKeys` from `@classytic/repo-core/tenant`, which
     // first ships in 0.24.0. A lower floor resolves fine and then fails at
     // RUNTIME on a missing export, which tsc cannot see — so the floor is the
     // only thing standing between a consumer and that crash.
-    expect(peerDeps['@classytic/repo-core']).toBe('>=0.24.0');
+    expect(peerDeps['@classytic/repo-core']).toBe('>=0.31.0');
   });
 
   it('should have no runtime dependencies (all are peer)', () => {

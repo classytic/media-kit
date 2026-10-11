@@ -452,17 +452,11 @@ export class CloudinaryProvider implements StorageDriver {
    * timestamp window (~1h) rather than an expiry we choose, so the value is
    * reported for the caller's UI, never enforced here.
    */
-  async getSignedUploadUrl(
-    key: string,
-    contentType: string,
-    expiresIn = 3600,
-  ): Promise<PresignedUploadResult> {
+  async getSignedUploadUrl(key: string, contentType: string, expiresIn = 3600): Promise<PresignedUploadResult> {
     // Same publicId derivation as write(), or the presigned upload lands at a
     // different key than getPublicUrl() reports and the record points nowhere.
     const likelyRaw =
-      !contentType.startsWith('image/') &&
-      !contentType.startsWith('video/') &&
-      !contentType.startsWith('audio/');
+      !contentType.startsWith('image/') && !contentType.startsWith('video/') && !contentType.startsWith('audio/');
     const rawPublicId = likelyRaw ? key : key.replace(/\.[^./]+$/, '');
     const publicId = this.folder ? `${this.folder}/${rawPublicId}` : rawPublicId;
 
@@ -473,10 +467,7 @@ export class CloudinaryProvider implements StorageDriver {
       overwrite: String(this.overwrite),
     };
 
-    const [apiKey, apiSecret] = await Promise.all([
-      this.apiKeySecret.resolve(),
-      this.apiSecretSecret.resolve(),
-    ]);
+    const [apiKey, apiSecret] = await Promise.all([this.apiKeySecret.resolve(), this.apiSecretSecret.resolve()]);
 
     /**
      * PIN the resource type instead of posting to `/auto/upload`.
