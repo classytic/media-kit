@@ -45,7 +45,11 @@ import {
   tenantKeySegment,
   deleteKeysBestEffort,
   deriveAspectRatio,
+  fileTypeNotAllowed,
+  fileTooLarge,
+  assertStoredContentMatches,
 } from './helpers';
+import { MEDIA_ERROR_CODES, mediaError } from '../errors.js';
 import { processImage } from './process-image';
 import { resolveVisibility } from '../utils/visibility';
 import { toStoredVariants } from './derivatives.js';
@@ -60,12 +64,11 @@ export function enforcePresignPolicy(deps: OperationDeps, contentType: string, s
   const { allowed = [], maxSize } = deps.config.fileTypes || {};
 
   if (allowed.length > 0 && !isAllowedMimeType(contentType, allowed)) {
-    throw new Error(`File type '${contentType}' is not allowed. Allowed: ${allowed.join(', ')}`);
+    throw fileTypeNotAllowed(contentType, allowed);
   }
 
   if (maxSize && size && size > maxSize) {
-    const maxMB = Math.round(maxSize / 1024 / 1024);
-    throw new Error(`File size exceeds limit of ${maxMB}MB`);
+    throw fileTooLarge(maxSize);
   }
 }
 
@@ -278,12 +281,11 @@ export async function confirmUpload(
     const { allowed = [], maxSize } = deps.config.fileTypes || {};
 
     if (allowed.length > 0 && !isAllowedMimeType(input.mimeType, allowed)) {
-      throw new Error(`File type '${input.mimeType}' is not allowed. Allowed: ${allowed.join(', ')}`);
+      throw fileTypeNotAllowed(input.mimeType, allowed);
     }
 
     if (maxSize && input.size > maxSize) {
-      const maxMB = Math.round(maxSize / 1024 / 1024);
-      throw new Error(`File size exceeds limit of ${maxMB}MB`);
+      throw fileTooLarge(maxSize);
     }
 
     // Never trust the client-submitted key. It must have exactly the shape
@@ -306,7 +308,11 @@ export async function confirmUpload(
     // Verify the file actually exists in storage
     const exists = await deps.driver.exists(input.key);
     if (!exists) {
-      throw new Error(`File not found in storage at key: ${input.key}. Upload may not have completed.`);
+      throw mediaError(
+        409,
+        MEDIA_ERROR_CODES.UPLOAD_NOT_FOUND,
+        `File not found in storage at key: ${input.key}. Upload may not have completed.`,
+      );
     }
 
     // Fetch real metadata from storage for validation (fail-closed: stat errors reject the upload)
@@ -325,8 +331,11 @@ export async function confirmUpload(
     // Cross-check: storage MIME vs client-claimed MIME
     if (storageMimeType && storageMimeType !== input.mimeType) {
       if (allowed.length > 0 && !isAllowedMimeType(storageMimeType, allowed)) {
-        throw new Error(
+        throw mediaError(
+          415,
+          MEDIA_ERROR_CODES.FILE_TYPE_NOT_ALLOWED,
           `File type mismatch: client claimed '${input.mimeType}' but storage reports '${storageMimeType}' which is not allowed. Allowed: ${allowed.join(', ')}`,
+          { mimeType: storageMimeType },
         );
       }
       log(deps, 'warn', 'MIME type mismatch in confirmUpload', {
@@ -338,12 +347,14 @@ export async function confirmUpload(
 
     // Re-check actual size from storage against limit
     if (maxSize && actualSize > maxSize) {
-      const maxMB = Math.round(maxSize / 1024 / 1024);
-      throw new Error(`File size exceeds limit of ${maxMB}MB`);
+      throw fileTooLarge(maxSize);
     }
 
     // Use storage-reported MIME type as authoritative when available
     const effectiveMimeType = storageMimeType || input.mimeType;
+
+    // verifyContent on bytes the API never saw: sniff the stored head (ranged read).
+    await assertStoredContentMatches(deps, input.key, [effectiveMimeType, input.mimeType]);
 
     // Compute hash based on strategy (default: 'skip' — no file download, no storage cost)
     // Hash is only functionally useful when deduplication is enabled.
@@ -456,14 +467,19 @@ export async function confirmUpload(
         // A scanner that ERRORS is not a clean bill of health — absence of an
         // answer is not a negative answer. Refuse rather than admit unscanned
         // bytes to a library whose operator believes scanning is on.
-        throw createError(
+        throw mediaError(
           502,
+          MEDIA_ERROR_CODES.SCAN_FAILED,
           `[media] scan failed for '${input.key}': ${err instanceof Error ? err.message : String(err)}`,
         );
       }
 
       if (verdict.verdict === 'reject') {
-        throw createError(422, `[media] upload rejected by scan: ${verdict.reason ?? 'no reason given'}`);
+        throw mediaError(
+          422,
+          MEDIA_ERROR_CODES.SCAN_REJECTED,
+          `[media] upload rejected by scan: ${verdict.reason ?? 'no reason given'}`,
+        );
       }
       if (verdict.verdict === 'quarantine') {
         scanQuarantineReason = verdict.reason ?? 'quarantined by scan';
@@ -836,12 +852,11 @@ export async function completeMultipartUpload(
     const { allowed = [], maxSize } = deps.config.fileTypes || {};
 
     if (allowed.length > 0 && !isAllowedMimeType(input.mimeType, allowed)) {
-      throw new Error(`File type '${input.mimeType}' is not allowed. Allowed: ${allowed.join(', ')}`);
+      throw fileTypeNotAllowed(input.mimeType, allowed);
     }
 
     if (maxSize && input.size > maxSize) {
-      const maxMB = Math.round(maxSize / 1024 / 1024);
-      throw new Error(`File size exceeds limit of ${maxMB}MB`);
+      throw fileTooLarge(maxSize);
     }
 
     // Same key defenses as confirmUpload(): the client-submitted key must
@@ -861,9 +876,11 @@ export async function completeMultipartUpload(
 
     // Re-check actual size from storage against limit (client may have lied)
     if (maxSize && actualSize > maxSize) {
-      const maxMB = Math.round(maxSize / 1024 / 1024);
-      throw new Error(`File size exceeds limit of ${maxMB}MB`);
+      throw fileTooLarge(maxSize);
     }
+
+    // verifyContent on the assembled object (ranged read of its head).
+    await assertStoredContentMatches(deps, input.key, [input.mimeType]);
 
     // Hash from ETag (zero cost — already computed by S3 during multipart)
     const hash = etag || computeFileHash(Buffer.from(`${input.key}:${actualSize}`));

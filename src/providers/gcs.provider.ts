@@ -23,6 +23,7 @@ import type {
   FileStat,
   PresignedUploadResult,
   ResumableUploadSession,
+  SignedReadOptions,
 } from '../types/storage.js';
 import { withRetry, type RetryOptions } from '../utils/retry';
 import { pipeline } from 'node:stream';
@@ -303,6 +304,23 @@ export class GCSProvider implements StorageDriver {
       expires: Date.now() + expiresIn * 1000,
     });
 
+    return url;
+  }
+
+  /**
+   * Signed read URL with pinned response headers (V4 `response-content-type` /
+   * `response-content-disposition` query params, covered by the signature).
+   */
+  async getSignedReadUrl(key: string, expiresIn: number, options: SignedReadOptions): Promise<string> {
+    const bucket = await this.getStorage();
+    const file = bucket.file(this.extractKey(key));
+    const [url] = await file.getSignedUrl({
+      version: 'v4',
+      action: 'read',
+      expires: Date.now() + expiresIn * 1000,
+      ...(options.responseType ? { responseType: options.responseType } : {}),
+      ...(options.responseDisposition ? { responseDisposition: options.responseDisposition } : {}),
+    });
     return url;
   }
 

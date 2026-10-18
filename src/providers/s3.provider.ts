@@ -28,6 +28,7 @@ import type {
   PresignedUploadResult,
   SignedPartResult,
   CompletedPart,
+  SignedReadOptions,
 } from '../types/storage.js';
 import { withRetry, type RetryOptions } from '../utils/retry';
 
@@ -367,6 +368,20 @@ export class S3Provider implements StorageDriver {
       Key: actualKey,
     });
 
+    return getSignedUrl(client, command, { expiresIn });
+  }
+
+  /** Signed read URL with pinned response headers (`ResponseContentType` / `ResponseContentDisposition`). */
+  async getSignedReadUrl(key: string, expiresIn: number, options: SignedReadOptions): Promise<string> {
+    const { GetObjectCommand } = await import('@aws-sdk/client-s3');
+    const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
+    const client = await this.getClient();
+    const command = new GetObjectCommand({
+      Bucket: this.config.bucket,
+      Key: this.extractKey(key),
+      ...(options.responseType ? { ResponseContentType: options.responseType } : {}),
+      ...(options.responseDisposition ? { ResponseContentDisposition: options.responseDisposition } : {}),
+    });
     return getSignedUrl(client, command, { expiresIn });
   }
 

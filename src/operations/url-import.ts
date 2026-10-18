@@ -15,6 +15,7 @@ import dns from 'node:dns';
 import type { ImportOptions } from '../types/config.js';
 import { getMimeType } from '../utils/mime';
 import type { Semaphore } from '../utils/semaphore';
+import { MEDIA_ERROR_CODES, mediaError } from '../errors.js';
 
 /** The bytes + identity a URL download resolves to, ready to feed `repo.upload()`. */
 export interface DownloadedFile {
@@ -116,32 +117,57 @@ function isPrivateIP(ip: string): boolean {
  * Returns the resolved IP address so callers can pin it (prevents DNS rebinding TOCTOU).
  */
 async function validateUrlSafety(url: string): Promise<string> {
-  const parsed = new URL(url);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw mediaError(400, MEDIA_ERROR_CODES.IMPORT_INVALID_URL, 'URL import failed: not an absolute URL');
+  }
 
   // Only allow http/https
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(`URL import failed: unsupported protocol '${parsed.protocol}' — only http/https allowed`);
+    throw mediaError(
+      400,
+      MEDIA_ERROR_CODES.IMPORT_INVALID_URL,
+      `URL import failed: unsupported protocol '${parsed.protocol}' — only http/https allowed`,
+    );
   }
 
   // Block known internal hostnames
   const hostname = parsed.hostname.toLowerCase();
   const blockedHosts = ['localhost', 'metadata.google.internal', 'metadata.google.internal.'];
   if (blockedHosts.includes(hostname) || hostname.endsWith('.localhost')) {
-    throw new Error(`URL import failed: blocked internal hostname '${hostname}'`);
+    throw mediaError(
+      400,
+      MEDIA_ERROR_CODES.IMPORT_URL_BLOCKED,
+      `URL import failed: blocked internal hostname '${hostname}'`,
+    );
   }
 
   // Also block raw IP literals that are private
   if (isPrivateIP(hostname)) {
-    throw new Error(`URL import failed: blocked private IP address '${hostname}'`);
+    throw mediaError(
+      400,
+      MEDIA_ERROR_CODES.IMPORT_URL_BLOCKED,
+      `URL import failed: blocked private IP address '${hostname}'`,
+    );
   }
 
   // Resolve hostname and check if IP is private (fail-closed: DNS errors block the request)
   const { address } = await dns.promises.lookup(hostname).catch((err) => {
-    throw new Error(`URL import failed: DNS resolution failed for '${hostname}' — ${err.code || err.message}`);
+    throw mediaError(
+      422,
+      MEDIA_ERROR_CODES.IMPORT_FETCH_FAILED,
+      `URL import failed: DNS resolution failed for '${hostname}' — ${err.code || err.message}`,
+    );
   });
 
   if (isPrivateIP(address)) {
-    throw new Error(`URL import failed: hostname '${hostname}' resolves to private IP '${address}'`);
+    throw mediaError(
+      400,
+      MEDIA_ERROR_CODES.IMPORT_URL_BLOCKED,
+      `URL import failed: hostname '${hostname}' resolves to private IP '${address}'`,
+    );
   }
 
   return address;
@@ -213,7 +239,13 @@ async function fetchUrl(
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         if (redirectDepth >= MAX_REDIRECTS) {
           res.destroy();
-          reject(new Error(`URL import failed: too many redirects (>${MAX_REDIRECTS}) for ${url}`));
+          reject(
+            mediaError(
+              422,
+              MEDIA_ERROR_CODES.IMPORT_FETCH_FAILED,
+              `URL import failed: too many redirects (>${MAX_REDIRECTS}) for ${url}`,
+            ),
+          );
           return;
         }
         // Drain/abort the redirect response before following Location — leaving
@@ -227,7 +259,16 @@ async function fetchUrl(
       }
 
       if (!res.statusCode || res.statusCode >= 400) {
-        reject(new Error(`URL import failed: HTTP ${res.statusCode} for ${url}`));
+        reject(
+          mediaError(
+            422,
+            MEDIA_ERROR_CODES.IMPORT_FETCH_FAILED,
+            `URL import failed: HTTP ${res.statusCode} for ${url}`,
+            {
+              upstreamStatus: res.statusCode,
+            },
+          ),
+        );
         return;
       }
 
@@ -237,7 +278,9 @@ async function fetchUrl(
         const maxMB = Math.round(maxSize / 1024 / 1024);
         res.destroy();
         reject(
-          new Error(
+          mediaError(
+            413,
+            MEDIA_ERROR_CODES.FILE_TOO_LARGE,
             `URL import failed: file size ${Math.round(contentLength / 1024 / 1024)}MB exceeds limit of ${maxMB}MB`,
           ),
         );
@@ -277,7 +320,13 @@ async function fetchUrl(
         if (totalSize > maxSize) {
           const maxMB = Math.round(maxSize / 1024 / 1024);
           res.destroy();
-          reject(new Error(`URL import failed: download exceeded size limit of ${maxMB}MB`));
+          reject(
+            mediaError(
+              413,
+              MEDIA_ERROR_CODES.FILE_TOO_LARGE,
+              `URL import failed: download exceeded size limit of ${maxMB}MB`,
+            ),
+          );
           return;
         }
         chunks.push(chunk);
@@ -289,17 +338,23 @@ async function fetchUrl(
       });
 
       res.on('error', (err) => {
-        reject(new Error(`URL import failed: ${err.message}`));
+        reject(mediaError(422, MEDIA_ERROR_CODES.IMPORT_FETCH_FAILED, `URL import failed: ${err.message}`));
       });
     });
 
     req.on('timeout', () => {
       req.destroy();
-      reject(new Error(`URL import failed: request timed out after ${timeout}ms`));
+      reject(
+        mediaError(
+          422,
+          MEDIA_ERROR_CODES.IMPORT_FETCH_FAILED,
+          `URL import failed: request timed out after ${timeout}ms`,
+        ),
+      );
     });
 
     req.on('error', (err) => {
-      reject(new Error(`URL import failed: ${err.message}`));
+      reject(mediaError(422, MEDIA_ERROR_CODES.IMPORT_FETCH_FAILED, `URL import failed: ${err.message}`));
     });
   });
 }

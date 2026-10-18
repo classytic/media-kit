@@ -14,6 +14,7 @@ import type { LegacyProgressEventName } from './event-types.js';
 import { isAllowedMimeType } from '../utils/mime';
 import { isExternalMedia } from '../utils/external';
 import { detectDangerousMismatch } from '../utils/content-sniff';
+import { MEDIA_ERROR_CODES, mediaError } from '../errors.js';
 
 /**
  * Rebind an OperationDeps bag to a specific storage driver.
@@ -278,18 +279,21 @@ export function generateTitle(filename: string): string {
  */
 export function validateFile(deps: ConfigOnlyDeps, buffer: Buffer, filename: string, mimeType: string): void {
   if (!buffer || buffer.length === 0) {
-    throw new Error(`Cannot upload empty file '${filename}'. Buffer is empty or missing.`);
+    throw mediaError(
+      400,
+      MEDIA_ERROR_CODES.FILE_EMPTY,
+      `Cannot upload empty file '${filename}'. Buffer is empty or missing.`,
+    );
   }
 
   const { allowed = [], maxSize, verifyContent } = deps.config.fileTypes || {};
 
   if (allowed.length > 0 && !isAllowedMimeType(mimeType, allowed)) {
-    throw new Error(`File type '${mimeType}' is not allowed. Allowed: ${allowed.join(', ')}`);
+    throw fileTypeNotAllowed(mimeType, allowed);
   }
 
   if (maxSize && buffer.length > maxSize) {
-    const maxMB = Math.round(maxSize / 1024 / 1024);
-    throw new Error(`File size exceeds limit of ${maxMB}MB`);
+    throw fileTooLarge(maxSize);
   }
 
   // Strict profile: the declared MIME can lie (it comes from the client on
@@ -298,9 +302,87 @@ export function validateFile(deps: ConfigOnlyDeps, buffer: Buffer, filename: str
   if (verifyContent) {
     const mismatch = detectDangerousMismatch(buffer, mimeType);
     if (mismatch) {
-      throw new Error(`File content does not match its declared type: ${mismatch}`);
+      throw mediaError(
+        415,
+        MEDIA_ERROR_CODES.FILE_CONTENT_MISMATCH,
+        `File content does not match its declared type: ${mismatch}`,
+      );
     }
   }
+}
+
+/** Leading bytes read back for a magic-byte sniff of a client-written object. */
+export const CONTENT_SNIFF_BYTES = 4096;
+
+/**
+ * The first `bytes` of a stored object, via the driver's ranged `read(key, { start, end })`.
+ *
+ * Bounded for every driver: the stream is consumed only until `bytes` arrived and then
+ * destroyed, so a driver that ignores the range (or emulates it) still costs at most one
+ * transport chunk past the head, never the whole object.
+ */
+export async function readStoredHead(driver: StorageDriver, key: string, bytes = CONTENT_SNIFF_BYTES): Promise<Buffer> {
+  const stream = await driver.read(key, { start: 0, end: bytes - 1 });
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for await (const chunk of stream as AsyncIterable<Buffer | Uint8Array | string>) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+      chunks.push(buf);
+      total += buf.length;
+      if (total >= bytes) break;
+    }
+  } finally {
+    (stream as { destroy?: () => void }).destroy?.();
+  }
+  return Buffer.concat(chunks).subarray(0, bytes);
+}
+
+/**
+ * `fileTypes.verifyContent` for bytes the API never saw (presigned confirm, multipart
+ * completion, derivative PUTs): sniff the stored head against every declared type and, on a
+ * dangerous mismatch (HTML/SVG labelled as an inert image/video/audio type), delete the object
+ * and refuse with 415 `media.file.content_mismatch`. The same rule `validateFile` applies to a
+ * buffered upload. No-op when `verifyContent` is off.
+ */
+export async function assertStoredContentMatches(
+  deps: OperationDeps,
+  key: string,
+  declaredTypes: ReadonlyArray<string | undefined>,
+): Promise<void> {
+  if (!deps.config?.fileTypes?.verifyContent) return;
+  const head = await readStoredHead(deps.driver, key);
+  for (const declared of new Set(declaredTypes.filter((t): t is string => !!t))) {
+    const mismatch = detectDangerousMismatch(head, declared);
+    if (!mismatch) continue;
+    // Never registered (the key-ownership guard ran first): the bytes are the caller's
+    // unconfirmed write, and leaving them would keep the payload one stat away from use.
+    await deleteKeysBestEffort(deps.driver, [key], (k, error) =>
+      log(deps, 'warn', 'Failed to delete refused upload', { key: k, error: error.message }),
+    );
+    throw mediaError(
+      415,
+      MEDIA_ERROR_CODES.FILE_CONTENT_MISMATCH,
+      `File content does not match its declared type: ${mismatch}`,
+      { key },
+    );
+  }
+}
+
+/** 415 `media.file.type_not_allowed`: the one refusal every upload path (direct, presign, confirm, multipart) shares. */
+export function fileTypeNotAllowed(mimeType: string, allowed: readonly string[]): Error {
+  return mediaError(
+    415,
+    MEDIA_ERROR_CODES.FILE_TYPE_NOT_ALLOWED,
+    `File type '${mimeType}' is not allowed. Allowed: ${allowed.join(', ')}`,
+    { mimeType },
+  );
+}
+
+/** 413 `media.file.too_large`, for a declared or a storage-reported size. */
+export function fileTooLarge(maxSize: number): Error {
+  const maxMB = Math.round(maxSize / 1024 / 1024);
+  return mediaError(413, MEDIA_ERROR_CODES.FILE_TOO_LARGE, `File size exceeds limit of ${maxMB}MB`, { maxSize });
 }
 
 /**

@@ -37,6 +37,14 @@ export interface FileStat {
 /**
  * Result from a presigned upload URL generation
  */
+/** Response overrides for `getSignedReadUrl`. */
+export interface SignedReadOptions {
+  /** `Content-Type` storage answers with (e.g. the stored `mimeType`). */
+  responseType?: string;
+  /** `Content-Disposition` storage answers with, e.g. `inline` or `attachment; filename="a.pdf"`. */
+  responseDisposition?: string;
+}
+
 export interface PresignedUploadResult {
   /** The presigned URL to send the file to */
   uploadUrl: string;
@@ -134,6 +142,14 @@ export interface StorageDriver {
 
   /** Get a temporary signed URL for reading a private file */
   getSignedUrl?(key: string, expiresIn?: number): Promise<string>;
+
+  /**
+   * A signed read URL that also pins the RESPONSE headers storage sends (GCS V4
+   * `response-content-type` / `response-content-disposition`, S3 `ResponseContentType` /
+   * `ResponseContentDisposition`), so a viewer gets the declared type (never a sniffed or
+   * mislabelled one) and inline-vs-download is decided by the server, not by object metadata.
+   */
+  getSignedReadUrl?(key: string, expiresIn: number, options: SignedReadOptions): Promise<string>;
 
   /** Get a presigned URL for direct client-side uploads */
   getSignedUploadUrl?(key: string, contentType: string, expiresIn?: number): Promise<PresignedUploadResult>;

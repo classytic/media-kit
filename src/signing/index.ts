@@ -77,6 +77,8 @@ export interface SignUrlInput {
    * (`repo.revokeAccess()`) to invalidate every outstanding URL at once.
    */
   tokenVersion?: number | undefined;
+  /** Clock override (unix seconds; default `Date.now()/1000`), mirroring {@link VerifyUrlInput.now}. */
+  now?: number | undefined;
 }
 
 /** Result of {@link UrlSigner.sign}. */
@@ -196,7 +198,7 @@ export function createUrlSigner(options: UrlSignerOptions): UrlSigner {
       if (!Number.isFinite(ttl) || ttl <= 0) {
         throw new Error('[media-kit] sign: expiresIn must be a positive number of seconds');
       }
-      const e = Math.floor(Date.now() / 1000) + Math.floor(ttl);
+      const e = Math.floor(input.now ?? Date.now() / 1000) + Math.floor(ttl);
       const tokenVersion = input.tokenVersion ?? 0;
       const claims = sortClaims(input.claims ?? {});
 

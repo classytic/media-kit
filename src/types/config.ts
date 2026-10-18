@@ -21,9 +21,15 @@ export interface FileTypesConfig {
    * Strict-profile content verification (default: false). When enabled,
    * `validateFile()` sniffs the buffer's magic bytes and REJECTS a dangerous
    * declared/detected mismatch — e.g. a file declared `image/png` whose bytes
-   * are actually HTML or SVG (a stored-XSS vector). Off by default because it
-   * requires the real bytes in hand (server-side upload / URL import); the
+   * are actually HTML or SVG (a stored-XSS vector). Off by default; the
    * declared-MIME check always runs regardless.
+   *
+   * Applies to every write path. Buffered upload / URL import sniff the buffer in
+   * hand. Bytes the API never saw (presigned `confirmUpload`, multipart completion,
+   * derivative PUTs) are sniffed from the first 4 KB of the stored object, read with
+   * the driver's ranged `read(key, { start, end })`; a refusal deletes the object
+   * and answers 415 `media.file.content_mismatch`. A driver that ignores the range
+   * is still read only up to the head (the stream is destroyed after 4 KB).
    */
   verifyContent?: boolean;
 }

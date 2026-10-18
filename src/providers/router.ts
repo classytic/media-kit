@@ -36,6 +36,7 @@ import type {
   SignedPartResult,
   CompletedPart,
   ResumableUploadSession,
+  SignedReadOptions,
 } from '../types/storage.js';
 
 export type { StorageDriver, WriteResult, FileStat } from '../types/storage.js';
@@ -210,6 +211,14 @@ export class StorageRouter implements StorageDriver {
       throw new Error(`Driver '${driver.name}' does not support signed URLs`);
     }
     return driver.getSignedUrl(key, expiresIn);
+  }
+
+  async getSignedReadUrl(key: string, expiresIn: number, options: SignedReadOptions): Promise<string> {
+    const driver = this.resolve(key);
+    if (!driver.getSignedReadUrl) {
+      throw new Error(`Driver '${driver.name}' does not support signed read URLs with response overrides`);
+    }
+    return driver.getSignedReadUrl(key, expiresIn, options);
   }
 
   async getSignedUploadUrl(key: string, contentType: string, expiresIn?: number): Promise<PresignedUploadResult> {

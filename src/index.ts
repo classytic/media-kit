@@ -157,6 +157,7 @@ export type {
   WriteResult,
   FileStat,
   PresignedUploadResult,
+  SignedReadOptions,
 } from './types/storage.js';
 
 // ── Types — Processing ───────────────────────────────────────
@@ -247,6 +248,9 @@ export { QueryParser } from '@classytic/mongokit';
 // dropped its re-exports of these to keep one canonical home; the union
 // type formerly known as `PaginationResult` is now `AnyPaginationResult`.
 export type { HttpError } from '@classytic/repo-core/errors';
+// media-kit's wire error codes (typed `HttpError` refusals carry one on `code`).
+export { MEDIA_ERROR_CODES } from './errors.js';
+export type { MediaErrorCode } from './errors.js';
 export type {
   AggregatePaginationResult,
   AnyPaginationResult as PaginationResult,

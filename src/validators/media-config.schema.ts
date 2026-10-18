@@ -36,6 +36,8 @@ export const softDeleteSchema = z.object({
 export const fileTypesSchema = z.object({
   allowed: z.array(z.string()).min(1),
   maxSize: z.number().int().min(1).optional(),
+  /** Without this key the parse stripped it and `verifyContent` never reached the engine. */
+  verifyContent: z.boolean().optional(),
 });
 
 export const folderSchema = z.object({

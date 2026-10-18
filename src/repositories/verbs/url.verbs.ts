@@ -17,6 +17,7 @@ import type { TransformOpOutput } from '../../bridges/transform.bridge.js';
 import { isImage } from '../../utils/mime.js';
 import { isExternalMedia } from '../../utils/external.js';
 import type { MediaRepository } from '../media.repository.js';
+import { MEDIA_ERROR_CODES, mediaError } from '../../errors.js';
 
 /**
  * Resolve a single media doc's polymorphic source via SourceBridge.
@@ -131,7 +132,11 @@ export async function getSignedAssetUrlVerb(
 
   const media = await repo._resolveDoc(idOrDoc, ctx);
   if (options.variant && !(media.variants ?? []).some((v) => v.name === options.variant)) {
-    throw new Error(`[media-kit] Variant '${options.variant}' not found on media ${String(media._id)}`);
+    throw mediaError(
+      404,
+      MEDIA_ERROR_CODES.VARIANT_NOT_FOUND,
+      `[media-kit] Variant '${options.variant}' not found on media ${String(media._id)}`,
+    );
   }
 
   const id = String(media._id);
@@ -176,7 +181,7 @@ export async function revokeAccessVerb(
     ...(ctx?.organizationId !== undefined && { organizationId: ctx.organizationId }),
     ...(ctx?.session !== undefined && { session: ctx.session }),
   } as Record<string, unknown>);
-  if (!result) throw new Error(`Media ${id} not found`);
+  if (!result) throw mediaError(404, MEDIA_ERROR_CODES.ASSET_NOT_FOUND, `Media ${id} not found`);
 
   repo._log('info', 'Media access revoked (tokenVersion bumped)', { id, tokenVersion: result.tokenVersion });
   return result;
@@ -291,7 +296,7 @@ export async function applyTransformsVerb(
   ctx?: MediaContext,
 ): Promise<TransformOpOutput> {
   const media = await repo.getById(mediaId, { ...ctx });
-  if (!media) throw new Error(`Media ${mediaId} not found`);
+  if (!media) throw mediaError(404, MEDIA_ERROR_CODES.ASSET_NOT_FOUND, `Media ${mediaId} not found`);
 
   // External records own no bytes to transform.
   if (isExternalMedia(media)) {
@@ -311,7 +316,9 @@ export async function applyTransformsVerb(
 
   for (const name of options.ops) {
     if (!opsRegistry[name]) {
-      throw new Error(
+      throw mediaError(
+        400,
+        MEDIA_ERROR_CODES.TRANSFORM_UNKNOWN_OP,
         `[media-kit] Unknown transform op: '${name}'. Registered: ${Object.keys(opsRegistry).join(', ') || '(none)'}`,
       );
     }

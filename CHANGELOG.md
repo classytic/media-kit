@@ -3,6 +3,69 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 3.12.0 — 2026-10-17
+
+### Added: `getSignedReadUrl(key, expiresIn, { responseType, responseDisposition })`
+
+An optional `StorageDriver` method (GCS, S3 and the router implement it) for a signed read URL that
+pins the response headers storage sends: GCS V4 `response-content-type` / `response-content-disposition`
+(covered by the signature), S3 `ResponseContentType` / `ResponseContentDisposition`. A viewer then gets
+the declared type and the server decides inline vs download, whatever the object metadata says.
+Additive: `getSignedUrl` is unchanged. Type `SignedReadOptions` exported.
+
+### Fixed: client-caused failures throw typed errors, not a bare `Error` (500)
+
+Every client-caused refusal is now a repo-core `HttpError` with a stable `code`, so arc's error handler
+answers with the right status instead of `arc.internal_error` 500. Codes are exported as `MEDIA_ERROR_CODES`
+(type `MediaErrorCode`); messages are unchanged.
+- 415 `media.file.type_not_allowed`: disallowed MIME at upload, presign, batch presign, confirm (client or storage type) and multipart completion.
+- 413 `media.file.too_large`: declared or storage-reported size over `fileTypes.maxSize` (also URL import).
+- 409 `media.upload.not_found`: `confirmUpload` of a key with no stored object.
+- 400 `media.file.empty`, 415 `media.file.content_mismatch` (`verifyContent`).
+- 404 `media.asset.not_found` (tags, focal point, revoke, replace, transforms, signed asset URL), 404 `media.variant.not_found`.
+- 400 `media.focal_point.invalid`, 400 `media.transform.unknown_op`, 400 `media.key.invalid` (LocalProvider traversal).
+- 422 `media.scan.rejected` / 502 `media.scan.failed` (direct upload and confirm).
+- URL import: 400 `media.import.invalid_url`, 400 `media.import.url_blocked` (SSRF guard), 422 `media.import.fetch_failed`.
+
+Driver-capability and configuration errors (a driver without presign/multipart, a missing TransformBridge,
+bad signer config) stay plain `Error`s: they are host wiring faults, not the caller's.
+
+### Security: `verifyContent` now covers bytes the API never saw (presigned / multipart / derivatives)
+
+The magic-byte sniff ran only on buffered `upload()`, so a client could PUT HTML labelled `image/jpeg` to a
+presigned URL and confirm it. With `fileTypes.verifyContent: true`, `confirmUpload`, `completeMultipartUpload`
+and every declared derivative now read the first 4 KB of the stored object (the driver's existing ranged
+`read(key, { start, end })`, implemented by S3, GCS and Local) and apply the same rule as `validateFile`
+(active HTML/SVG declared as an inert image/video/audio type). On a mismatch the object is deleted and the
+call answers 415 `media.file.content_mismatch`. A driver that ignores the range is consumed only up to the
+head and the stream destroyed, so no driver ever downloads the whole object for this. No read-back happens
+when `verifyContent` is off. New helpers: `readStoredHead`, `CONTENT_SNIFF_BYTES` (internal).
+
+### Fixed: `fileTypes.verifyContent` was stripped by `defineMedia`
+
+`fileTypesSchema` did not declare `verifyContent`, so the Zod parse dropped it and the validated `fileTypes`
+replaced the host's: the switch never reached the engine on any path. Hosts that set it (e.g.
+`@spinekit/media`, which defaults it to `true`) now actually get content verification.
+
+### Added: `LocalProvider` presigned PUT for development (`presign` option)
+
+`new LocalProvider({ ..., presign: { enabled, uploadUrl, secret, maxBytes? } })` gives the local driver
+`getSignedUploadUrl` (an HMAC-signed, expiring PUT URL on the host's API, via `./signing`) and
+`acceptSignedUpload({ query, contentType, body })`, a framework-agnostic receiver the host mounts on one PUT
+route. The two-phase upload then runs identically without S3/GCS. Off unless `enabled === true`; when off the
+driver has no `getSignedUploadUrl` and the receiver answers 404 `media.upload.receiver_disabled`. Upload URLs
+carry a signed `op=put` claim, so a GET-serve signature from the same secret never authorises a write.
+`presign.now` injects the clock for signing and expiry.
+
+### Added: `SignUrlInput.now` (`./signing`)
+
+`sign()` accepts an optional clock override in unix seconds, mirroring `verify({ now })`, so a host with an
+injected clock signs and verifies on the same time base.
+
+### Changed — peer floors
+
+`@classytic/mongokit` `>=3.41.0`, `@classytic/primitives` `>=0.32.0`, `mongoose` `>=9.11.0`.
+
 ## 3.11.0 — 2026-10-11
 
 ### Changed: peer floor `@classytic/primitives` `>=0.25.0` → `>=0.31.0`

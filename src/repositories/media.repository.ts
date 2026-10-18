@@ -53,6 +53,7 @@ import { MEDIA_EVENTS } from '../events/event-constants.js';
 import { createMediaEvent } from '../events/helpers.js';
 import type { ImageProcessor } from '../processing/image.js';
 import { Semaphore } from '../utils/semaphore.js';
+import { MEDIA_ERROR_CODES, mediaError } from '../errors.js';
 import { validateFile as validateFileHelper, getContentType as getContentTypeHelper } from '../operations/helpers.js';
 import {
   uploadVerb,
@@ -638,7 +639,7 @@ export class MediaRepository extends Repository<IMediaDocument> {
   public async _resolveDoc(idOrDoc: string | IMediaDocument, ctx?: MediaContext): Promise<IMediaDocument> {
     if (typeof idOrDoc !== 'string') return idOrDoc;
     const media = await this.getById(idOrDoc, { ...ctx, throwOnNotFound: false });
-    if (!media) throw new Error(`Media ${idOrDoc} not found`);
+    if (!media) throw mediaError(404, MEDIA_ERROR_CODES.ASSET_NOT_FOUND, `Media ${idOrDoc} not found`);
     return media;
   }
 
@@ -827,7 +828,7 @@ export class MediaRepository extends Repository<IMediaDocument> {
     context?: OperationContext | Record<string, unknown>,
   ): Promise<IMediaDocument> {
     const updated = await this.update(id, data, context as Parameters<MediaRepository['update']>[2]);
-    if (!updated) throw new Error(`[media-kit] Media not found: ${id}`);
+    if (!updated) throw mediaError(404, MEDIA_ERROR_CODES.ASSET_NOT_FOUND, `[media-kit] Media not found: ${id}`);
     return updated;
   }
 

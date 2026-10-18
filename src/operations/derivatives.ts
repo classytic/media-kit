@@ -31,6 +31,7 @@ import type { OperationContext } from '../types/uploads.js';
 import type { PresignedUploadResult } from '../types/storage.js';
 import type { OperationDeps } from './types.js';
 import { enforcePresignPolicy } from './presigned.js';
+import { assertStoredContentMatches } from './helpers.js';
 import { createError } from '@classytic/repo-core/errors';
 
 /** One size the client intends to produce and upload. */
@@ -238,6 +239,8 @@ export async function toStoredVariants(
           'Refusing to record a variant URL that would 404.',
       );
     }
+    // A derivative is a client PUT like the primary: the same verifyContent sniff applies.
+    await assertStoredContentMatches(deps, v.key, [stat.contentType, v.mimeType]);
 
     rows.push({
       name,

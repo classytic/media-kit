@@ -32,6 +32,7 @@ import {
   validateFile as validateFileHelper,
 } from '../../operations/helpers.js';
 import type { MediaRepository } from '../media.repository.js';
+import { MEDIA_ERROR_CODES, mediaError } from '../../errors.js';
 
 /**
  * Upload a single file with status-driven flow.
@@ -60,10 +61,14 @@ export async function uploadVerb(
       });
     } catch (err) {
       // Thrown scan errors → reject the upload
-      throw new Error(`[media-kit] scan failed: ${(err as Error).message}`);
+      throw mediaError(502, MEDIA_ERROR_CODES.SCAN_FAILED, `[media-kit] scan failed: ${(err as Error).message}`);
     }
     if (scan.verdict === 'reject') {
-      throw new Error(`[media-kit] upload rejected by scan: ${scan.reason ?? 'no reason given'}`);
+      throw mediaError(
+        422,
+        MEDIA_ERROR_CODES.SCAN_REJECTED,
+        `[media-kit] upload rejected by scan: ${scan.reason ?? 'no reason given'}`,
+      );
     }
     if (scan.verdict === 'quarantine') {
       scanQuarantine = scan;
@@ -200,7 +205,7 @@ export async function replaceVerb(
   }
 
   const existing = await repo.getById(id, { ...ctx });
-  if (!existing) throw new Error(`Media ${id} not found`);
+  if (!existing) throw mediaError(404, MEDIA_ERROR_CODES.ASSET_NOT_FOUND, `Media ${id} not found`);
 
   // External records own no bytes to replace — and their sentinel key must
   // never flow into storage writes/deletes. Re-host via importFromUrl() or

@@ -271,6 +271,37 @@ const router = new StorageRouter({
 
 Each driver supports: `write`, `read`, `delete`, `exists`, `stat`, `copy` (optional), signed URLs, multipart (S3) or resumable (GCS) upload.
 
+### Presigned PUT on local disk (development only)
+
+`LocalProvider` can presign, so the two-phase upload (`getSignedUploadUrl` → client PUT → `confirmUpload`) runs without a bucket. The URL points at a route on **your** API, HMAC-signed (key, Content-Type, expiry), and the provider's framework-agnostic receiver writes the body:
+
+```ts
+const local = new LocalProvider({
+  basePath: './uploads',
+  baseUrl: 'http://localhost:3000/files',
+  presign: {
+    enabled: !config.isProduction,          // nothing activates unless this is literally `true`
+    uploadUrl: 'http://localhost:3000/media/dev-uploads',
+    secret: process.env.DEV_UPLOAD_SECRET!, // dedicated, not the GET-signing secret
+    maxBytes: 25 * 1024 * 1024,
+  },
+});
+
+// Fastify: one PUT route with a raw body parser; thrown HttpErrors map through your error handler.
+app.register(async (scope) => {
+  scope.addContentTypeParser('*', { parseAs: 'buffer', bodyLimit: 25 * 1024 * 1024 }, (_r, body, done) => done(null, body));
+  scope.put('/media/dev-uploads', (req) =>
+    local.acceptSignedUpload({ query: req.query as Record<string, unknown>, contentType: req.headers['content-type'], body: req.body }),
+  );
+});
+```
+
+**Production safety:** without `presign`, or with `enabled` anything but `true`, the provider has no `getSignedUploadUrl` (presign fails as on any non-presigning driver) and `acceptSignedUpload` answers 404 `media.upload.receiver_disabled`. Don't mount the receiver in production; S3/GCS presign natively. Refusals are typed: 403 `media.upload.signature_invalid`, 415 `media.upload.content_type_mismatch`, 400 `media.file.empty`, 413 `media.file.too_large`.
+
+### Error codes
+
+Client-caused refusals throw repo-core `HttpError`s (`status` + stable `code`), so arc serializes them with their own status instead of a 500. The vocabulary is exported as `MEDIA_ERROR_CODES` from the root entry, e.g. 415 `media.file.type_not_allowed` (presign, confirm, upload), 413 `media.file.too_large`, 409 `media.upload.not_found` (confirm before the PUT landed), 404 `media.asset.not_found`.
+
 ---
 
 ## Arc integration

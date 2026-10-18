@@ -12,6 +12,7 @@ import type { MediaContext } from '../../engine/engine-types.js';
 import { MEDIA_EVENTS } from '../../events/event-constants.js';
 import { createMediaEvent } from '../../events/helpers.js';
 import type { MediaRepository } from '../media.repository.js';
+import { MEDIA_ERROR_CODES, mediaError } from '../../errors.js';
 
 export async function addTagsVerb(
   repo: MediaRepository,
@@ -30,7 +31,7 @@ export async function addTagsVerb(
     ...(ctx?.organizationId !== undefined && { organizationId: ctx.organizationId }),
     ...(ctx?.session !== undefined && { session: ctx.session }),
   } as Record<string, unknown>);
-  if (!result) throw new Error(`Media ${id} not found`);
+  if (!result) throw mediaError(404, MEDIA_ERROR_CODES.ASSET_NOT_FOUND, `Media ${id} not found`);
 
   await repo.events.publish(
     createMediaEvent(
@@ -58,7 +59,7 @@ export async function removeTagsVerb(
     ...(ctx?.organizationId !== undefined && { organizationId: ctx.organizationId }),
     ...(ctx?.session !== undefined && { session: ctx.session }),
   } as Record<string, unknown>);
-  if (!result) throw new Error(`Media ${id} not found`);
+  if (!result) throw mediaError(404, MEDIA_ERROR_CODES.ASSET_NOT_FOUND, `Media ${id} not found`);
 
   await repo.events.publish(
     createMediaEvent(
@@ -82,14 +83,14 @@ export async function setFocalPointVerb(
   ctx?: MediaContext,
 ): Promise<IMediaDocument> {
   if (focalPoint.x < 0 || focalPoint.x > 1 || focalPoint.y < 0 || focalPoint.y > 1) {
-    throw new Error('Focal point coordinates must be between 0 and 1');
+    throw mediaError(400, MEDIA_ERROR_CODES.FOCAL_POINT_INVALID, 'Focal point coordinates must be between 0 and 1');
   }
   const result = await repo.findOneAndUpdate({ _id: id }, { $set: { focalPoint } }, {
     returnDocument: 'after',
     ...(ctx?.organizationId !== undefined && { organizationId: ctx.organizationId }),
     ...(ctx?.session !== undefined && { session: ctx.session }),
   } as Record<string, unknown>);
-  if (!result) throw new Error(`Media ${id} not found`);
+  if (!result) throw mediaError(404, MEDIA_ERROR_CODES.ASSET_NOT_FOUND, `Media ${id} not found`);
 
   await repo.events.publish(
     createMediaEvent(
