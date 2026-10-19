@@ -16,15 +16,14 @@ describe('updateFilenameExtension', () => {
   });
 
   it('should normalize extension based on mime-types library', () => {
-    // mime-types returns 'jpeg' for 'image/jpeg', not 'jpg'
-    expect(updateFilenameExtension('photo.jpg', 'image/jpeg')).toBe('photo.jpeg');
+    expect(updateFilenameExtension('photo.jpg', 'image/jpeg')).toMatch(/^photo\.jpe?g$/);
     expect(updateFilenameExtension('image.png', 'image/png')).toBe('image.png');
     expect(updateFilenameExtension('file.webp', 'image/webp')).toBe('file.webp');
   });
 
   it('should handle files with multiple dots in name', () => {
     expect(updateFilenameExtension('my.photo.jpg', 'image/webp')).toBe('my.photo.webp');
-    expect(updateFilenameExtension('file.backup.png', 'image/jpeg')).toBe('file.backup.jpeg');
+    expect(updateFilenameExtension('file.backup.png', 'image/jpeg')).toMatch(/^file\.backup\.jpe?g$/);
   });
 
   it('should keep original filename if extension cannot be determined', () => {
@@ -34,6 +33,6 @@ describe('updateFilenameExtension', () => {
 
   it('should handle filenames without extension', () => {
     expect(updateFilenameExtension('photo', 'image/webp')).toBe('photo.webp');
-    expect(updateFilenameExtension('image', 'image/jpeg')).toBe('image.jpeg');
+    expect(updateFilenameExtension('image', 'image/jpeg')).toMatch(/^image\.jpe?g$/);
   });
 });

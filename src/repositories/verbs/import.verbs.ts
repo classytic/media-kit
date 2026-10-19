@@ -1,3 +1,4 @@
+import { assertBudgetedDirectOnly } from '../../operations/storage-budget.js';
 /**
  * Move & import verbs — move, importFromUrl, registerExternal.
  *
@@ -39,6 +40,7 @@ export async function moveVerb(
   targetFolder: string,
   ctx?: MediaContext,
 ): Promise<RewriteResult> {
+  assertBudgetedDirectOnly(repo);
   const normalizedTarget = normalizeFolderPath(targetFolder);
   const rewriteKeys = repo.mediaConfig.folders?.rewriteKeys !== false;
 
@@ -106,6 +108,7 @@ export async function importFromUrlVerb(
   options?: ImportOptions,
   ctx?: MediaContext,
 ): Promise<IMediaDocument> {
+  assertBudgetedDirectOnly(repo);
   // Phase 1 — secure download only (SSRF guard, IP pinning, size cap).
   const { downloadFromUrl } = await import('../../operations/url-import.js');
   const { buffer, filename, mimeType } = await downloadFromUrl(repo._opDeps, url, options);

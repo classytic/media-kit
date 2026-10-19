@@ -1,3 +1,4 @@
+import { assertBudgetedDirectOnly } from '../../operations/storage-budget.js';
 /**
  * URL & serving verbs — bridge-backed source resolution and CDN URLs
  * (resolveSource, resolveSourcesMany, getAssetUrl, getVariantUrls) plus
@@ -295,6 +296,7 @@ export async function applyTransformsVerb(
   options: { ops: string[]; params?: Record<string, string> },
   ctx?: MediaContext,
 ): Promise<TransformOpOutput> {
+  assertBudgetedDirectOnly(repo);
   const media = await repo.getById(mediaId, { ...ctx });
   if (!media) throw mediaError(404, MEDIA_ERROR_CODES.ASSET_NOT_FOUND, `Media ${mediaId} not found`);
 

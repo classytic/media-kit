@@ -225,34 +225,32 @@ OK(`package.json — @classytic/mongokit peer dep ${mongokitPeer} (floor >=3.30.
 assert.ok(pkg.peerDependencies?.zod?.includes('4'), `zod peer must be >=4, got: ${pkg.peerDependencies?.zod}`);
 OK('package.json — zod peer dep >=4.0.0');
 
-// ── Publishing hygiene: package size ceiling ──────────────────
-// Keep under 500 KB unpacked to avoid bloat. If this trips, check the
-// tsdown build for stray test fixtures or large assets getting bundled.
-const { statSync } = await import('node:fs');
-const distStats = [
-  'dist/index.mjs',
-  'dist/index.d.mts',
-  'dist/providers/s3.mjs',
-  'dist/providers/gcs.mjs',
-  'dist/schemas.mjs',
-  'dist/transforms.mjs',
-  'dist/signing.mjs',
-];
-let totalMjsBytes = 0;
-for (const rel of distStats) {
-  const url = new URL(`../../${rel}`, import.meta.url);
-  const sz = statSync(url).size;
-  totalMjsBytes += sz;
+// ── Publishing hygiene: runtime and declaration budgets ───────
+const { statSync, readdirSync } = await import('node:fs');
+const { resolve, dirname } = await import('node:path');
+const { fileURLToPath } = await import('node:url');
+const distRoot = new URL('../../dist/', import.meta.url);
+const files = readdirSync(distRoot, { recursive: true }).filter((file) => statSync(new URL(file, distRoot)).isFile());
+const sizeOf = (files) => files.reduce((total, file) => total + statSync(new URL(file, distRoot)).size, 0);
+const runtimeBytes = sizeOf(files.filter((file) => file.endsWith('.mjs')));
+const declarationBytes = sizeOf(files.filter((file) => file.endsWith('.d.mts')));
+assert.ok(runtimeBytes < 425_000, `dist runtime size ${runtimeBytes} exceeds 425KB budget`);
+assert.ok(declarationBytes < 250_000, `dist declaration size ${declarationBytes} exceeds 250KB budget`);
+
+const rootFile = fileURLToPath(new URL('index.mjs', distRoot));
+const reached = new Set();
+function visit(file) {
+  if (reached.has(file)) return;
+  reached.add(file);
+  const source = readFileSync(file, 'utf8');
+  for (const match of source.matchAll(/(?:from\s*|import\s*\()?["'](\.[^"']+\.mjs)["']/g)) visit(resolve(dirname(file), match[1]));
 }
-// Budget raised 200 → 220 KB in 3.4.0: the release legitimately grew the
-// core bundle (private serving + signing + external/reference records left
-// it at ~209 KB). Still a bloat tripwire — if this trips again, check for
-// stray fixtures/assets before raising it.
-// Raised 220 → 300 KB in 3.11.0: the 3.10.0 build (Cloudinary presign, signature v2) already measured
-// 291.6 KB, so the 220 KB cap had been failing since then; 3.11.0 adds ~0.5 KB over 3.10.0. Checked per
-// file — the growth is the core bundle, not stray fixtures.
-assert.ok(totalMjsBytes < 300_000, `dist JS size ${totalMjsBytes} bytes exceeds 300KB budget`);
-OK(`package.json — dist JS size ${(totalMjsBytes / 1024).toFixed(1)} KB (budget 300 KB)`);
+visit(rootFile);
+assert.ok([...reached].reduce((sum, file) => sum + statSync(file).size, 0) < 300_000, 'root dependency graph exceeds 300KB budget');
+assert.ok(![...reached].some((file) => file.replaceAll('\\', '/').endsWith('/repositories/storage-budget.store.mjs')), 'Mongo budget adapter must remain a separate subpath');
+const mongoBudget = await import('../../dist/repositories/storage-budget.store.mjs');
+assert.equal(typeof mongoBudget.createMongoStorageBudget, 'function');
+OK(`package.json — runtime ${(runtimeBytes / 1024).toFixed(1)} KB, declarations ${(declarationBytes / 1024).toFixed(1)} KB; Mongo budget adapter stays outside the root graph`);
 
 // Subpath exports all resolve (already verified above, but assert count)
 const subpathExports = Object.keys(pkg.exports).filter((k) => k !== '.' && k !== './package.json');

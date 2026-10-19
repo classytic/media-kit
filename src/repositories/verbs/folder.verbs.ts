@@ -22,6 +22,7 @@ import { createMediaEvent } from '../../events/helpers.js';
 import { normalizeFolderPath, buildFolderTree } from '../../utils/folders.js';
 import { rewriteKeyPrefix, executeKeyRewrite, type RewritableFile } from '../../operations/helpers.js';
 import type { MediaRepository } from '../media.repository.js';
+import { assertBudgetedDirectOnly } from '../../operations/storage-budget.js';
 
 export async function getFolderTreeVerb(repo: MediaRepository, ctx?: MediaContext): Promise<FolderTree> {
   // Route through `aggregatePipeline` so multiTenantPlugin + softDeletePlugin
@@ -117,6 +118,7 @@ export async function renameFolderVerb(
   newPath: string,
   ctx?: MediaContext,
 ): Promise<RewriteResult> {
+  assertBudgetedDirectOnly(repo);
   const normalizedOld = normalizeFolderPath(oldPath);
   const normalizedNew = normalizeFolderPath(newPath);
   const rewriteKeys = repo.mediaConfig.folders?.rewriteKeys !== false;

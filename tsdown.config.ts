@@ -3,6 +3,8 @@ import { defineConfig } from 'tsdown';
 export default defineConfig({
   entry: {
     index: 'src/index.ts',
+    'storage-budget': 'src/storage-budget.ts',
+    'repositories/storage-budget.store': 'src/repositories/storage-budget.store.ts',
     'providers/s3': 'src/providers/s3.provider.ts',
     'providers/gcs': 'src/providers/gcs.provider.ts',
     'providers/local': 'src/providers/local.provider.ts',

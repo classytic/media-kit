@@ -1,3 +1,4 @@
+import { signBudgetedUpload } from './storage-budget.js';
 /**
  * Client-produced derivatives — presigning them, and admitting them safely.
  *
@@ -31,7 +32,7 @@ import type { OperationContext } from '../types/uploads.js';
 import type { PresignedUploadResult } from '../types/storage.js';
 import type { OperationDeps } from './types.js';
 import { enforcePresignPolicy } from './presigned.js';
-import { assertStoredContentMatches } from './helpers.js';
+import { assertStoredContentMatches, assertGeneratedKeyShape, tenantKeySegment, requireTenant } from './helpers.js';
 import { createError } from '@classytic/repo-core/errors';
 
 /** One size the client intends to produce and upload. */
@@ -130,8 +131,14 @@ export async function signDerivativeUploads(
     derivatives: readonly DerivativeUploadRequest[];
     expiresIn?: number | undefined;
   },
-  _context?: OperationContext,
+  context?: OperationContext,
 ): Promise<DerivativeUploadTarget[]> {
+  if (deps.repository.storageBudget) {
+    const organizationId = requireTenant(deps, context);
+    if (assertGeneratedKeyShape(input.primaryKey).tenantSegment !== tenantKeySegment(organizationId)) {
+      throw createError(403, 'The primary upload belongs to a different tenant.');
+    }
+  }
   if (!deps.driver.getSignedUploadUrl) {
     throw new Error(`Driver '${deps.driver.name}' does not support presigned uploads`);
   }
@@ -152,7 +159,15 @@ export async function signDerivativeUploads(
   return Promise.all(
     input.derivatives.map(async (d) => {
       const key = derivativeKey(input.primaryKey, d.name, extensionFor(d.contentType));
-      const upload = await deps.driver.getSignedUploadUrl!(key, d.contentType, input.expiresIn);
+      const upload = await signBudgetedUpload({
+        repository: deps.repository,
+        driver: deps.driver,
+        key,
+        contentType: d.contentType,
+        size: d.size,
+        organizationId: context?.organizationId,
+        expiresIn: input.expiresIn,
+      });
       return { name: sanitizeDerivativeName(d.name), upload };
     }),
   );

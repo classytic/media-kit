@@ -101,6 +101,8 @@ export interface StorageWriteOptions {
 export interface StorageDriver {
   /** Driver name (e.g., 's3', 'gcs', 'local') */
   readonly name: string;
+  /** Signed PUTs bind the exact byte length when options.size is supplied. */
+  readonly exactUploadSize?: boolean;
 
   // --- Core (required) ---
 
@@ -152,7 +154,12 @@ export interface StorageDriver {
   getSignedReadUrl?(key: string, expiresIn: number, options: SignedReadOptions): Promise<string>;
 
   /** Get a presigned URL for direct client-side uploads */
-  getSignedUploadUrl?(key: string, contentType: string, expiresIn?: number): Promise<PresignedUploadResult>;
+  getSignedUploadUrl?(
+    key: string,
+    contentType: string,
+    expiresIn?: number,
+    options?: { size: number },
+  ): Promise<PresignedUploadResult>;
 
   // --- Multipart Upload (S3-style) ---
 

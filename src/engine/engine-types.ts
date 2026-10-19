@@ -1,3 +1,4 @@
+import type { StorageBudget } from '../storage-budget.js';
 /**
  * Engine types for @classytic/media-kit.
  *
@@ -119,6 +120,8 @@ export interface MediaShape {
 // here, not in the shape.
 
 export interface MediaRuntime {
+  /** Direct uploads reserve physical bytes before a signed URL is returned. */
+  storageBudget?: StorageBudget;
   /**
    * Single storage driver — sugar for a one-entry `providers` registry.
    * Use `providers` + `defaultProvider` when you need multiple backends.

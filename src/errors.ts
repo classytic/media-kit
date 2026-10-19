@@ -14,6 +14,7 @@
 import { createError, type HttpError } from '@classytic/repo-core/errors';
 
 export const MEDIA_ERROR_CODES = {
+  ASSET_IN_USE: 'media.in_use',
   // File policy (upload, presign, confirm, multipart completion)
   /** HTTP 415: the MIME type is outside `fileTypes.allowed`. */
   FILE_TYPE_NOT_ALLOWED: 'media.file.type_not_allowed',

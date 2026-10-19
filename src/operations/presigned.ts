@@ -1,3 +1,4 @@
+import { signBudgetedUpload, assertBudgetedDirectOnly } from './storage-budget.js';
 /**
  * Presigned upload operations — generate signed URL, confirm upload,
  * multipart orchestration (S3/GCS), and batch presigned URLs.
@@ -42,6 +43,7 @@ import {
   generateScopedKey,
   generateTitle,
   assertGeneratedKeyShape,
+  resolveUploadFolder,
   tenantKeySegment,
   deleteKeysBestEffort,
   deriveAspectRatio,
@@ -238,7 +240,15 @@ export async function getSignedUploadUrl(
   });
 
   try {
-    const result = await deps.driver.getSignedUploadUrl(key, contentType, options.expiresIn);
+    const result = await signBudgetedUpload({
+      repository: deps.repository,
+      driver: deps.driver,
+      key,
+      contentType,
+      size: options.size,
+      organizationId,
+      expiresIn: options.expiresIn,
+    });
 
     await deps.events.emit('after:presignedUpload', {
       context: { data: eventData, timestamp: new Date() },
@@ -268,6 +278,7 @@ export async function confirmUpload(
   context?: OperationContext,
 ): Promise<IMediaDocument> {
   const organizationId = requireTenant(deps, context);
+  if (deps.repository.storageBudget && input.process) assertBudgetedDirectOnly(deps.repository);
 
   const eventCtx = {
     data: input,
@@ -293,6 +304,7 @@ export async function confirmUpload(
     // optional tenant segment + random basename) — anything else (traversal,
     // URLs, hand-crafted paths) is rejected before any storage call.
     const keyShape = assertGeneratedKeyShape(input.key);
+    const folder = resolveUploadFolder(keyShape, deps.config.folders?.keyPrefix, input.folder);
 
     // Tenant binding: the key must have been minted FOR this caller's scope.
     // Closes the leaked-unconfirmed-key hole — knowing another tenant's key
@@ -412,7 +424,6 @@ export async function confirmUpload(
     // Determine folder from the key WITHOUT the tenant segment — the segment
     // is a key-format detail and must not leak into the doc's `folder` field
     // (visibility.byFolder rules and folder listings operate on it).
-    const folder = input.folder || keyShape.folder || 'uploads';
 
     // Build public URL — ALWAYS derived from the driver. A client-supplied
     // `url` is validated (absolute http(s), matching storage origin) purely
@@ -498,55 +509,73 @@ export async function confirmUpload(
      */
     const storedVariants = input.variants?.length ? await toStoredVariants(deps, input.key, input.variants) : [];
 
-    let media = await createOwningKey(deps, input.key, () =>
-      deps.repository.createMedia(
-        {
-          filename: input.filename,
-          /**
-           * What the USER picked, which is not always what we store.
-           *
-           * A `photo.jpg` re-encoded to WebP is stored as `photo.webp` so the key
-           * matches the bytes — but the provenance is still `photo.jpg`, and that
-           * is what an operator recognises in a list. Defaulting this to the
-           * stored name meant the original was overwritten by the derived one and
-           * the user's own filename was simply gone.
-           */
-          originalFilename: input.originalFilename || input.filename,
-          title,
-          mimeType: effectiveMimeType,
-          size: actualSize,
-          url,
-          key: input.key,
-          hash,
-          // Presigned flows always land in the default provider (see module
-          // JSDoc). Stamp its registry key so per-doc routing survives a
-          // later defaultProvider change.
-          provider: deps.registry.defaultName,
-          // A quarantined asset is NOT `ready`. The buffered path marks these
-          // `error` so nothing serves them; the two paths must agree, or the same
-          // verdict would mean two different things depending on how the file
-          // arrived.
-          status: scanQuarantineReason ? 'error' : 'ready',
-          ...(scanQuarantineReason ? { errorMessage: scanQuarantineReason } : {}),
-          folder,
-          alt: input.alt,
-          // Same precedence as upload(): explicit input > byFolder rule > default.
-          visibility: resolveVisibility(deps.config.visibility, folder, input.visibility),
-          tokenVersion: 0,
-          variants: storedVariants,
-          tags: [],
-          metadata: {},
-          ...(organizationId && { organizationId }),
-          ...(input.expiresAt && { expiresAt: input.expiresAt }),
-          ...(input.width !== undefined && { width: input.width }),
-          ...(input.height !== undefined && { height: input.height }),
-          ...(clientAspectRatio !== undefined && { aspectRatio: clientAspectRatio }),
-          ...(input.thumbhash !== undefined && { thumbhash: input.thumbhash }),
-          ...(input.dominantColor !== undefined && { dominantColor: input.dominantColor }),
-        },
-        context,
-      ),
-    );
+    if (deps.repository.storageBudget) {
+      await deps.repository.storageBudget.assertAllocation(input.key, String(organizationId), actualSize);
+      for (const variant of storedVariants) {
+        await deps.repository.storageBudget.assertAllocation(variant.key, String(organizationId), variant.size);
+      }
+    }
+
+    const create = (transactionContext?: OperationContext) =>
+      createOwningKey(deps, input.key, () =>
+        deps.repository.createMedia(
+          {
+            filename: input.filename,
+            /**
+             * What the USER picked, which is not always what we store.
+             *
+             * A `photo.jpg` re-encoded to WebP is stored as `photo.webp` so the key
+             * matches the bytes — but the provenance is still `photo.jpg`, and that
+             * is what an operator recognises in a list. Defaulting this to the
+             * stored name meant the original was overwritten by the derived one and
+             * the user's own filename was simply gone.
+             */
+            originalFilename: input.originalFilename || input.filename,
+            title,
+            mimeType: effectiveMimeType,
+            size: actualSize,
+            url,
+            key: input.key,
+            hash,
+            // Presigned flows always land in the default provider (see module
+            // JSDoc). Stamp its registry key so per-doc routing survives a
+            // later defaultProvider change.
+            provider: deps.registry.defaultName,
+            // A quarantined asset is NOT `ready`. The buffered path marks these
+            // `error` so nothing serves them; the two paths must agree, or the same
+            // verdict would mean two different things depending on how the file
+            // arrived.
+            status: scanQuarantineReason ? 'error' : 'ready',
+            ...(scanQuarantineReason ? { errorMessage: scanQuarantineReason } : {}),
+            folder,
+            alt: input.alt,
+            // Same precedence as upload(): explicit input > byFolder rule > default.
+            visibility: resolveVisibility(deps.config.visibility, folder, input.visibility),
+            tokenVersion: 0,
+            variants: storedVariants,
+            tags: [],
+            metadata: {},
+            ...(organizationId && { organizationId }),
+            ...(input.expiresAt && { expiresAt: input.expiresAt }),
+            ...(input.width !== undefined && { width: input.width }),
+            ...(input.height !== undefined && { height: input.height }),
+            ...(clientAspectRatio !== undefined && { aspectRatio: clientAspectRatio }),
+            ...(input.thumbhash !== undefined && { thumbhash: input.thumbhash }),
+            ...(input.dominantColor !== undefined && { dominantColor: input.dominantColor }),
+          },
+          transactionContext,
+        ),
+      );
+
+    const files = [
+      { key: input.key, bytes: actualSize },
+      ...storedVariants.map((variant) => ({ key: variant.key, bytes: variant.size })),
+    ];
+    let media = deps.repository.storageBudget
+      ? await deps.repository.storageBudget.commit(files, String(organizationId), (session) =>
+          create({ ...context, session }),
+        )
+      : await create(context);
 
     // Optional post-confirm processing (ThumbHash, dominant color, variants)
     if (input.process && deps.processor && isImage(effectiveMimeType)) {
@@ -740,6 +769,7 @@ export async function initiateMultipartUpload(
   input: InitiateMultipartInput,
   context?: OperationContext,
 ): Promise<MultipartUploadSession> {
+  assertBudgetedDirectOnly(deps.repository);
   const organizationId = requireTenant(deps, context);
 
   if (!deps.driver.createMultipartUpload) {
@@ -804,6 +834,7 @@ export async function signUploadPart(
   partNumber: number,
   expiresIn?: number,
 ): Promise<SignedPartResult> {
+  assertBudgetedDirectOnly(deps.repository);
   if (!deps.driver.signUploadPart) {
     throw new Error(`Driver '${deps.driver.name}' does not support part signing`);
   }
@@ -820,6 +851,7 @@ export async function signUploadParts(
   partNumbers: number[],
   expiresIn?: number,
 ): Promise<SignedPartResult[]> {
+  assertBudgetedDirectOnly(deps.repository);
   if (!deps.driver.signUploadPart) {
     throw new Error(`Driver '${deps.driver.name}' does not support part signing`);
   }
@@ -835,6 +867,7 @@ export async function completeMultipartUpload(
   input: CompleteMultipartInput,
   context?: OperationContext,
 ): Promise<IMediaDocument> {
+  assertBudgetedDirectOnly(deps.repository);
   if (!deps.driver.completeMultipartUpload) {
     throw new Error(`Driver '${deps.driver.name}' does not support multipart completion`);
   }
@@ -865,6 +898,7 @@ export async function completeMultipartUpload(
     // uploadId, but the DB row below is created from the raw input — these
     // checks are what keep it trustworthy.
     const keyShape = assertGeneratedKeyShape(input.key);
+    const folder = resolveUploadFolder(keyShape, deps.config.folders?.keyPrefix, input.folder);
     assertTenantBinding(keyShape.tenantSegment, organizationId);
     if (await deps.repository.isKeyRegistered(input.key)) throw keyInUse(input.key);
 
@@ -886,7 +920,6 @@ export async function completeMultipartUpload(
     const hash = etag || computeFileHash(Buffer.from(`${input.key}:${actualSize}`));
 
     // Folder from the key WITHOUT the tenant segment (same as confirmUpload)
-    const folder = input.folder || keyShape.folder || 'uploads';
     const url = deps.driver.getPublicUrl(input.key);
     const title = input.title || generateTitle(input.filename);
 
@@ -1092,6 +1125,7 @@ export async function generateBatchPutUrls(
   input: BatchPresignInput,
   context?: OperationContext,
 ): Promise<BatchPresignResult> {
+  assertBudgetedDirectOnly(deps.repository);
   if (!deps.driver.getSignedUploadUrl) {
     throw new Error(`Driver '${deps.driver.name}' does not support presigned uploads`);
   }

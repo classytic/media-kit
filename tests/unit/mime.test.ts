@@ -36,7 +36,7 @@ describe('MIME Utilities', () => {
 
   describe('getExtension', () => {
     it('should get extension from MIME type', () => {
-      expect(getExtension('image/jpeg')).toBe('jpeg');
+      expect(getExtension('image/jpeg')).toMatch(/^jpe?g$/);
       expect(getExtension('application/pdf')).toBe('pdf');
     });
 

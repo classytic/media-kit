@@ -1,3 +1,4 @@
+import type { StorageBudget } from '../storage-budget.js';
 /**
  * Media Repository — v3
  *
@@ -105,6 +106,7 @@ export { STALE_PENDING_MAX_AGE_MS } from './verbs/delete.verbs.js';
 // ── Repository Dependencies ──────────────────────────────────
 
 export interface MediaRepositoryDeps {
+  storageBudget?: StorageBudget;
   events: EventTransport;
   config: ResolvedMediaConfig;
   registry: DriverRegistry;
@@ -119,6 +121,7 @@ export interface MediaRepositoryDeps {
 // ── Repository Class ─────────────────────────────────────────
 
 export class MediaRepository extends Repository<IMediaDocument> {
+  public readonly storageBudget?: StorageBudget;
   /** @internal Exposed for verb modules (./verbs/*) — not part of the public API. */
   public readonly events: EventTransport;
   /** @internal Exposed for verb modules (./verbs/*) — not part of the public API. */
@@ -142,6 +145,7 @@ export class MediaRepository extends Repository<IMediaDocument> {
   ) {
     super(model, plugins, pagination);
     this.events = deps.events;
+    this.storageBudget = deps.storageBudget;
     this.registry = deps.registry;
     this.processor = deps.processor ?? null;
     this.processorReady = deps.processorReady ?? null;
@@ -852,6 +856,73 @@ export class MediaRepository extends Repository<IMediaDocument> {
   async isKeyRegistered(key: string): Promise<boolean> {
     const found = await this.Model.exists({ key });
     return found !== null;
+  }
+
+  /** Storage ownership must include derivatives and soft-deleted rows across all tenants. */
+  async isStorageKeyReferenced(key: string): Promise<boolean> {
+    return (await this.Model.exists({ $or: [{ key }, { 'variants.key': key }] }).maxTimeMS(5000)) !== null;
+  }
+
+  async purgeAbandonedUploads(limit = 100) {
+    const { purgeAbandonedUploads } = await import('../operations/abandoned-uploads.js');
+    return purgeAbandonedUploads(this, limit);
+  }
+
+  async scheduleCleanupByUrls(urls: readonly string[], ctx?: MediaContext): Promise<void> {
+    const { scheduleDetachedMedia } = await import('../operations/detached-media.js');
+    return scheduleDetachedMedia(this, urls, ctx);
+  }
+
+  async purgeDetachedMedia(before = new Date(), ctx?: MediaContext) {
+    const { purgeDetachedMedia } = await import('../operations/detached-media.js');
+    return purgeDetachedMedia(this, before, ctx);
+  }
+
+  async assertUnused(id: string, ctx?: MediaContext): Promise<void> {
+    if (!this.bridges.usage) return;
+    const media = await this.getById(id, { ...ctx, includeDeleted: true });
+    if (!media) return;
+    const urls = [media.url, ...(media.variants ?? []).map((variant) => variant.url)];
+    if (
+      await this.bridges.usage.inUse(id, urls, {
+        ...ctx,
+        ...(media.organizationId ? { organizationId: media.organizationId } : {}),
+      })
+    ) {
+      throw mediaError(
+        409,
+        MEDIA_ERROR_CODES.ASSET_IN_USE,
+        'Media is still referenced by a catalog or historical record.',
+      );
+    }
+  }
+
+  async unusedCandidates(input: { before: Date; limit: number; after?: string }, ctx: MediaContext) {
+    if (!this.bridges.usage) throw new Error('Unused-media discovery requires a usage bridge.');
+    if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100)
+      throw new Error('Candidate page size must be between 1 and 100.');
+    const rows = await this.findAll(
+      {
+        status: 'ready',
+        createdAt: { $lt: input.before },
+        ...(input.after ? { _id: { $gt: input.after } } : {}),
+      },
+      { ...ctx, sort: { _id: 1 }, limit: input.limit + 1 },
+    );
+    const page = rows.slice(0, input.limit);
+    const candidates = [];
+    for (const media of page) {
+      try {
+        await this.assertUnused(String(media._id), ctx);
+        candidates.push(media);
+      } catch (error) {
+        if (!(error instanceof Error && 'code' in error && error.code === 'media.in_use')) throw error;
+      }
+    }
+    return {
+      data: candidates,
+      next: rows.length > input.limit && page.length ? String(page[page.length - 1]!._id) : null,
+    };
   }
 
   /**

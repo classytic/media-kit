@@ -61,6 +61,7 @@ export interface S3ProviderConfig {
  * AWS S3 Storage Driver
  */
 export class S3Provider implements StorageDriver {
+  readonly exactUploadSize = true;
   readonly name = 's3';
   private client: S3Client | null = null;
   private config: S3ProviderConfig;
@@ -388,7 +389,12 @@ export class S3Provider implements StorageDriver {
   /**
    * Get presigned URL for direct browser uploads (PUT)
    */
-  async getSignedUploadUrl(key: string, contentType: string, expiresIn = 3600): Promise<PresignedUploadResult> {
+  async getSignedUploadUrl(
+    key: string,
+    contentType: string,
+    expiresIn = 3600,
+    options?: { size: number },
+  ): Promise<PresignedUploadResult> {
     const { PutObjectCommand } = await import('@aws-sdk/client-s3');
     const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
     const client = await this.getClient();
@@ -399,10 +405,14 @@ export class S3Provider implements StorageDriver {
       Bucket: this.config.bucket,
       Key: actualKey,
       ContentType: contentType,
+      ...(options ? { ContentLength: options.size } : {}),
       ...(this.config.acl && { ACL: this.config.acl }),
     });
 
-    const uploadUrl = await getSignedUrl(client, command, { expiresIn });
+    const uploadUrl = await getSignedUrl(client, command, {
+      expiresIn,
+      ...(options ? { signableHeaders: new Set(['content-length']) } : {}),
+    });
 
     return {
       uploadUrl,

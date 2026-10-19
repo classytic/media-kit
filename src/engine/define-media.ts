@@ -171,6 +171,7 @@ export function defineMedia(shape: MediaShape = {}): MediaBlueprint {
       const bridges = Object.freeze({ ...(runtime.bridges ?? {}) });
 
       const repositories = createMediaRepositories(models, {
+        ...(runtime.storageBudget ? { storageBudget: runtime.storageBudget } : {}),
         events,
         config: resolved,
         registry,

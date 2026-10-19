@@ -14,6 +14,7 @@ import type { LegacyProgressEventName } from './event-types.js';
 import { isAllowedMimeType } from '../utils/mime';
 import { isExternalMedia } from '../utils/external';
 import { detectDangerousMismatch } from '../utils/content-sniff';
+import { normalizeFolderPath } from '../utils/folders';
 import { MEDIA_ERROR_CODES, mediaError } from '../errors.js';
 
 /**
@@ -253,6 +254,23 @@ export function assertGeneratedKeyShape(key: string): GeneratedKeyShape {
   if (tenantSegment !== undefined && folderSegments.length === 0) fail('missing folder prefix');
 
   return { tenantSegment, folder: folderSegments.join('/') };
+}
+
+/** Enforce deployment ownership and keep storage prefixes out of logical folder metadata. */
+export function resolveUploadFolder(shape: GeneratedKeyShape, keyPrefix?: string, clientFolder?: string): string {
+  const prefix = normalizeKeyPrefix(keyPrefix);
+  if (prefix && !shape.folder.startsWith(`${prefix}/`)) {
+    const error = createError(403, 'Upload key belongs to a different storage prefix.');
+    error.code = 'media.confirm.prefix_mismatch';
+    throw error;
+  }
+  const folder = prefix ? shape.folder.slice(prefix.length + 1) : shape.folder;
+  if (clientFolder !== undefined && normalizeFolderPath(clientFolder) !== folder) {
+    const error = createError(400, 'Upload folder does not match its storage key.');
+    error.code = 'media.confirm.folder_mismatch';
+    throw error;
+  }
+  return folder;
 }
 
 /**

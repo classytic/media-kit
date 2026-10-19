@@ -1,6 +1,6 @@
 {
   "name": "@classytic/media-kit",
-  "version": "3.12.0",
+  "version": "3.13.0",
   "description": "Engine-factory media management for Mongoose and Arc — arc-compatible events, dynamic multi-tenancy, pluggable storage drivers, smart pagination, image processing",
   "type": "module",
   "sideEffects": false,
@@ -84,7 +84,15 @@
       "types": "./dist/types/config.d.mts",
       "import": "./dist/types/config.mjs"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./storage-budget": {
+      "types": "./dist/storage-budget.d.mts",
+      "import": "./dist/storage-budget.mjs"
+    },
+    "./storage-budget/mongo": {
+      "types": "./dist/repositories/storage-budget.store.d.mts",
+      "import": "./dist/repositories/storage-budget.store.mjs"
+    }
   },
   "files": [
     "dist",
@@ -103,7 +111,7 @@
     "test:bench": "vitest bench --run",
     "test:watch": "vitest --project unit --project integration",
     "test:cleanup": "npx tsx tests/cleanup-s3-test-files.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.storage-tests.json",
     "lint": "biome check src/",
     "lint:fix": "biome check src/ --write",
     "check": "biome ci src/ --diagnostic-level=error",
@@ -152,16 +160,16 @@
     "url": "https://github.com/classytic/media-kit/issues"
   },
   "peerDependencies": {
-    "@aws-sdk/client-s3": ">=3.1014.0",
-    "@aws-sdk/s3-request-presigner": ">=3.1014.0",
-    "@classytic/mongokit": ">=3.41.0",
-    "@classytic/primitives": ">=0.32.0",
-    "@classytic/repo-core": ">=0.31.0",
-    "@google-cloud/storage": ">=7.19.0",
+    "@aws-sdk/client-s3": ">=3.1152.0",
+    "@aws-sdk/s3-request-presigner": ">=3.1152.0",
+    "@classytic/mongokit": ">=3.43.0",
+    "@classytic/primitives": ">=0.34.0",
+    "@classytic/repo-core": ">=0.31.1",
+    "@google-cloud/storage": ">=8.4.0",
     "mime-types": ">=3.0.2",
-    "mongoose": ">=9.11.0",
-    "sharp": ">=0.34.5",
-    "zod": ">=4.0.0"
+    "mongoose": ">=9.11.2",
+    "sharp": ">=0.35.5",
+    "zod": ">=4.6.7"
   },
   "peerDependenciesMeta": {
     "sharp": {
@@ -182,14 +190,14 @@
   },
   "devDependencies": {
     "@arethetypeswrong/core": ">=0.18.2",
-    "@aws-sdk/client-s3": ">=3.1014.0",
-    "@aws-sdk/s3-request-presigner": ">=3.1014.0",
+    "@aws-sdk/client-s3": "^3.1152.0",
+    "@aws-sdk/s3-request-presigner": "^3.1152.0",
     "@biomejs/biome": "^2.5.2",
     "@classytic/dev-tools": "^0.2.1",
-    "@classytic/mongokit": "^3.42.0",
-    "@classytic/primitives": "^0.33.0",
+    "@classytic/mongokit": "^3.43.0",
+    "@classytic/primitives": "^0.34.0",
     "@classytic/repo-core": "^0.31.1",
-    "@google-cloud/storage": ">=7.19.0",
+    "@google-cloud/storage": "^8.4.0",
     "@types/mime-types": ">=3.0.1",
     "@types/node": ">=22.0.0",
     "@vitest/coverage-v8": ">=4.1.0",
@@ -197,12 +205,12 @@
     "mongodb-memory-server": ">=10.0.0",
     "mongoose": "^9.11.2",
     "publint": ">=0.3.18",
-    "sharp": "^0.35.3",
+    "sharp": "^0.35.5",
     "tsdown": "^0.22.14",
     "tsx": ">=4.20.0",
     "typescript": ">=5.0.0",
     "vitest": ">=4.1.0",
-    "zod": ">=4.0.0"
+    "zod": "^4.6.7"
   },
   "engines": {
     "node": ">=22.0.0"

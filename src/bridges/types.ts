@@ -6,8 +6,10 @@ import type { SourceBridge } from './source.bridge.js';
 import type { ScanBridge } from './scan.bridge.js';
 import type { CdnBridge } from './cdn.bridge.js';
 import type { TransformBridge } from './transform.bridge.js';
+import type { MediaUsageBridge } from './usage.bridge.js';
 
 export interface MediaBridges {
+  usage?: MediaUsageBridge;
   /** Resolve polymorphic sourceId/sourceModel refs to external entities. */
   source?: SourceBridge;
   /** Scan uploaded buffers for viruses/NSFW/policy violations. */

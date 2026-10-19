@@ -1,3 +1,4 @@
+import { assertBudgetedDirectOnly } from '../../operations/storage-budget.js';
 /**
  * Upload verbs — upload, uploadMany, replace (+ the internal upload pipeline).
  *
@@ -44,6 +45,7 @@ export async function uploadVerb(
   input: UploadInput,
   ctx?: MediaContext,
 ): Promise<IMediaDocument> {
+  assertBudgetedDirectOnly(repo);
   const { buffer, filename, mimeType } = input;
 
   // Validate
@@ -189,6 +191,7 @@ export async function replaceVerb(
   input: UploadInput,
   ctx?: MediaContext,
 ): Promise<IMediaDocument> {
+  assertBudgetedDirectOnly(repo);
   // replace() writes the new object THEN deletes the old one — neither storage
   // side can roll back with a host transaction. Accepting a ctx.session would
   // imply atomicity the package can't deliver (an aborted tx would leave the DB

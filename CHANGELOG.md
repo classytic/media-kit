@@ -3,6 +3,16 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 3.13.0 — 2026-10-19
+
+### Changed — peer floors to the latest published
+
+mongokit `>=3.43.0`, primitives `>=0.34.0`, repo-core `>=0.31.1`, mongoose `>=9.11.2`, zod `>=4.6.7`, `@aws-sdk/client-s3` and `s3-request-presigner` `>=3.1152.0`, `@google-cloud/storage >=8.4.0`, sharp `>=0.35.5`.
+
+### Added
+
+Add `./storage-budget` and `./storage-budget/mongo`: guarded byte reservations, exact-length signed uploads, transactional confirmation, and retry-safe accounting. Track abandoned uploads and detached media, protect referenced assets through a usage bridge, and release bytes only after storage deletion succeeds. Preserve configured key prefixes and verify prefix/folder ownership during confirmation.
+
 ## 3.12.0 — 2026-10-17
 
 ### Added: `getSignedReadUrl(key, expiresIn, { responseType, responseDisposition })`

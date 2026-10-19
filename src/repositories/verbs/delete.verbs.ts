@@ -58,6 +58,7 @@ export async function hardDeleteVerb(repo: MediaRepository, id: string, ctx?: Me
   // caller would record as a successful idempotent no-op.
   const media = await repo.getById(id, { ...ctx, includeDeleted: true, throwOnNotFound: false });
   if (!media) return false;
+  await repo.assertUnused(id, ctx);
 
   // Two-phase tombstone: claim `status: 'deleting'` BEFORE any storage delete.
   // If the process crashes mid-delete, what's left is a visible tombstone —
@@ -96,6 +97,7 @@ export async function hardDeleteVerb(repo: MediaRepository, id: string, ctx?: Me
     for (const key of [media.key, ...variantKeys]) {
       try {
         await driver.delete(key);
+        await repo.storageBudget?.release(key);
       } catch (err) {
         firstDeleteError ??= err as Error;
         repo._log('warn', 'Failed to delete object from storage (tombstone retained)', {

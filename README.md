@@ -441,12 +441,18 @@ Three code-driven sweeps remove storage + DB together — schedule each as a cro
 - `purgeExpired(before?)` — docs whose `expiresAt` has passed. Hourly/daily cron depending on how tight your expiry semantics are.
 - `purgeStalePending(olderThan?)` — `status: 'pending'` rows left by crashed/abandoned uploads, older than 24h by default (`STALE_PENDING_MAX_AGE_MS`). Daily cron; tolerates missing storage objects.
 
-Deliberately NOT swept: abandoned **presigned** uploads. An unconfirmed presigned
-upload leaves an object in the bucket with NO DB row (`confirmUpload()` creates the
-row), so no DB-driven sweep can see it. The correct remedy is a storage-lifecycle
-rule on the upload prefix — S3: `AbortIncompleteMultipartUpload` + an expiration
-rule scoped to the presign folder; GCS: a lifecycle age rule. media-kit deliberately
-does not implement bucket GC.
+Presigned uploads are tracked when a `StorageBudget` is configured. Compose
+`createMongoStorageBudget` from `@classytic/media-kit/storage-budget/mongo`, pass it
+as `runtime.storageBudget`, and schedule `purgeAbandonedUploads()`. Both main and
+variant bytes reserve capacity before signing; confirmation retains allocations
+atomically with the media row. Cleanup deletes storage before releasing capacity.
+Without a budget, unconfirmed presigned uploads have no database allocation and
+require external storage reconciliation. Never expire confirmed product images
+with a blanket bucket age rule.
+
+Use `scheduleCleanupByUrls()` to mark detached images and `purgeDetachedMedia()`
+after the grace period. Configure `bridges.usage.inUse` to protect catalog and
+historical references. `hardDelete()` uses the same reference guard.
 
 Since 3.5.0 the soft-delete Mongo TTL index is opt-in (`softDelete.ttlIndex: true`)
 because Mongo TTL deletion fires without hooks and orphans the storage blob — see

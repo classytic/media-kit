@@ -1,3 +1,4 @@
+import type { StorageBudget } from '../storage-budget.js';
 /**
  * Repository Factory — composes plugins and creates repositories.
  */
@@ -26,6 +27,7 @@ export interface MediaRepositories {
 }
 
 export interface CreateRepositoriesDeps {
+  storageBudget?: StorageBudget;
   events: EventTransport;
   config: ResolvedMediaConfig;
   registry: DriverRegistry;
@@ -112,6 +114,7 @@ export function createMediaRepositories(models: MediaModels, deps: CreateReposit
     plugins,
     {
       events: deps.events,
+      ...(deps.storageBudget ? { storageBudget: deps.storageBudget } : {}),
       config: deps.config,
       registry: deps.registry,
       processor: deps.processor ?? null,

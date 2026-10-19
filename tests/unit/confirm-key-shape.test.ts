@@ -1,10 +1,16 @@
 import { describe, it, expect } from 'vitest';
-import { generateKey, generateScopedKey, tenantKeySegment, assertGeneratedKeyShape } from '../../src/operations/helpers';
+import { generateKey, generateScopedKey, tenantKeySegment, assertGeneratedKeyShape, resolveUploadFolder } from '../../src/operations/helpers';
 
 const VALID_BASENAME = `${Date.now()}-abcdef012345-photo.jpg`;
 const ORG = '507f1f77bcf86cd799439011';
 
 describe('assertGeneratedKeyShape', () => {
+  it('keeps the deployment prefix in object keys and out of folder metadata', () => {
+    const shape = assertGeneratedKeyShape(generateScopedKey('photo.webp', 'products', ORG, 'brihot/store/test'));
+    expect(resolveUploadFolder(shape, 'brihot/store/test')).toBe('products');
+    expect(() => resolveUploadFolder(shape, 'brihot/store/prod')).toThrow('different storage prefix');
+    expect(() => resolveUploadFolder(shape, 'brihot/store/test', 'categories')).toThrow('folder does not match');
+  });
   it('accepts keys produced by generateKey (incl. nested folders + weird filenames)', () => {
     for (const [filename, folder] of [
       ['photo.jpg', 'uploads'],

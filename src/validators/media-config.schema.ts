@@ -41,6 +41,7 @@ export const fileTypesSchema = z.object({
 });
 
 export const folderSchema = z.object({
+  keyPrefix: z.string().optional(),
   defaultFolder: z.string().optional().default('general'),
   contentTypeMap: z.record(z.string(), z.array(z.string())).optional().default({}),
   enableSubfolders: z.boolean().optional().default(true),
