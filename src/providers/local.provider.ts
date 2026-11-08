@@ -105,6 +105,7 @@ function bareMime(contentType: string | undefined): string {
  */
 export class LocalProvider implements StorageDriver {
   readonly name = 'local';
+  readonly exactUploadSize?: boolean;
   private basePath: string;
   private baseUrl: string;
 
@@ -118,7 +119,9 @@ export class LocalProvider implements StorageDriver {
         config: presign,
         signer: createUrlSigner({ secret: presign.secret, defaultTtl: presign.defaultExpiresIn ?? 900 }),
       };
-      this.getSignedUploadUrl = (key, contentType, expiresIn) => this.signUpload(key, contentType, expiresIn);
+      this.exactUploadSize = true;
+      this.getSignedUploadUrl = (key, contentType, expiresIn, options) =>
+        this.signUpload(key, contentType, expiresIn, options);
     }
   }
 
@@ -128,7 +131,12 @@ export class LocalProvider implements StorageDriver {
    * Present only when `presign.enabled === true`. Absent otherwise, so capability checks
    * (`if (!driver.getSignedUploadUrl)`) see a non-presigning driver.
    */
-  getSignedUploadUrl?: (key: string, contentType: string, expiresIn?: number) => Promise<PresignedUploadResult>;
+  getSignedUploadUrl?: (
+    key: string,
+    contentType: string,
+    expiresIn?: number,
+    options?: { size: number },
+  ) => Promise<PresignedUploadResult>;
 
   /** Unix seconds from the injected clock. */
   private presignNow(): number {
@@ -136,14 +144,22 @@ export class LocalProvider implements StorageDriver {
     return Math.floor((clock ? clock().getTime() : Date.now()) / 1000);
   }
 
-  private async signUpload(key: string, contentType: string, expiresIn?: number): Promise<PresignedUploadResult> {
+  private async signUpload(
+    key: string,
+    contentType: string,
+    expiresIn?: number,
+    options?: { size: number },
+  ): Promise<PresignedUploadResult> {
     const signer = this.presign!.signer;
     this.resolvePath(key); // refuse a traversal key before signing it
+    if (options && (!Number.isSafeInteger(options.size) || options.size <= 0)) {
+      throw mediaError(400, MEDIA_ERROR_CODES.UPLOAD_SIZE_MISMATCH, 'Upload size must be a positive safe integer');
+    }
     const ct = bareMime(contentType);
     const now = this.presignNow();
     const { query, expiresAt } = signer.sign({
       id: key,
-      claims: { op: PUT_CLAIM_OP, ct },
+      claims: { op: PUT_CLAIM_OP, ct, ...(options ? { size: String(options.size) } : {}) },
       now,
       ...(expiresIn !== undefined && { expiresIn }),
     });
@@ -207,6 +223,12 @@ export class LocalProvider implements StorageDriver {
       throw mediaError(413, MEDIA_ERROR_CODES.FILE_TOO_LARGE, `Upload exceeds ${maxBytes} bytes`, {
         maxSize: maxBytes,
       });
+    }
+    if (params['c.size'] !== undefined) {
+      const expected = Number(params['c.size']);
+      if (!Number.isSafeInteger(expected) || expected <= 0 || bytes.length !== expected) {
+        throw mediaError(400, MEDIA_ERROR_CODES.UPLOAD_SIZE_MISMATCH, 'Upload body must match the signed byte length');
+      }
     }
 
     const result = await this.write(key, bytes, signedType);

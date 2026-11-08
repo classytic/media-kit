@@ -237,22 +237,23 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
    * Pinned by `tests/integration/confirm-key-ownership-race.test.ts`, which
    * fails when this index is removed.
    *
-   * ## Why it is declared AFTER the tenant injection
+   * ## Scope: per tenant when tenancy is on, global when it is off
    *
-   * `injectTenantField()` prepends the tenant key to every index declared
-   * before it, so above that call this silently becomes `{organizationId, key}`
-   * — per-tenant uniqueness wearing the same name.
+   * With a field-scoped tenant this is `{ <tenantField>, key }`: the tenant
+   * field leads, like every other index here. It used to be GLOBAL on purpose
+   * (defence in depth), and that made the collection IMPOSSIBLE to shard by
+   * tenant: MongoDB refuses `shardCollection` when a unique index does not
+   * start with the shard key (measured on a real sharded cluster:
+   * "can't shard collection ... with unique index on { key: 1 }").
    *
-   * BE HONEST ABOUT WHAT THAT BUYS: no current test distinguishes the two,
-   * because `assertTenantBinding()` already refuses a caller reaching for a key
-   * minted for another tenant, long before the index is consulted. Moving this
-   * declaration upward passes the whole suite. It is kept global as DEFENCE IN
-   * DEPTH — it still holds when tenancy is disabled, and for any key minted
-   * without a tenant segment, where the binding check has nothing to compare.
+   * What the global index bought is small: `assertTenantBinding()` already
+   * refuses a caller reaching for a key minted for another tenant, and the key
+   * itself embeds a `__t-<tenant>` segment plus a timestamp and random bytes,
+   * so two tenants cannot mint the same key in practice. The race this index
+   * exists to stop (two concurrent confirmations of one key INSIDE a tenant)
+   * is still stopped.
    *
-   * Do not read this as "the index is what stops cross-tenant claiming." The
-   * binding check is. An earlier draft of this comment claimed otherwise and
-   * the falsification run disproved it.
+   * Tenancy off: the index stays global, because there is no tenant to lead it.
    *
    * NOT partial, NOT filtered by `deletedAt`: a soft-deleted record still owns
    * its object, so the claim must survive until the bytes are actually gone.
@@ -261,7 +262,13 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
    * rather than skipping — the right outcome, since those duplicates are the
    * defect. Resolve them before deploying.
    */
-  schema.index({ key: 1 }, { unique: true, name: 'media_key_unique' });
+  if (tenant?.enabled && tenant.strategy === 'field') {
+    // New name: an existing deployment still holds the global `media_key_unique`, and Mongo refuses
+    // the same name with different keys. `syncIndexes()` drops the old one and builds this.
+    schema.index({ [tenant.tenantField]: 1, key: 1 }, { unique: true, name: 'media_key_tenant_unique' });
+  } else {
+    schema.index({ key: 1 }, { unique: true, name: 'media_key_unique' });
+  }
 
   return schema;
 }

@@ -1,0 +1,30 @@
+# @classytic/media-kit
+
+Media engine for Mongoose and arc: storage providers, presigned uploads, dedup, variants, private signed serving. Skill: skills/media-kit/SKILL.md.
+Verbs live on `engine.repositories.media` (a mongokit Repository), not on the engine.
+
+| Need | Use |
+|---|---|
+| Create the engine | `defineMedia(shape).bind(connection, runtime)` |
+| Local disk (dev) | `LocalProvider` from `@classytic/media-kit/providers/local` |
+| GCS bucket | `GCSProvider` from `@classytic/media-kit/providers/gcs` (set `makePublic: false` for private) |
+| S3, R2, MinIO | `S3Provider` from `@classytic/media-kit/providers/s3` |
+| Several backends by key prefix | `StorageRouter` from `@classytic/media-kit/providers/router` |
+| Browser uploads straight to storage | `repo.getSignedUploadUrl`, then `repo.confirmUpload` |
+| Multipart or resumable large files | `repo.initiateMultipartUpload`, `createTusUpload` |
+| Skip uploading a known file | `deduplication` config, `repo.existsByHash` |
+| Private file, expiring link | `repo.getSignedAssetUrl`, `repo.revokeAccess`, `signing` config |
+| Serve route with Range and variants | `createAssetTransform` from `@classytic/media-kit/transforms` |
+| Sign URLs outside the engine | `createUrlSigner` from `@classytic/media-kit/signing` |
+| Thumbnails, webp, ThumbHash | `processing` config (needs `sharp`) |
+| Per-tenant storage quota | `createMongoStorageBudget` from `@classytic/media-kit/storage-budget/mongo` |
+| Delete media with its owner | `withMediaCascade` |
+| Block deleting referenced media | `bridges.usage` |
+| Image for a vision model | `repo.getContextPayload` |
+| Third-party URL as a record | `repo.registerExternal` |
+| Validate request bodies | `uploadInputSchema`, `confirmUploadSchema` from `@classytic/media-kit/schemas` |
+| React to uploads | `MEDIA_EVENTS` via `engine.events.subscribe` |
+| Map failures | `MEDIA_ERROR_CODES` |
+| Scheduled cleanup | `repo.purgeDeleted`, `repo.purgeStalePending`, `repo.purgeExpired` |
+
+Details: references/uploads.md, serving-private.md, engine-config.md. Client compression: skill media-transform.

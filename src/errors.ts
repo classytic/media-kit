@@ -32,6 +32,8 @@ export const MEDIA_ERROR_CODES = {
   UPLOAD_SIGNATURE_INVALID: 'media.upload.signature_invalid',
   /** HTTP 415: the PUT's `Content-Type` differs from the signed one. */
   UPLOAD_CONTENT_TYPE_MISMATCH: 'media.upload.content_type_mismatch',
+  /** HTTP 400: the PUT body does not match the signed byte length. */
+  UPLOAD_SIZE_MISMATCH: 'media.upload.size_mismatch',
   /** HTTP 404: the LocalProvider receiver was mounted but presign is not enabled. */
   UPLOAD_RECEIVER_DISABLED: 'media.upload.receiver_disabled',
   /** HTTP 400: a storage key that resolves outside the storage root. */

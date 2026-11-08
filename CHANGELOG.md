@@ -3,6 +3,24 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 3.14.0 — 2026-11-08
+
+### ⚠ Changed - the key-ownership unique index is per tenant when tenancy is on
+
+`media_key_unique` (one record may own a storage key) was a GLOBAL unique index, which made the collection impossible to shard by tenant: MongoDB refuses `shardCollection` when a unique index does not start with the shard key (measured on a real sharded cluster). With a field-scoped tenant it is now `{ <tenantField>, key }`, named `media_key_tenant_unique`; with tenancy off it stays global. The cross-tenant guard is unchanged: `assertTenantBinding()` refuses a foreign tenant's key, and the key embeds `__t-<tenant>`, a timestamp and random bytes. Run `syncIndexes()` once: it drops the old index and builds the new one. `tests/integration/tenant-prefixed-uniques.test.ts` fails if any unique index loses the tenant prefix.
+
+### Fixed - `purgeDeleted()` and `purgeStalePending()` drained one page
+
+Both read a single `getAll()` page (10 rows), so one call removed ten rows however large the backlog: a daily cron cleared ten files a day and the storage objects behind the rest were never freed. They now walk every candidate with a forward-only `_id` cursor in batches of 100 (as `purgeExpired` already did); a delete that fails stays behind the cursor and is not retried. `tests/integration/purge-drains-backlog.test.ts` (10 of 250 and 10 of 130 on the old code).
+
+### Added - `LocalProvider` signs an exact upload size
+
+`getSignedUploadUrl(key, contentType, expiresIn, { size })` binds the exact byte count into the signed claims, and `acceptSignedUpload` refuses a body of another length with `media.upload.size_mismatch` (400) before writing. `exactUploadSize` advertises it. This is what quota-managed uploads need from a local driver.
+
+### Changed - peer floors to the latest published
+
+`@classytic/mongokit >=3.45.0` (time bounds are server-side `maxTimeMS`; the MongoDB driver 7.8 under mongoose 9.12 ignores `timeoutMS`, so do not pass it to `mongoose.connect()`), `@classytic/primitives >=0.37.0`, `@classytic/repo-core >=0.38.0`, `mongoose >=9.12.0`, `@aws-sdk/client-s3` and `s3-request-presigner` `>=3.1164.0`. Dev toolchain: tsdown 0.23.7, Biome 2.6.6. The scale design for media is in `spine/docs/scale-media.md`.
+
 ## 3.13.0 — 2026-10-19
 
 ### Changed — peer floors to the latest published

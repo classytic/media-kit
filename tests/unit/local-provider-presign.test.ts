@@ -74,6 +74,27 @@ describe('activation', () => {
 });
 
 describe('acceptSignedUpload', () => {
+  it('binds quota uploads to the signed byte count and refuses changed claims before writing', async () => {
+    const p = provider({});
+    expect(p.exactUploadSize).toBe(true);
+    const target = await p.getSignedUploadUrl!(KEY, 'image/png', 60, { size: 3 });
+    const query = Object.fromEntries(new URL(target.uploadUrl).searchParams);
+    expect(query['c.size']).toBe('3');
+    for (const body of [Buffer.from('xx'), Buffer.from('xxxx')]) {
+      expect(await rejection(p.acceptSignedUpload({ query, contentType: 'image/png', body }))).toEqual({ status: 400, code: 'media.upload.size_mismatch' });
+      expect(await p.exists(KEY)).toBe(false);
+    }
+    expect(await rejection(p.acceptSignedUpload({ query: { ...query, 'c.size': '4' }, contentType: 'image/png', body: Buffer.from('xxxx') }))).toEqual({ status: 403, code: 'media.upload.signature_invalid' });
+    expect(await p.acceptSignedUpload({ query, contentType: 'image/png', body: Buffer.from('png') })).toEqual({ key: KEY, size: 3 });
+  });
+
+  it('refuses invalid exact sizes at signing and advertises no size capability when disabled', async () => {
+    expect(provider().exactUploadSize).toBeUndefined();
+    for (const size of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(await rejection(provider({}).getSignedUploadUrl!(KEY, 'image/png', 60, { size }))).toEqual({ status: 400, code: 'media.upload.size_mismatch' });
+    }
+  });
+
   it('writes the body at the signed key', async () => {
     const p = provider({});
     const { query } = await signedQuery(p);

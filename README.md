@@ -275,6 +275,8 @@ Each driver supports: `write`, `read`, `delete`, `exists`, `stat`, `copy` (optio
 
 `LocalProvider` can presign, so the two-phase upload (`getSignedUploadUrl` → client PUT → `confirmUpload`) runs without a bucket. The URL points at a route on **your** API, HMAC-signed (key, Content-Type, expiry), and the provider's framework-agnostic receiver writes the body:
 
+With presigning enabled, LocalProvider supports quota-managed uploads: the optional fourth argument `{ size }` signs the exact byte count, and the receiver refuses a different body length before writing.
+
 ```ts
 const local = new LocalProvider({
   basePath: './uploads',

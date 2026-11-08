@@ -180,6 +180,43 @@ export async function hardDeleteManyVerb(
   return result;
 }
 
+/** Rows read per round-trip by the purge sweeps. */
+const PURGE_BATCH = 100;
+
+/**
+ * Visit EVERY row matching `filters`, `PURGE_BATCH` at a time, in `_id` order.
+ *
+ * The cursor only moves forward (`_id > lastId`), so each candidate is visited exactly once and the
+ * loop ends on a short page, whether a visit deleted the row or failed and left it behind. The old
+ * purges read ONE `getAll()` page (10 rows by default), so a daily cron removed ten rows a day and a
+ * backlog never drained; `purgeExpired` already used this cursor.
+ */
+async function forEachCandidate(
+  repo: MediaRepository,
+  filters: Record<string, unknown>,
+  readOpts: Record<string, unknown>,
+  visit: (id: string) => Promise<void>,
+): Promise<void> {
+  let lastId: unknown;
+  while (true) {
+    const found = await repo.getAll(
+      {
+        filters: { ...filters, ...(lastId !== undefined ? { _id: { $gt: lastId } } : {}) },
+        sort: { _id: 1 },
+        pagination: { limit: PURGE_BATCH, page: 1 },
+      },
+      readOpts,
+    );
+    const docs = (Array.isArray(found) ? found : (found as { data: unknown[] }).data) as Array<{ _id: unknown }>;
+    if (docs.length === 0) return;
+    for (const doc of docs) {
+      lastId = doc._id; // advance even when the visit fails, so a stuck row is skipped, not retried forever
+      await visit(String(doc._id));
+    }
+    if (docs.length < PURGE_BATCH) return;
+  }
+}
+
 /**
  * Purge soft-deleted files older than a given date.
  * Hard-deletes from both storage and database.
@@ -190,22 +227,20 @@ export async function purgeDeletedVerb(repo: MediaRepository, olderThan?: Date, 
   // returns soft-deleted rows (the whole point of the purge); multiTenant
   // still scopes by configured field. We pass the deletedAt filter
   // explicitly because we want only docs older than the cutoff.
-  const found = await repo.getAll({ filters: { deletedAt: { $ne: null, $lt: cutoff } } }, {
-    lean: true,
-    includeDeleted: true,
-    ...repo._tenantOpts(ctx),
-  } as Record<string, unknown>);
-  const docs = (Array.isArray(found) ? found : (found as { data: unknown[] }).data) as Array<{ _id: unknown }>;
-
   let purged = 0;
-  for (const doc of docs) {
-    try {
-      await repo.hardDelete(String(doc._id), ctx);
-      purged++;
-    } catch {
-      repo._log('warn', 'Failed to purge soft-deleted file', { id: String(doc._id) });
-    }
-  }
+  await forEachCandidate(
+    repo,
+    { deletedAt: { $ne: null, $lt: cutoff } },
+    { lean: true, includeDeleted: true, ...repo._tenantOpts(ctx) } as Record<string, unknown>,
+    async (id) => {
+      try {
+        await repo.hardDelete(id, ctx);
+        purged++;
+      } catch {
+        repo._log('warn', 'Failed to purge soft-deleted file', { id });
+      }
+    },
+  );
 
   if (purged > 0) {
     await repo.events.publish(
@@ -260,24 +295,20 @@ export async function purgeStalePendingVerb(
   //                  re-driving hardDelete finishes the storage + DB removal
   //                  (idempotent — the doc is already claimed 'deleting').
   // Neither is ever soft-deleted, so no `includeDeleted` needed.
-  const found = await repo.getAll(
-    { filters: { status: { $in: ['pending', 'deleting'] }, createdAt: { $lt: cutoff } } },
-    {
-      lean: true,
-      ...repo._tenantOpts(ctx),
-    } as Record<string, unknown>,
-  );
-  const docs = (Array.isArray(found) ? found : (found as { data: unknown[] }).data) as Array<{ _id: unknown }>;
-
   let purged = 0;
-  for (const doc of docs) {
-    try {
-      await repo.hardDelete(String(doc._id), ctx);
-      purged++;
-    } catch {
-      repo._log('warn', 'Failed to purge stale pending upload', { id: String(doc._id) });
-    }
-  }
+  await forEachCandidate(
+    repo,
+    { status: { $in: ['pending', 'deleting'] }, createdAt: { $lt: cutoff } },
+    { lean: true, ...repo._tenantOpts(ctx) } as Record<string, unknown>,
+    async (id) => {
+      try {
+        await repo.hardDelete(id, ctx);
+        purged++;
+      } catch {
+        repo._log('warn', 'Failed to purge stale pending upload', { id });
+      }
+    },
+  );
 
   if (purged > 0) {
     await repo.events.publish(
