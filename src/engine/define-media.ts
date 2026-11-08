@@ -48,6 +48,7 @@ export function defineMedia(shape: MediaShape = {}): MediaBlueprint {
       : {}),
     ...(shape.schemaOptions?.extraIndexes !== undefined ? { extraIndexes: shape.schemaOptions.extraIndexes } : {}),
     ...(shape.schemaOptions?.collection !== undefined ? { collection: shape.schemaOptions.collection } : {}),
+    ...(shape.schemaOptions?.textIndex !== undefined ? { textIndex: shape.schemaOptions.textIndex } : {}),
     ...(shape.schemaOptions?.optimizedIndexes !== undefined
       ? { optimizedIndexes: shape.schemaOptions.optimizedIndexes }
       : {}),

@@ -100,6 +100,13 @@ export interface MediaShape {
     extraIndexes?: Array<Record<string, 1 | -1 | 'text'>>;
     collection?: string;
     optimizedIndexes?: boolean;
+    /**
+     * Build the MongoDB text index (`media_text_search`: title, tags, description, original filename).
+     * Default `false`. Nothing in media-kit or `@spinekit/media` queries with `$text` (spine's list
+     * search is a regex over `filename`/`title`/`tags`, which a text index cannot serve), and the index
+     * costs roughly a third of insert time (measured). Turn it on only for a host that calls `$text`.
+     */
+    textIndex?: boolean;
   };
 
   /** Mongoose auto-index builds. Default `true` (dev); pass `false` in prod (§35). */

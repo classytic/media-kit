@@ -34,6 +34,8 @@ export interface MediaSchemaConfig {
   extraIndexes?: Array<Record<string, 1 | -1 | 'text'>>;
   collection?: string;
   optimizedIndexes?: boolean;
+  /** Build the `media_text_search` text index. Default `false` (see `schemaOptions.textIndex`). */
+  textIndex?: boolean;
 }
 
 export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaDocument> {
@@ -45,15 +47,17 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
     collection = 'media',
     optimizedIndexes = false,
   } = config;
+  /** A field-scoped tenant: single-field filter indexes would be tenant-blind, so they are declared tenant-led or not at all. */
+  const scoped = !!tenant?.enabled && tenant.strategy === 'field';
 
   const schemaDefinition: mongoose.SchemaDefinition = {
     // --- Identity (Directus triple-name pattern) ---
-    filename: { type: String, required: true, index: true },
+    filename: { type: String, required: true, ...(scoped ? {} : { index: true }) },
     originalFilename: { type: String, required: true },
     title: { type: String, required: true, default: '' },
 
     // --- Storage ---
-    mimeType: { type: String, required: true, index: true },
+    mimeType: { type: String, required: true, ...(scoped ? {} : { index: true }) },
     size: { type: Number, required: true },
     url: { type: String, required: true },
     /**
@@ -84,7 +88,7 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
       enum: ['public', 'private'],
       default: 'public',
       required: true,
-      index: true,
+      ...(scoped ? {} : { index: true }),
     },
     // Signed-URL revocation counter. revokeAccess() $inc's it; every
     // outstanding signed URL (which embeds the version it was minted with)
@@ -95,7 +99,7 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
     // No field-level index — the { folder, createdAt } compound serves
     // folder-prefix queries; a bare single is a redundant prefix (P11.1).
     folder: { type: String, default: 'general', required: true },
-    tags: { type: [String], default: [], index: true },
+    tags: { type: [String], default: [], ...(scoped ? {} : { index: true }) },
     alt: String,
     description: String,
 
@@ -144,7 +148,7 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
     // operations (delete, read, stat) in multi-provider setups. Absent on
     // docs created before multi-provider was introduced — those fall back to
     // the engine's defaultProvider at query time.
-    provider: { type: String, index: true },
+    provider: { type: String, ...(scoped ? {} : { index: true }) },
 
     // Provider-specific write metadata (fileId, etag, dimensions, etc.).
     // Stored as-is; not normalized across providers.
@@ -161,7 +165,7 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
     sourceModel: { type: String, index: true },
 
     // --- Audit ---
-    uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+    uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', ...(scoped ? {} : { index: true }) },
 
     // --- Additional fields from config ---
     ...extraFields,
@@ -176,10 +180,19 @@ export function buildMediaSchema(config: MediaSchemaConfig = {}): Schema<IMediaD
   schema.index({ status: 1, createdAt: -1 });
   schema.index({ folder: 1, createdAt: -1 });
   schema.index({ createdAt: -1, _id: -1 });
-  schema.index(
-    { title: 'text', tags: 'text', description: 'text', originalFilename: 'text' },
-    { name: 'media_text_search' },
-  );
+  // Tenant-scoped: the planner never chose a tenant-blind `mimeType`/`visibility`/`tags`/`provider`/`uploadedBy`
+  // index for a tenant-filtered list (it uses `{tenant, createdAt, _id}`; measured on 3 x 40k rows), and each
+  // one is paid on every insert, so those five are not created. `filename` IS used (exact filter, sort), but a
+  // tenant-blind one scans every tenant's names in order; declared here, BEFORE the tenant injection, it becomes
+  // `{tenant, filename}`. With tenancy off the path-level indexes above are unchanged.
+  if (scoped) schema.index({ filename: 1 });
+  // Opt-in: no query here uses `$text` and the index is about a third of insert time (measured).
+  if (config.textIndex === true) {
+    schema.index(
+      { title: 'text', tags: 'text', description: 'text', originalFilename: 'text' },
+      { name: 'media_text_search' },
+    );
+  }
 
   // Note: tenant-scoped compound indexes for folder / status queries are
   // formed automatically by injectTenantField() below — it prepends the

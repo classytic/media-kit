@@ -32,6 +32,8 @@ export interface DefineMediaModelsConfig {
   extraIndexes?: MediaSchemaConfig['extraIndexes'];
   collection?: string;
   optimizedIndexes?: boolean;
+  /** Build the text index. Default `false`: no media-kit or spine-media query uses `$text`. */
+  textIndex?: boolean;
   /** Mongoose auto-index builds. Default `true` (dev); pass `false` in prod (§35). */
   autoIndex?: boolean;
   /** On a name collision: `false` (default) throws; `true` re-registers (test/dev fixtures). */
@@ -58,6 +60,7 @@ export function defineMediaModels(config: DefineMediaModelsConfig = {}): ModelBl
             ...(config.extraIndexes !== undefined ? { extraIndexes: config.extraIndexes } : {}),
             ...(config.collection !== undefined ? { collection: config.collection } : {}),
             ...(config.optimizedIndexes !== undefined ? { optimizedIndexes: config.optimizedIndexes } : {}),
+            ...(config.textIndex !== undefined ? { textIndex: config.textIndex } : {}),
           });
           schema.set('autoIndex', autoIndex);
           return schema;

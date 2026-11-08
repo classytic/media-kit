@@ -3,6 +3,21 @@
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adhering to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 3.15.0 — 2026-11-09
+
+### ⚠ Changed - a leaner default index set (about 41% less insert time on a tenant-scoped engine)
+
+Every insert maintains every index, so each unused one is a permanent write tax. The default index set is now what the read paths actually use, measured with the real tenant filters and sorts that `@spinekit/media` exposes (3 tenants x 40,000 rows, `explain('executionStats')`):
+
+- **Tenant-scoped engines no longer create `mimeType_1`, `visibility_1`, `tags_1`, `provider_1`, `uploadedBy_1`.** The planner never chose them for a tenant-filtered list; it used `{tenant, createdAt, _id}` with or without them, and the plans were equal or faster without.
+- **`filename` is `{ <tenantField>, filename }` instead of a tenant-blind `filename_1`.** It is used (exact lookup, sort by name), but a tenant-blind index scans every tenant's names in order, so its cost grows with the number of tenants. Without any `filename` index an exact lookup scanned the whole tenant (40,000 keys, 159 ms).
+- **The text index `media_text_search` is opt-in: `schemaOptions: { textIndex: true }`.** Nothing in media-kit or spine-media queries with `$text` (spine's list search is a regex over `filename`/`title`/`tags`, which a text index cannot serve), and the index alone was about a third of insert time. Applies with tenancy on or off.
+- **Tenancy off is otherwise unchanged:** the single-field indexes stay, because there is no tenant to lead them.
+
+Measured insert throughput (45,000 documents, alternating order, 5 rounds, warm-up discarded, one local mongod): 26,219 docs/s with the 3.14 index set, 44,352 docs/s with this one. Absolute numbers will differ on a replica set; the relative saving is what to expect.
+
+Migration: run `syncIndexes()` once. It drops the removed indexes and builds `{tenant, filename}`; the build takes time on a large collection, so schedule it. A host that calls `$text` sets `schemaOptions.textIndex: true` first. Sorting a tenant's list by `size` still has no supporting index (it scans and blocking-sorts the tenant, 153 ms at 40,000 rows); index it with `schemaOptions.extraIndexes` or stop exposing that sort. Pinned by `tests/integration/index-set.test.ts`.
+
 ## 3.14.0 — 2026-11-08
 
 ### ⚠ Changed - the key-ownership unique index is per tenant when tenancy is on
