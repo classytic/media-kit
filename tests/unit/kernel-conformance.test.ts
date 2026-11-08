@@ -57,6 +57,18 @@ describeKernelConformance<MediaBlueprint, MediaEngine>({
 
   connect: async () => mongoose.createConnection(),
 
+  // Tenancy ON: every unique index must lead with the tenant field (scale decision D7).
+  tenantUniques: {
+    tenantField: 'organizationId',
+    bindScoped: (connection) =>
+      kernel
+        .defineMedia({
+          autoIndex: false,
+          tenant: { enabled: true, fieldType: 'string', tenantField: 'organizationId', required: true },
+        } as never)
+        .bind(connection, { driver }),
+  },
+
   bind: (blueprint, connection) => blueprint.bind(connection, { driver }),
 
   expectedModelNames: ['Media'],
@@ -67,8 +79,7 @@ describeKernelConformance<MediaBlueprint, MediaEngine>({
    * `Either driver or providers must be specified` (src/engine/define-media.ts).
    * Without one the engine would accept uploads it has nowhere to put.
    */
-  bindWithUnmetRequirement: (connection) =>
-    kernel.defineMedia({ autoIndex: false } as never).bind(connection, {}),
+  bindWithUnmetRequirement: (connection) => kernel.defineMedia({ autoIndex: false } as never).bind(connection, {}),
 
   skip: [
     {

@@ -195,7 +195,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1164.0",
     "@biomejs/biome": "^2.6.6",
     "@classytic/dev-tools": "^0.2.1",
-    "@classytic/mongokit": "^3.45.0",
+    "@classytic/mongokit": "^3.46.0",
     "@classytic/primitives": "^0.37.0",
     "@classytic/repo-core": "^0.38.0",
     "@google-cloud/storage": "^8.4.0",
